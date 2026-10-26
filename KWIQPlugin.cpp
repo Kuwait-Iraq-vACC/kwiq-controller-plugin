@@ -361,7 +361,7 @@ static bool ShowNotice(Notice& n, int kind, const std::string& title, const std:
     DrawTextA(dc, body.c_str(), -1, &tr, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
     SelectObject(dc, old);
     ReleaseDC(nullptr, dc);
-    int bodyH = (std::max)((int)(tr.bottom - tr.top) + 12, NICON) + 2 * NPAD;
+    int bodyH = (std::max)((int)(tr.bottom - tr.top) + 12, (int)NICON) + 2 * NPAD;
 
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOPMOST | WS_EX_DLGMODALFRAME | WS_EX_NOACTIVATE;
     RECT rc = { 0, 0, NW, bodyH + NFOOT };
