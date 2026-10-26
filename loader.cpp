@@ -29,7 +29,7 @@ static CoreExitFn gCoreExit = nullptr;
 // Stands in when the plugin cannot be loaded, so EuroScope still gets a plugin and says nothing odd
 class CKWIQUnavailable : public EuroScopePlugIn::CPlugIn {
 public:
-    CKWIQUnavailable() : CPlugIn(EuroScopePlugIn::COMPATIBILITY_CODE, kTitle, "unavailable", "Kuwait & Iraq vACC", "GPL-3.0-or-later") {}
+    CKWIQUnavailable() : CPlugIn(EuroScopePlugIn::COMPATIBILITY_CODE, "KWIQ Controller Plugin (inactive)", "-", "Kuwait & Iraq vACC", "GPL-3.0-or-later") {}
 };
 static CKWIQUnavailable* gFallback = nullptr;
 
@@ -186,6 +186,14 @@ void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlug
     if (dir.empty()) dir = Here();                        // no %APPDATA%: keep it next to this file
     else dir += "\\plugin";
     std::string core = dir + "\\KWIQPluginCore.dll";
+    // Loaded twice (e.g. from both OKAC and ORBB in Other Set > Plug-ins): both copies would share one
+    // installed plugin, so the second stays idle
+    if (GetModuleHandleA(core.c_str())) {
+        MessageBoxA(nullptr, "The KWIQ Controller Plugin is loaded twice. Please remove one of them in Other Set > Plug-ins.",
+                    kTitle, MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        *ppPlugInInstance = gFallback = new CKWIQUnavailable();
+        return;
+    }
     if (dir != Here()) DeleteFileA((Here() + "\\KWIQPluginCore.dll").c_str());   // left next to this file by v0.5.0.11, which came as two files
     ExtractBuiltIn(core);
     CheckForUpdate(core);

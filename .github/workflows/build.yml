@@ -16,7 +16,8 @@ permissions:
 
 concurrency:
   group: build-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # A newer push replaces a pull request's test build, but a release from main is always finished
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
