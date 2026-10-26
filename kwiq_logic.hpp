@@ -511,4 +511,23 @@ inline bool IsApiKey(const std::string& k) {
 }
 inline std::string ApiKeyId(const std::string& k) { return IsApiKey(k) ? k.substr(5, 8) : std::string(); }
 
+// One query value from the first line of an HTTP request ("GET /?key=...&state=... HTTP/1.1").
+// Only letters, digits and _ are expected, so no decoding is done; anything else gives "".
+inline std::string QueryValue(const std::string& request, const std::string& name) {
+    size_t end = request.find_first_of("\r\n");
+    std::string line = request.substr(0, end);
+    size_t q = line.find('?');
+    if (line.compare(0, 4, "GET ") != 0 || q == std::string::npos) return "";
+    size_t stop = line.find(' ', q);
+    std::string query = line.substr(q + 1, stop == std::string::npos ? std::string::npos : stop - q - 1);
+    for (const auto& part : SplitChar(query, '&')) {
+        size_t eq = part.find('=');
+        if (eq == std::string::npos || part.substr(0, eq) != name) continue;
+        std::string v = part.substr(eq + 1);
+        for (char c : v) if (!std::isalnum((unsigned char)c) && c != '_') return "";
+        return v;
+    }
+    return "";
+}
+
 } // namespace kwiq

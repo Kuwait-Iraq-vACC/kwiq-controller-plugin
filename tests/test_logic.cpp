@@ -136,6 +136,11 @@ int main() {
     CHECK(!IsApiKey("kwiq_295d6ebdAbCdEfGhIjKlMnOpQrStUvWxYz01234 "));
     CHECK(!IsApiKey("KWIQ_295d6ebdAbCdEfGhIjKlMnOpQrStUvWxYz012345"));
     CHECK(ApiKeyId("nonsense") == "");
+    CHECK(QueryValue("GET /?key=kwiq_abc123&state=Xy9 HTTP/1.1\r\nHost: 127.0.0.1\r\n", "key") == "kwiq_abc123");
+    CHECK(QueryValue("GET /?key=kwiq_abc123&state=Xy9 HTTP/1.1\r\n", "state") == "Xy9");
+    CHECK(QueryValue("GET /?key=a%20b HTTP/1.1\r\n", "key") == "");
+    CHECK(QueryValue("POST /?key=abc HTTP/1.1\r\n", "key") == "");
+    CHECK(QueryValue("GET /favicon.ico HTTP/1.1\r\n", "key") == "");
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;

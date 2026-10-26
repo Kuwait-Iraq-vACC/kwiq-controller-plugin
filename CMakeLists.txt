@@ -12,6 +12,7 @@ find_package(nlohmann_json CONFIG REQUIRED)      # from vcpkg
 add_library(KWIQPlugin SHARED
     KWIQPlugin.cpp
     VatsimAPI.cpp
+    keylink.cpp          # receives the API key from myKWIQ
     requestMenu.cpp      # VCH
     internet.cpp         # VCH
     usefulStuff.cpp      # VCH
@@ -27,5 +28,6 @@ target_link_libraries(KWIQPlugin PRIVATE
     nlohmann_json::nlohmann_json
     wininet                                       # VCH
     winmm                                         # PlaySound (sector file alert)
+    ws2_32                                        # API key from myKWIQ (keylink.cpp)
 )
 set_target_properties(KWIQPlugin PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugin")

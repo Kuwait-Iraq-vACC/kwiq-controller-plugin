@@ -18,6 +18,7 @@
 #include "requestMenu.hpp"      // CVCHPlugin (VCH)
 #include "kwiq_logic.hpp"
 #include "VatsimAPI.h"
+#include "keylink.hpp"
 
 #define KWIQ_PLUGIN_NAME      "KWIQ Controller Plugin"
 // Change the base version by hand; GitHub Actions adds its build number (0.5.0.42) to every release.
@@ -45,6 +46,8 @@ static const char* CORE_SRD_URL         = CORE_BASE "/srd";
 static const char* CORE_SRD_VERSION_URL = CORE_BASE "/srd/version";
 static const char* CORE_SECTORS_URL     = CORE_BASE "/sectors";
 static const char* CORE_DOWNLOAD_URL    = CORE_BASE "/download";   // latest plugin DLL (checksum comes from /config)
+// myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
+static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
 // ---------------------------------------------------------------------------
 
 // Tag item / function ids. VCH uses 100, 340-346, 440-447, 540-556, 640-650: keep clear of those.
@@ -60,8 +63,7 @@ enum {
     // the KWIQ button on the radar screen and its menu
     KWIQ_OBJ_BUTTON        = 2100,
     KWIQ_MENU_KEY          = 2101,
-    KWIQ_MENU_KEY_EDIT     = 2102,
-    KWIQ_MENU_SECTORS      = 2103,
+    KWIQ_MENU_SECTORS      = 2102,
     KWIQ_MENU_AUTOREFRESH  = 2104,
     KWIQ_MENU_EVENT_ROUTES = 2105,
     KWIQ_MENU_SRD          = 2106,
@@ -262,7 +264,7 @@ static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows, size_t total)
 // never take keyboard focus (a controller may be typing), stay on top and close on a button.
 // The sector file alert flashes its header between exactly two colours, slowly, for a few seconds,
 // then stays solid; the update prompt does not flash.
-enum { NOTICE_ALERT = 1, NOTICE_UPDATE = 2 };
+enum { NOTICE_ALERT = 1, NOTICE_UPDATE = 2, NOTICE_KEY = 3 };
 static void (*gOnNotice)(int kind, int button) = nullptr;       // button 1 = primary, 2 = secondary
 static const char* const kNoticeClass = "KWIQNoticeWnd";
 static bool gNoticeReg = false;
@@ -274,7 +276,7 @@ struct Notice {
     std::string title, body;
     COLORREF colA = RGB(211, 47, 47), colB = RGB(74, 14, 14);
 };
-static Notice gAlert, gUpd;
+static Notice gAlert, gUpd, gKey;
 static HFONT gFontTitle = nullptr, gFontBody = nullptr;
 
 static void PaintNotice(HWND h, const Notice& n) {
@@ -390,8 +392,19 @@ static void ShowUpdatePrompt(const std::string& title, const std::string& body) 
     ShowNotice(gUpd, NOTICE_UPDATE, title, body, "Update now", "Later", RGB(21, 101, 192), RGB(21, 101, 192), 0);
 }
 
+// API key setup: waits while the controller connects on myKWIQ, and closes once the key arrives.
+static void ShowKeyPrompt() {
+    ShowNotice(gKey, NOTICE_KEY, "API KEY SETUP",
+               "Please sign in to myKWIQ in your web browser and click Connect EuroScope. This window closes by itself "
+               "once your API key has been received. If the page did not open, click Reopen Browser.",
+               "Reopen Browser", "Cancel", RGB(185, 28, 28), RGB(185, 28, 28), 0);
+}
+static bool KeyPromptOpen() { return gKey.hwnd != nullptr; }
+static void CloseKeyPrompt() { if (gKey.hwnd) DestroyWindow(gKey.hwnd); }
+
 static void Shutdown() {
     if (gAlert.hwnd) DestroyWindow(gAlert.hwnd);
+    if (gKey.hwnd) DestroyWindow(gKey.hwnd);
     if (gUpd.hwnd) DestroyWindow(gUpd.hwnd);
     if (gFontTitle) { DeleteObject(gFontTitle); gFontTitle = nullptr; }
     if (gFontBody) { DeleteObject(gFontBody); gFontBody = nullptr; }
@@ -588,13 +601,14 @@ public:
         kwiq_ui::gOnNotice = &NoticeThunk;
         apiKey_ = apikey::Load();
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
-        Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded" +
-            (apiKey_.empty() ? ". Enter your personal API key from myKWIQ with .kwiq key <your key>" : ""), false);
+        startedAt_ = std::time(nullptr);
+        Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded", false);
     }
     virtual ~CKWIQPlugin() {
         kwiq_ui::gOnSearch = nullptr;
         kwiq_ui::gOnNotice = nullptr;
         kwiq_ui::Shutdown();
+        keyLink_.Stop();
         quit_ = true;                                        // aborts a running update download
         if (worker_.joinable()) worker_.join();
         if (updateThread_.joinable()) updateThread_.join();
@@ -621,6 +635,7 @@ public:
         }
         TickConnection();
         TickUpdatePrompt();
+        TickKeySetup(now);
         CDataHandler::refreshInterval = slotsEvery_;
         std::string code;
         { std::lock_guard<std::mutex> g(mu_); code = ev_.active ? ev_.vatcanCode : ""; }
@@ -755,6 +770,10 @@ public:
             else SetApiKey(key);
             return true;
         }
+        if (c == ".KWIQ CONNECT") {
+            StartKeySetup();
+            return true;
+        }
         if (c == ".KWIQ BUTTON") {
             ShowButton(!buttonShown_);
             return true;
@@ -767,7 +786,7 @@ public:
         if (c == ".KWIQ STATUS") {
             std::lock_guard<std::mutex> g(mu_);
             std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED by Core") +
-                " | API key " + (apiKey_.empty() ? std::string("not set") : kwiq::ApiKeyId(apiKey_)) +
+                " | API key " + (apiKey_.empty() ? std::string("not set") : "ID " + kwiq::ApiKeyId(apiKey_)) +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
@@ -814,9 +833,8 @@ public:
         Msg(shown ? "The KWIQ button is shown." : "The KWIQ button is hidden. Type .kwiq button to show it again.", false);
     }
     void OpenMenu(RECT area) {
-        std::string id = kwiq::ApiKeyId(apiKey_);
         OpenPopupList(area, "KWIQ v" KWIQ_PLUGIN_VERSION, 2);
-        AddPopupListElement("API Key", id.empty() ? "Not set" : id.c_str(), KWIQ_MENU_KEY);
+        AddPopupListElement("API Key", apiKey_.empty() ? "Not set" : "Connected", KWIQ_MENU_KEY);
         AddPopupListElement("Sector Indicators", sectorDraw_ ? "On" : "Off", KWIQ_MENU_SECTORS);
         AddPopupListElement("Slot Auto Refresh", autoRefresh_ ? "On" : "Off", KWIQ_MENU_AUTOREFRESH);
         AddPopupListElement("Event Routes", "", KWIQ_MENU_EVENT_ROUTES);
@@ -827,20 +845,9 @@ public:
         AddPopupListElement("Status", "", KWIQ_MENU_STATUS);
         AddPopupListElement("Hide Button", "", KWIQ_MENU_HIDE, false, EuroScopePlugIn::POPUP_ELEMENT_NO_CHECKBOX, false, true);
     }
-    void MenuAction(int id, const char* text, POINT pt, RECT area) {
+    void MenuAction(int id, const char*, POINT pt, RECT) {
         switch (id) {
-        case KWIQ_MENU_KEY: {
-            RECT r = area;
-            r.right = r.left + 340;
-            r.bottom = r.top + 20;
-            OpenPopupEdit(r, KWIQ_MENU_KEY_EDIT, "");
-            return;
-        }
-        case KWIQ_MENU_KEY_EDIT: {
-            std::string key = kwiq::Trim(text ? text : "");
-            if (!key.empty()) SetApiKey(key);
-            return;
-        }
+        case KWIQ_MENU_KEY:          StartKeySetup(); return;
         case KWIQ_MENU_SECTORS:      OnCompileCommand(".kwiq sector"); return;
         case KWIQ_MENU_AUTOREFRESH:  OnCompileCommand(".kwiq autorefresh"); return;
         case KWIQ_MENU_EVENT_ROUTES: OpenRoutesWindow(pt); return;
@@ -871,6 +878,32 @@ public:
     }
 
 private:
+    // ---- API key setup through myKWIQ (main thread) -------------------------------------------
+    // Without a key (or when Core refuses it) the setup opens once per session, as soon as EuroScope
+    // has settled; the KWIQ button's API Key and .kwiq connect open it at any time.
+    void StartKeySetup() {
+        if (!keyLink_.Start()) {
+            Msg("The API key setup could not start. Copy your key from myKWIQ and use: .kwiq key <your key>", true);
+            return;
+        }
+        OpenConnectPage();
+        kwiq_ui::ShowKeyPrompt();
+    }
+    void OpenConnectPage() {
+        if (!keyLink_.Running()) return;
+        std::string url = std::string(MYKWIQ_CONNECT_URL) + "?port=" + std::to_string(keyLink_.Port()) + "&state=" + keyLink_.State();
+        ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    void TickKeySetup(std::time_t now) {
+        std::string key = keyLink_.Take();
+        if (!key.empty()) { SetApiKey(key); return; }
+        if (kwiq_ui::KeyPromptOpen() && !keyLink_.Running()) kwiq_ui::CloseKeyPrompt();   // gave up waiting
+        if (!keyPrompted_ && now - startedAt_ >= 5 && (apiKey_.empty() || keyRefused_)) {
+            keyPrompted_ = true;
+            StartKeySetup();
+        }
+    }
+
     void SetApiKey(const std::string& key) {
         if (!key.empty() && !kwiq::IsApiKey(key)) {
             Msg("That is not a KWIQ API key. Copy it from myKWIQ, under EuroScope Plugin; it starts with kwiq_", true);
@@ -881,6 +914,9 @@ private:
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
         { std::lock_guard<std::mutex> g(mu_); lastErr_.erase("API key"); srd_.version.clear(); }
         lastCore_ = lastSrd_ = 0;                            // try it straight away
+        keyRefused_ = false;
+        keyLink_.Stop();
+        kwiq_ui::CloseKeyPrompt();
         Msg(key.empty() ? "API key removed." : "API key " + kwiq::ApiKeyId(key) + " saved.", false);
     }
 
@@ -1007,6 +1043,11 @@ private:
 public:
     void OnNotice(int kind, int button) {
         if (kind == kwiq_ui::NOTICE_UPDATE && button == 1) StartUpdate();
+        if (kind == kwiq_ui::NOTICE_KEY && button == 1) { OpenConnectPage(); kwiq_ui::ShowKeyPrompt(); }
+        if (kind == kwiq_ui::NOTICE_KEY && button == 2) {
+            keyLink_.Stop();
+            Msg("You can connect your API key later from the KWIQ button, or with .kwiq connect.", false);
+        }
         if (kind == kwiq_ui::NOTICE_ALERT && button == 1 && !alertUrl_.empty())
             ShellExecuteA(nullptr, "open", alertUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
@@ -1211,8 +1252,10 @@ private:
             std::string body, err;
             // Core refuses requests without a valid personal key once it requires them: say so once, not per request
             auto fail = [this](const std::string& src, const std::string& e) {
-                if (e == "HTTP 401") SetError("API key", "Core did not accept your API key. Generate a new one on myKWIQ, under "
-                                                           "EuroScope Plugin, then use: .kwiq key <your key>");
+                if (e == "HTTP 401") {
+                    keyRefused_ = true;
+                    SetError("API key", "Core did not accept your API key. Connect it again from the KWIQ button, or with .kwiq connect");
+                }
                 else SetError(src, e);
             };
 
@@ -1268,6 +1311,10 @@ private:
     bool buttonShown_ = true;                                       // main thread only
     int buttonDx_ = 8, buttonDy_ = 22;                              // main thread only: from the radar's bottom left
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
+    KeyLink keyLink_;
+    bool keyPrompted_ = false;                                      // main thread only
+    std::time_t startedAt_ = 0;
+    std::atomic<bool> keyRefused_{ false };
     bool connected_ = false, alertDone_ = true;                     // main thread only
     std::string alertUrl_, promptedFor_;                            // main thread only
     std::thread updateThread_;
