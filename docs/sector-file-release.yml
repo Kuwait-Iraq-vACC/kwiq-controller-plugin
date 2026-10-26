@@ -1,0 +1,41 @@
+# Put this in the SECTOR FILE repository as .github/workflows/airac-version.yml
+# On every published release it writes AIRAC_VERSION.txt (e.g. "2610/02") from the release tag and
+# commits it to the default branch. Core's `sectorfile:sync` reads that file.
+#
+# Tag your releases as the AIRAC, e.g.  2610-02   (or 2610/02 is not a legal tag, so use a dash).
+name: AIRAC version file
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  airac:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Write AIRAC_VERSION.txt from the tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # accepts 2610-02, 2610_02, v2610-02, 2610/02
+          v=$(printf '%s' "$TAG" | sed -E 's/^[^0-9]*([0-9]{4})[-_/.]?([0-9]{1,2}).*$/\1\/\2/')
+          case "$v" in
+            [0-9][0-9][0-9][0-9]/[0-9]|[0-9][0-9][0-9][0-9]/[0-9][0-9]) ;;
+            *) echo "Tag '$TAG' is not an AIRAC like 2610-02"; exit 1 ;;
+          esac
+          rev=${v#*/}; [ ${#rev} -eq 1 ] && v="${v%/*}/0$rev"
+          printf '%s\n' "$v" > AIRAC_VERSION.txt
+          echo "AIRAC_VERSION.txt = $v"
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add AIRAC_VERSION.txt
+          git diff --cached --quiet && { echo "unchanged"; exit 0; }
+          git commit -m "AIRAC version ${GITHUB_REF_NAME}"
+          git push

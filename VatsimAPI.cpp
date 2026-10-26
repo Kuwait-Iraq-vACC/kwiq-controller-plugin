@@ -1,0 +1,286 @@
+// VatsimAPI.cpp - see VatsimAPI.h and NOTICE.md for provenance.
+#include "VatsimAPI.h"
+
+#include <ctime>
+#include <exception>
+#include <nlohmann/json.hpp>
+#include <curl/curl.h>
+
+using json = nlohmann::json;
+using std::map;
+using std::string;
+
+int CDataHandler::refreshInterval = 60;
+string CDataHandler::eventCode_;
+std::atomic<bool> CDataHandler::fetchInProgress{ false };
+bool CDataHandler::firstSlotPull = true;
+time_t CDataHandler::lastSlotPull = 0;
+string CDataHandler::vatsimJson3URL;
+std::thread CDataHandler::worker;
+std::mutex CDataHandler::pendingMutex;
+std::optional<FetchResult> CDataHandler::pending;
+map<int, string> CDataHandler::slotTime_;
+map<string, int> CDataHandler::callsignToCid_;
+map<string, ACData> CDataHandler::acData_;
+
+static size_t write_data(void* buffer, size_t size, size_t nmemb, void* userp) {
+    ((string*)userp)->append((char*)buffer, size * nmemb);
+    return size * nmemb;
+}
+
+static void setup_curl_modern(CURL* h, const char* url, string* response) {
+    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_data);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, response);
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "KWIQPlugin/0.3");
+
+    // Native Windows trust store, no certificate file needed
+    curl_easy_setopt(h, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA | CURLSSLOPT_NO_REVOKE);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
+
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(h, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
+}
+
+static CURLcode fetch_url(const char* url, string& response, long* httpCode = nullptr) {
+    CURL* curl = curl_easy_init();
+    if (!curl) { return CURLE_FAILED_INIT; }
+    setup_curl_modern(curl, url, &response);
+    CURLcode res = curl_easy_perform(curl);
+    if (httpCode) { curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, httpCode); }
+    curl_easy_cleanup(curl);
+    return res;
+}
+
+namespace kwiq_net {
+
+void GlobalInit() { curl_global_init(CURL_GLOBAL_DEFAULT); }
+void GlobalCleanup() { curl_global_cleanup(); }
+
+bool HttpGet(const string& url, string& body, string& err) {
+    body.clear();
+    long code = 0;
+    CURLcode res = fetch_url(url.c_str(), body, &code);
+    if (res != CURLE_OK) { err = curl_easy_strerror(res); return false; }
+    if (code != 200) { err = "HTTP " + std::to_string(code); return false; }
+    return true;
+}
+
+} // namespace kwiq_net
+
+static void add_message(FetchResult& r, const char* sender, string text, bool alert) {
+    r.messages.push_back({ sender, text, alert });
+}
+
+// Streaming parser for the VATSIM data feed: only reads callsign + cid of each pilot
+struct DataFeedSax {
+    map<std::string, int>& out;
+    std::string timeStamp;
+    std::string error;
+
+    int depth = 0;
+    int pilotsDepth = -1;
+    bool inGeneral = false;
+    std::string lastKey;
+    std::string callsign;
+    int cid = 0;
+
+    DataFeedSax(map<std::string, int>& o) : out(o) {}
+
+    bool inPilot() const { return pilotsDepth >= 0 && depth == pilotsDepth + 1; }
+
+    bool start_object(std::size_t) {
+        depth++;
+        if (inPilot()) { callsign.clear(); cid = 0; }
+        if (depth == 2 && lastKey == "general") { inGeneral = true; }
+        return true;
+    }
+    bool end_object() {
+        if (inPilot() && !callsign.empty() && cid != 0) { out[callsign] = cid; }
+        if (depth == 2) { inGeneral = false; }
+        depth--;
+        return true;
+    }
+    bool start_array(std::size_t) {
+        depth++;
+        if (depth == 2 && lastKey == "pilots") { pilotsDepth = depth; }
+        return true;
+    }
+    bool end_array() {
+        if (depth == pilotsDepth) { pilotsDepth = -1; }
+        depth--;
+        return true;
+    }
+    bool key(std::string& val) { lastKey = val; return true; }
+    bool string(std::string& val) {
+        if (inPilot() && lastKey == "callsign") { callsign = val; }
+        if (inGeneral && depth == 2 && lastKey == "update_timestamp") { timeStamp = val; }
+        return true;
+    }
+    bool number_integer(json::number_integer_t val) {
+        if (inPilot() && lastKey == "cid") { cid = (int)val; }
+        return true;
+    }
+    bool number_unsigned(json::number_unsigned_t val) {
+        if (inPilot() && lastKey == "cid") { cid = (int)val; }
+        return true;
+    }
+    bool null() { return true; }
+    bool boolean(bool) { return true; }
+    bool number_float(json::number_float_t, const std::string&) { return true; }
+    bool binary(json::binary_t&) { return true; }
+    bool parse_error(std::size_t, const std::string&, const json::exception& ex) {
+        error = ex.what();
+        return false;
+    }
+};
+
+void CDataHandler::GetVatsimAPIurlData() {
+    string vatsimURLs;
+    if (fetch_url("https://status.vatsim.net/", vatsimURLs) == CURLE_OK) {
+        size_t pos = vatsimURLs.find("json3=");
+        if (pos != string::npos) {
+            vatsimURLs = vatsimURLs.substr(pos + 6);
+            vatsimURLs = vatsimURLs.substr(0, vatsimURLs.find("\n"));
+            vatsimURLs.erase(vatsimURLs.find_last_not_of(" \r\t") + 1);
+            if (vatsimURLs.rfind("https://", 0) == 0) { CDataHandler::vatsimJson3URL = vatsimURLs; }
+        }
+    }
+    if (CDataHandler::vatsimJson3URL.empty()) {
+        CDataHandler::vatsimJson3URL = "https://data.vatsim.net/v3/vatsim-data.json";
+    }
+}
+
+bool CDataHandler::SetEventCode(const string& code) {
+    if (code == eventCode_) { return false; }
+    eventCode_ = code;
+    firstSlotPull = true;
+    lastSlotPull = 0;
+    slotTime_.clear();
+    callsignToCid_.clear();
+    acData_.clear();
+    return true;
+}
+
+void CDataHandler::StartFetch() {
+    if (eventCode_.empty()) { return; }
+    bool expected = false;
+    if (!fetchInProgress.compare_exchange_strong(expected, true)) { return; }
+
+    time_t now = time(nullptr);
+    bool pullSlots = firstSlotPull || (now - lastSlotPull) > 300;   // slots every 5 minutes, feed every cycle
+    if (pullSlots) { lastSlotPull = now; firstSlotPull = false; }
+
+    if (worker.joinable()) { worker.join(); }                        // previous worker has finished
+    worker = std::thread(FetchWorker, eventCode_, pullSlots);
+}
+
+void CDataHandler::Shutdown() {
+    if (worker.joinable()) { worker.join(); }
+}
+
+void CDataHandler::FetchWorker(string eventCode, bool pullSlots) {
+    FetchResult result;
+
+    if (CDataHandler::vatsimJson3URL.empty()) {
+        GetVatsimAPIurlData();
+    }
+
+    // --- PART 1: Fetch VATCAN slots ---
+    if (pullSlots) {
+        string url = "https://bookings.vatcan.ca/api/event/" + eventCode;
+        string cidString;
+        CURLcode res = fetch_url(url.c_str(), cidString);
+
+        if (res == CURLE_OK) {
+            try {
+                json cidJson = json::parse(cidString);
+                if (cidJson.contains("error")) {
+                    string error = cidJson.at("error");
+                    add_message(result, "API Error", error, true);
+                }
+                else {
+                    for (auto& pilots : cidJson) {
+                        int cid = pilots["cid"];
+                        string slot = pilots["slot"];
+                        result.slotTime[cid] = slot;
+                    }
+                    result.slotsUpdated = true;
+                    add_message(result, "Update Successful",
+                                std::to_string(result.slotTime.size()) + " slot times parsed", false);
+                }
+            }
+            catch (std::exception& e) {
+                add_message(result, "Parse Error", string("Slots failed: ") + e.what(), true);
+            }
+        }
+        else {
+            add_message(result, "Network Error", string("Connect failed: ") + curl_easy_strerror(res), true);
+        }
+    }
+
+    // --- PART 2: Fetch VATSIM data file ---
+    if (!CDataHandler::vatsimJson3URL.empty()) {
+        string responseString;
+        if (fetch_url(CDataHandler::vatsimJson3URL.c_str(), responseString) == CURLE_OK) {
+            try {
+                DataFeedSax sax(result.callsignToCid);
+                if (!json::sax_parse(responseString, &sax)) {
+                    throw std::runtime_error(sax.error);
+                }
+                result.feedUpdated = true;
+            }
+            catch (std::exception& e) {
+                add_message(result, "Parse Error", string("VATSIM Data failed: ") + e.what(), true);
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex);
+        pending = std::move(result);
+    }
+    fetchInProgress = false;
+}
+
+// Runs on the main thread
+void CDataHandler::ApplyPending(EuroScopePlugIn::CPlugIn* plugin) {
+    std::optional<FetchResult> result;
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex);
+        result.swap(pending);
+    }
+    if (!result) { return; }
+    if (eventCode_.empty()) { return; }          // event ended while the fetch was running
+
+    bool changed = false;
+    if (result->slotsUpdated) { slotTime_ = std::move(result->slotTime); changed = true; }
+    if (result->feedUpdated) { callsignToCid_ = std::move(result->callsignToCid); changed = true; }
+
+    if (changed) {
+        acData_.clear();
+        for (auto& [callsign, cid] : callsignToCid_) {
+            ACData& d = acData_[callsign];
+            d.CID = std::to_string(cid);
+            auto slot = slotTime_.find(cid);
+            if (slot != slotTime_.end()) {
+                d.slotTime = slot->second;
+                d.hasCTP = true;
+            }
+        }
+    }
+
+    for (auto& m : result->messages) {
+        plugin->DisplayUserMessage("VATCAN Slot Manager", m.sender.c_str(), m.text.c_str(), true, m.alert, m.alert, m.alert, m.alert);
+    }
+}
+
+const ACData* CDataHandler::Get(const string& callsign) {
+    auto it = acData_.find(callsign);
+    return it == acData_.end() ? nullptr : &it->second;
+}
+size_t CDataHandler::SlotCount() { return slotTime_.size(); }
+size_t CDataHandler::PilotCount() { return callsignToCid_.size(); }

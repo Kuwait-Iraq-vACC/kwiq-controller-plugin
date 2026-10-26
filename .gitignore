@@ -1,0 +1,7 @@
+build/
+vcpkg-cache/
+vcpkg_installed/
+test_logic
+*.obj
+*.pdb
+*.ilk
