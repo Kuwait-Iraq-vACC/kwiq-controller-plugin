@@ -43,7 +43,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          base=$(sed -n 's/^#define KWIQ_PLUGIN_VERSION_BASE "\(.*\)"/\1/p' KWIQPlugin.cpp)
+          base=$(sed -n 's/^#define KWIQ_PLUGIN_VERSION_BASE "\(.*\)"/\1/p' version.h)
           [ -n "$base" ] || { echo "KWIQ_PLUGIN_VERSION_BASE not found"; exit 1; }
           echo "version=$base.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           echo "Building $base.${{ github.run_number }}"
@@ -80,21 +80,19 @@ jobs:
               if ($text -notmatch [regex]::Escape($n)) { throw "export $n not found in $dll" }
             }
           }
+          # The plugin is built into the loader, so the loader is the larger file
+          if ((Get-Item build/Release/KWIQPlugin.dll).Length -le (Get-Item build/Release/KWIQPluginCore.dll).Length) {
+            throw "KWIQPlugin.dll does not contain the plugin"
+          }
 
-      # What controllers download from myKWIQ: both files, to go in the same Plugins folder
-      - name: Package
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item build/Release/KWIQPlugin.dll, build/Release/KWIQPluginCore.dll dist/
-          Compress-Archive -Path dist/KWIQPlugin.dll, dist/KWIQPluginCore.dll -DestinationPath dist/KWIQPlugin.zip
-
+      # KWIQPlugin.dll (with the plugin built in) is what controllers download from myKWIQ;
+      # KWIQPluginCore.dll is what installed copies update to
       - uses: actions/upload-artifact@v4
         with:
           name: KWIQPlugin
           path: |
-            dist/KWIQPlugin.dll
-            dist/KWIQPluginCore.dll
-            dist/KWIQPlugin.zip
+            build/Release/KWIQPlugin.dll
+            build/Release/KWIQPluginCore.dll
           if-no-files-found: error
 
   release:
@@ -114,7 +112,7 @@ jobs:
       - name: Release (main)
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         run: |
-          gh release create "v$VERSION" KWIQPluginCore.dll KWIQPlugin.zip --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
+          gh release create "v$VERSION" KWIQPlugin.dll KWIQPluginCore.dll --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
 
       - name: Test pre-release (pull requests and other branches)
         if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
@@ -126,7 +124,7 @@ jobs:
           if [ -n "$PR" ]; then tag="pr-$PR"; title="Test build for #$PR: $PR_TITLE ($VERSION)"
           else tag="test-$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"; title="Test build of $GITHUB_REF_NAME ($VERSION)"; fi
           gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
-          gh release create "$tag" KWIQPluginCore.dll KWIQPlugin.zip --prerelease --target "$SHA" --title "$title" \
+          gh release create "$tag" KWIQPlugin.dll KWIQPluginCore.dll --prerelease --target "$SHA" --title "$title" \
             --notes "For testing only. Core does not offer pre-releases to controllers. Built from ${SHA:0:7}."
 
   cleanup:

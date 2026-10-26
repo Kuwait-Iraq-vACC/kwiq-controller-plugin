@@ -21,18 +21,7 @@
 #include "keylink.hpp"
 
 #define KWIQ_PLUGIN_NAME      "KWIQ Controller Plugin"
-// Change the base version by hand; GitHub Actions adds its build number (0.5.0.42) to every release.
-#define KWIQ_PLUGIN_VERSION_BASE "0.5.0"
-#ifndef KWIQ_BUILD_NUMBER
-#define KWIQ_BUILD_NUMBER 0
-#endif
-#define KWIQ_STR2(x) #x
-#define KWIQ_STR(x) KWIQ_STR2(x)
-#if KWIQ_BUILD_NUMBER > 0
-#define KWIQ_PLUGIN_VERSION   KWIQ_PLUGIN_VERSION_BASE "." KWIQ_STR(KWIQ_BUILD_NUMBER)
-#else
-#define KWIQ_PLUGIN_VERSION   KWIQ_PLUGIN_VERSION_BASE
-#endif
+#include "version.h"                // KWIQ_PLUGIN_VERSION
 #define KWIQ_PLUGIN_AUTHOR    "Kuwait & Iraq vACC"
 #define KWIQ_PLUGIN_COPYRIGHT "GPL-3.0-or-later"
 
@@ -262,7 +251,7 @@ static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows, size_t total)
 // Windows-style message boxes (title bar, icon, message, buttons on a grey strip), but not modal:
 // EuroScope keeps running behind them and they never take keyboard focus. They are only shown when
 // EuroScope starts, never in the middle of a session.
-enum { NOTICE_ALERT = 1, NOTICE_KEY = 2, NOTICE_INFO = 3 };
+enum { NOTICE_KEY = 2, NOTICE_INFO = 3 };
 static void (*gOnNotice)(int kind, int button) = nullptr;       // button 1 = first, 2 = second (or closed)
 static const char* const kNoticeClass = "KWIQNoticeWnd";
 static bool gNoticeReg = false;
@@ -273,7 +262,7 @@ struct Notice {
     LPCSTR icon = nullptr;
     std::string body;
 };
-static Notice gAlert, gKey, gInfo;
+static Notice gKey, gInfo;
 static HFONT gFontBody = nullptr;
 
 static void PaintNotice(HWND h, const Notice& n) {
@@ -383,16 +372,6 @@ static bool ShowNotice(Notice& n, int kind, const std::string& title, const std:
     return true;
 }
 
-// Outdated sector file: warning, with a link to the download when Core has one. The title bar
-// flashes for flashSec seconds so it is noticed.
-static void ShowSctAlert(const std::string& body, bool hasDownload, int flashSec) {
-    bool ok = hasDownload ? ShowNotice(gAlert, NOTICE_ALERT, "Outdated Sector File", body, IDI_WARNING, "Get Sector File", "Dismiss")
-                          : ShowNotice(gAlert, NOTICE_ALERT, "Outdated Sector File", body, IDI_WARNING, "OK", nullptr);
-    if (ok && flashSec > 0) {
-        FLASHWINFO fi = { sizeof(fi), gAlert.hwnd, FLASHW_CAPTION | FLASHW_TRAY, (UINT)(flashSec * 2), 500 };
-        FlashWindowEx(&fi);
-    }
-}
 // API key setup: waits while the controller connects on myKWIQ, and closes once the key arrives.
 static void ShowKeyPrompt() {
     ShowNotice(gKey, NOTICE_KEY, "KWIQ API Key Setup",
@@ -408,7 +387,6 @@ static void ShowInfo(const std::string& title, const std::string& body) {
 }
 
 static void Shutdown() {
-    if (gAlert.hwnd) DestroyWindow(gAlert.hwnd);
     if (gKey.hwnd) DestroyWindow(gKey.hwnd);
     if (gInfo.hwnd) DestroyWindow(gInfo.hwnd);
     if (gFontBody) { DeleteObject(gFontBody); gFontBody = nullptr; }
@@ -462,10 +440,13 @@ static std::string ParentOf(const std::string& p) {
     size_t i = p.find_last_of("\\/");
     return i == std::string::npos ? std::string() : p.substr(0, i);
 }
+// Where the plugin is installed: KWIQPlugin.dll, the loader EuroScope loads (this file is kept in
+// %APPDATA%\KWIQ\plugin), or this file when it is loaded directly
 static std::string DllPath() {
-    HMODULE m = nullptr;
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCSTR)&DllPath, &m);
+    HMODULE m = GetModuleHandleA("KWIQPlugin.dll");
+    if (!m)
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)&DllPath, &m);
     char b[MAX_PATH] = {};
     if (!m || !GetModuleFileNameA(m, b, MAX_PATH)) return "";
     return b;
@@ -577,6 +558,7 @@ struct UiCfg {
     // outdated sector file alert
     bool alertOn = true;
     int flashSec = 10;
+    COLORREF alertA = RGB(211, 47, 47), alertB = RGB(74, 14, 14);   // the outdated sector file box flashes between these
     std::string sound = "conflict_alert.wav";
 };
 // Result of comparing the local sector file with Core's current version.
@@ -616,9 +598,9 @@ public:
             return;
         }
         Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded", false);
-        // Installed from the zip, EuroScope loads KWIQPlugin.dll, which updates and then loads this file.
-        // Loaded directly, nothing updates it.
-        if (kwiq::Lower(sf::DllPath()).find("kwiqplugincore.dll") == std::string::npos)
+        // EuroScope should load KWIQPlugin.dll, which updates and then loads this file; loaded directly,
+        // nothing updates it
+        if (!GetModuleHandleA("KWIQPlugin.dll"))
             Msg("This copy of the plugin cannot update itself. Please download it again from myKWIQ (EuroScope Plugin) "
                 "and load KWIQPlugin.dll.", true);
     }
@@ -750,11 +732,10 @@ public:
             Msg("Refresh requested", false);
             return true;
         }
-        if (c == ".KWIQ ALERT") {                            // preview of the outdated sector file alert
-            SfStatus s;
-            { std::lock_guard<std::mutex> g(mu_); s = sf_; }
-            if (!s.known) { s.local = "2610/01"; s.upstream = "2610/02"; }
-            ShowSctAlertNow(s);
+        if (c == ".KWIQ ALERT") {                            // preview of the outdated sector file box
+            previewUntil_ = std::time(nullptr) + PREVIEW_SECONDS;
+            RefreshRadars();
+            Msg("Showing the OUTDATED SCT FILE box for " + std::to_string(PREVIEW_SECONDS) + " seconds.", false);
             return true;
         }
         if (c == ".KWIQ UPDATE") {
@@ -1020,37 +1001,62 @@ private:
         DisplayUserMessage("KWIQ", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
     }
 
-    // ---- sector file alert (main thread) ----------------------------------------------------
-    // Shown once, when EuroScope starts, as soon as both versions are known; never later in a session.
-    // Logging on still tells us the callsign, which can tell OKAC from ORBB.
+    // ---- outdated sector file (main thread) --------------------------------------------------
+    // Once logged on with an outdated sector file, a red OUTDATED SCT FILE box is drawn on every radar
+    // screen until the sector file is up to date or the controller logs off. It flashes between the
+    // two alert colours for alert.flash_seconds, then stays solid, and the alert sound plays once.
     void TickConnection(std::time_t now) {
         int ct = GetConnectionType();
         bool net = ct == EuroScopePlugIn::CONNECTION_TYPE_DIRECT || ct == EuroScopePlugIn::CONNECTION_TYPE_VIA_PROXY ||
                    ct == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX;
         if (net && !connected_) {
             connected_ = true;
+            connectedAt_ = now;
+            soundPlayed_ = false;
+            // Our position can tell OKAC from ORBB; the check runs on the next refresh, brought forward
             { std::lock_guard<std::mutex> g(mu_); myCallsign_ = ControllerMyself().GetCallsign(); }
             lastCore_ = 0;
         }
         if (!net) connected_ = false;
-        if (alertDone_) return;
-        if (now - startedAt_ > STARTUP_SECONDS) { alertDone_ = true; return; }
-        SfStatus s; bool on;
-        { std::lock_guard<std::mutex> g(mu_); s = sf_; on = ui_.alertOn; }
-        if (!s.known) return;
-        alertDone_ = true;
-        if (s.outdated && on && enabled_) ShowSctAlertNow(s);
+
+        bool shown = SctBannerShown(now);
+        if (shown && connected_ && !soundPlayed_) {
+            soundPlayed_ = true;
+            SfStatus s;
+            { std::lock_guard<std::mutex> g(mu_); s = sf_; }
+            if (s.sound.empty() || !PlaySoundA(s.sound.c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT))
+                MessageBeep(MB_ICONWARNING);                 // sound file not found: never alert silently
+        }
+        // Redraw while it flashes, and once whenever it appears or goes
+        if (shown != bannerWas_ || (shown && SctBannerFlashing(now))) RefreshRadars();
+        bannerWas_ = shown;
     }
-    void ShowSctAlertNow(const SfStatus& s) {
+public:
+    bool SctBannerShown(std::time_t now) {
+        if (now < previewUntil_) return true;
+        if (!connected_ || !enabled_) return false;
+        std::lock_guard<std::mutex> g(mu_);
+        return sf_.known && sf_.outdated && ui_.alertOn;
+    }
+    bool SctBannerFlashing(std::time_t now) {
+        int sec;
+        { std::lock_guard<std::mutex> g(mu_); sec = ui_.flashSec; }
+        std::time_t from = now < previewUntil_ ? previewUntil_ - PREVIEW_SECONDS : connectedAt_;
+        return now - from < sec;
+    }
+    COLORREF SctBannerColour(std::time_t now) {
         UiCfg ui;
         { std::lock_guard<std::mutex> g(mu_); ui = ui_; }
-        alertUrl_ = s.url.rfind("https://", 0) == 0 ? s.url : "";
-        std::string body = "Your " + s.package + " sector file is " + s.local + ", but the current version is " + s.upstream +
-                           ". Please install the latest " + s.package + " sector file before you control.";
-        kwiq_ui::ShowSctAlert(body, !alertUrl_.empty(), ui.flashSec);
-        if (!s.sound.empty() && PlaySoundA(s.sound.c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT)) return;
-        MessageBeep(MB_ICONWARNING);                         // sound file not found: never alert silently
+        std::time_t from = now < previewUntil_ ? previewUntil_ - PREVIEW_SECONDS : connectedAt_;
+        return SctBannerFlashing(now) && (now - from) % 2 == 1 ? ui.alertB : ui.alertA;
     }
+    static void RegisterRadar(EuroScopePlugIn::CRadarScreen* r, bool add) {
+        if (add) radars_.push_back(r);
+        else radars_.erase(std::remove(radars_.begin(), radars_.end(), r), radars_.end());
+    }
+private:
+    static inline std::vector<EuroScopePlugIn::CRadarScreen*> radars_;
+    void RefreshRadars() { for (auto* r : radars_) r->RequestRefresh(); }
 
 public:
     void OnNotice(int kind, int button) {
@@ -1059,8 +1065,6 @@ public:
             keyLink_.Stop();
             Msg("You can connect your API key later from the KWIQ button, or with .kwiq connect.", false);
         }
-        if (kind == kwiq_ui::NOTICE_ALERT && button == 1 && !alertUrl_.empty())
-            ShellExecuteA(nullptr, "open", alertUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 private:
     void Msg(const std::string& m, bool err) {
@@ -1108,6 +1112,8 @@ private:
         tooOld_ = tooOld;
         u.alertOn = c.GetBool("alert.enabled", true);
         u.flashSec = c.GetInt("alert.flash_seconds", 10, 0, 60);
+        u.alertA = (COLORREF)ParseColour(c.Get("alert.colour_a"), u.alertA);
+        u.alertB = (COLORREF)ParseColour(c.Get("alert.colour_b"), u.alertB);
         { std::string f = c.Get("alert.sound_file", u.sound); size_t i = f.find_last_of("\\/"); u.sound = i == std::string::npos ? f : f.substr(i + 1); }
         bool on = c.GetBool("plugin.enabled", true) && !tooOld;
         bool wasOn = enabled_.exchange(on);
@@ -1286,8 +1292,9 @@ private:
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
     std::atomic<bool> keyRefused_{ false };
-    bool connected_ = false, alertDone_ = false;                     // main thread only
-    std::string alertUrl_;                                          // main thread only
+    bool connected_ = false, soundPlayed_ = false, bannerWas_ = false;   // main thread only
+    std::time_t connectedAt_ = 0, previewUntil_ = 0;                // main thread only
+    static constexpr std::time_t PREVIEW_SECONDS = 15;
     static constexpr std::time_t STARTUP_SECONDS = 180;             // popups are only shown this soon after starting
     std::atomic<bool> quit_{ false }, tooOld_{ false };
     std::time_t lastCore_ = 0, lastSrd_ = 0, lastSlotFetch_ = 0;   // main thread only
@@ -1316,17 +1323,24 @@ public:
     CKWIQRadar() {
         font_ = CreateFontA(-12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                             CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
+        CKWIQPlugin::RegisterRadar(this, true);
     }
     virtual ~CKWIQRadar() {
+        CKWIQPlugin::RegisterRadar(this, false);
         if (font_) DeleteObject(font_);
         if (small_) DeleteObject(small_);
+        if (banner_) DeleteObject(banner_);
     }
 
     virtual void OnAsrContentToBeClosed(void) override { delete this; }
 
     virtual void OnRefresh(HDC hDC, int Phase) override {
         if (!gPlugin) return;
-        if (Phase == EuroScopePlugIn::REFRESH_PHASE_AFTER_LISTS && gPlugin->ButtonShown()) DrawButton(hDC);
+        if (Phase == EuroScopePlugIn::REFRESH_PHASE_AFTER_LISTS) {
+            std::time_t now = std::time(nullptr);
+            if (gPlugin->SctBannerShown(now)) DrawSctBanner(hDC, gPlugin->SctBannerColour(now));
+            if (gPlugin->ButtonShown()) DrawButton(hDC);
+        }
         if (Phase != EuroScopePlugIn::REFRESH_PHASE_AFTER_TAGS || !gPlugin->SectorDrawEnabled()) return;
         RECT area = GetRadarArea();
         int saved = SaveDC(hDC);
@@ -1365,6 +1379,29 @@ public:
     }
 
 private:
+    // Red box with white OUTDATED SCT FILE, centred a third of the way down the radar screen
+    void DrawSctBanner(HDC hDC, COLORREF fill) {
+        static const char* text = "OUTDATED SCT FILE";
+        RECT area = GetRadarArea();
+        int saved = SaveDC(hDC);
+        SelectObject(hDC, banner_);
+        SIZE sz; GetTextExtentPoint32A(hDC, text, (int)strlen(text), &sz);
+        int w = sz.cx + 56, h = sz.cy + 22;
+        int x = area.left + ((area.right - area.left) - w) / 2, y = area.top + (area.bottom - area.top) / 3 - h / 2;
+        RECT r = { x, y, x + w, y + h };
+        HBRUSH b = CreateSolidBrush(fill);
+        HPEN pen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+        SelectObject(hDC, b);
+        SelectObject(hDC, pen);
+        Rectangle(hDC, r.left, r.top, r.right, r.bottom);
+        SetBkMode(hDC, TRANSPARENT);
+        SetTextColor(hDC, RGB(255, 255, 255));
+        DrawTextA(hDC, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RestoreDC(hDC, saved);
+        DeleteObject(b);
+        DeleteObject(pen);
+    }
+
     void DrawButton(HDC hDC) {
         RECT r = gPlugin->ButtonRect(GetRadarArea());
         int saved = SaveDC(hDC);
@@ -1384,6 +1421,8 @@ private:
     }
 
     HFONT font_ = nullptr;
+    HFONT banner_ = CreateFontA(-26, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
     HFONT small_ = CreateFontA(-11, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
 };

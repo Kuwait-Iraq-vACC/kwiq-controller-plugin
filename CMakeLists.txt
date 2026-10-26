@@ -33,9 +33,13 @@ target_link_libraries(KWIQPluginCore PRIVATE
 )
 set_target_properties(KWIQPluginCore PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginCore")
 
-# KWIQPlugin.dll: what EuroScope loads. It updates KWIQPluginCore.dll at start-up, then loads it (loader.cpp)
-add_library(KWIQPlugin SHARED loader.cpp)
+# KWIQPlugin.dll: the one file controllers download and load. KWIQPluginCore.dll is built into it,
+# kept up to date in %APPDATA%\KWIQ\plugin and loaded from there (loader.cpp)
+file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/core_$<CONFIG>.rc
+     CONTENT "KWIQCORE RCDATA \"$<TARGET_FILE:KWIQPluginCore>\"\n")
+add_library(KWIQPlugin SHARED loader.cpp ${CMAKE_CURRENT_BINARY_DIR}/core_$<CONFIG>.rc)
+add_dependencies(KWIQPlugin KWIQPluginCore)
 target_include_directories(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/libs)
-target_compile_definitions(KWIQPlugin PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(KWIQPlugin PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
 target_link_libraries(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libs/EuroScopePlugInDll.lib winhttp)
 set_target_properties(KWIQPlugin PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugin")
