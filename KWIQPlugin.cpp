@@ -628,9 +628,9 @@ public:
             if (sp && *sp) { std::lock_guard<std::mutex> g(mu_); sectorPath_ = sp; }
             const char* bs = GetDataFromSettings("kwiq_button");
             if (bs && *bs == '0') buttonShown_ = false;
-            const char* bp = GetDataFromSettings("kwiq_button_pos");
+            const char* bp = GetDataFromSettings("kwiq_button_at");
             int bx, by;
-            if (bp && sscanf_s(bp, "%d,%d", &bx, &by) == 2) { buttonDx_ = bx; buttonDy_ = by; }
+            if (bp && sscanf_s(bp, "%d,%d", &bx, &by) == 2 && bx >= 0 && by >= 0) { buttonX_ = bx; buttonY_ = by; }
             DeleteFileA((sf::DllPath() + ".old").c_str());   // left over from a previous self-update (fails while still loaded)
         }
         TickConnection();
@@ -811,21 +811,23 @@ public:
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_; }
 
     // ---- the KWIQ button and its menu (main thread) ------------------------------------------
-    // Small and dim in the bottom left of each radar screen; it can be dragged anywhere, and
+    // A small red button at the top centre of each radar screen; it can be dragged anywhere, and
     // ".kwiq button" (or Hide Button in its menu) hides it and brings it back.
+    static constexpr int BUTTON_W = 44, BUTTON_H = 18;
     bool ButtonShown() const { return buttonShown_; }
     RECT ButtonRect(const RECT& radar) const {
-        RECT r;
-        r.left = radar.left + buttonDx_;
-        r.top = radar.bottom - buttonDy_;
-        r.right = r.left + 34;
-        r.bottom = r.top + 14;
+        // Top centre until it is dragged somewhere else; always kept inside the radar area
+        int w = radar.right - radar.left, h = radar.bottom - radar.top;
+        int x = buttonX_ < 0 ? (w - BUTTON_W) / 2 : buttonX_, y = buttonY_ < 0 ? 10 : buttonY_;
+        x = (std::max)(0, (std::min)(x, w - BUTTON_W));
+        y = (std::max)(0, (std::min)(y, h - BUTTON_H));
+        RECT r = { radar.left + x, radar.top + y, radar.left + x + BUTTON_W, radar.top + y + BUTTON_H };
         return r;
     }
     void MoveButton(const RECT& radar, POINT pt, bool released) {
-        buttonDx_ = (std::max)(0, (std::min)((int)(pt.x - radar.left) - 17, (int)(radar.right - radar.left) - 34));
-        buttonDy_ = (std::max)(14, (std::min)((int)(radar.bottom - pt.y) + 7, (int)(radar.bottom - radar.top)));
-        if (released) SaveDataToSettings("kwiq_button_pos", "KWIQ button position", (std::to_string(buttonDx_) + "," + std::to_string(buttonDy_)).c_str());
+        buttonX_ = (std::max)(0, (std::min)((int)(pt.x - radar.left) - BUTTON_W / 2, (int)(radar.right - radar.left) - BUTTON_W));
+        buttonY_ = (std::max)(0, (std::min)((int)(pt.y - radar.top) - BUTTON_H / 2, (int)(radar.bottom - radar.top) - BUTTON_H));
+        if (released) SaveDataToSettings("kwiq_button_at", "KWIQ button position", (std::to_string(buttonX_) + "," + std::to_string(buttonY_)).c_str());
     }
     void ShowButton(bool shown) {
         buttonShown_ = shown;
@@ -1309,7 +1311,7 @@ private:
     std::atomic<int> coreEvery_{ 60 }, srdEvery_{ 300 }, slotsEvery_{ 60 };
     bool settingsLoaded_ = false;                                   // main thread only
     bool buttonShown_ = true;                                       // main thread only
-    int buttonDx_ = 8, buttonDy_ = 22;                              // main thread only: from the radar's bottom left
+    int buttonX_ = -1, buttonY_ = -1;                               // main thread only: from the radar's top left; -1 = top centre
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     bool keyPrompted_ = false;                                      // main thread only
@@ -1397,21 +1399,23 @@ private:
     void DrawButton(HDC hDC) {
         RECT r = gPlugin->ButtonRect(GetRadarArea());
         int saved = SaveDC(hDC);
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(127, 29, 29));
+        HBRUSH fill = CreateSolidBrush(RGB(185, 28, 28));
         SelectObject(hDC, pen);
-        SelectObject(hDC, GetStockObject(NULL_BRUSH));
-        Rectangle(hDC, r.left, r.top, r.right, r.bottom);
+        SelectObject(hDC, fill);
+        RoundRect(hDC, r.left, r.top, r.right, r.bottom, 6, 6);
         SetBkMode(hDC, TRANSPARENT);
-        SetTextColor(hDC, RGB(130, 130, 130));
+        SetTextColor(hDC, RGB(255, 255, 255));
         if (small_) SelectObject(hDC, small_);
         DrawTextA(hDC, "KWIQ", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         RestoreDC(hDC, saved);
         DeleteObject(pen);
+        DeleteObject(fill);
         AddScreenObject(KWIQ_OBJ_BUTTON, "KWIQ", r, true, "KWIQ options");
     }
 
     HFONT font_ = nullptr;
-    HFONT small_ = CreateFontA(-10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+    HFONT small_ = CreateFontA(-11, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
 };
 
