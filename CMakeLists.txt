@@ -24,5 +24,6 @@ target_link_libraries(KWIQPlugin PRIVATE
     CURL::libcurl
     nlohmann_json::nlohmann_json
     wininet                                       # VCH
+    winmm                                         # PlaySound (sector file alert)
 )
 set_target_properties(KWIQPlugin PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugin")

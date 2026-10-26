@@ -71,6 +71,9 @@ private:
 namespace kwiq_net {
 // Blocking GET (use from a worker thread). Returns true on HTTP 200.
 bool HttpGet(const std::string& url, std::string& body, std::string& err);
+// Blocking binary GET with size cap / timeout; `cancel` (optional) aborts the transfer when set.
+bool HttpGetBinary(const std::string& url, std::string& body, std::string& err, size_t maxBytes,
+                   long timeoutSec, const std::atomic<bool>* cancel);
 void GlobalInit();
 void GlobalCleanup();
 }

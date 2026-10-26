@@ -69,6 +69,52 @@ bool HttpGet(const string& url, string& body, string& err) {
     return true;
 }
 
+// Binary download with a size cap, a longer timeout and a cancel flag (plugin self-update).
+namespace {
+struct BinSink { string* out; size_t max; bool tooBig = false; };
+size_t write_capped(void* buffer, size_t size, size_t nmemb, void* userp) {
+    BinSink* s = (BinSink*)userp;
+    size_t n = size * nmemb;
+    if (s->out->size() + n > s->max) { s->tooBig = true; return 0; }
+    s->out->append((char*)buffer, n);
+    return n;
+}
+int on_progress(void* p, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    const std::atomic<bool>* cancel = (const std::atomic<bool>*)p;
+    return (cancel && cancel->load()) ? 1 : 0;
+}
+}
+
+bool HttpGetBinary(const string& url, string& body, string& err, size_t maxBytes, long timeoutSec,
+                   const std::atomic<bool>* cancel) {
+    body.clear();
+    CURL* h = curl_easy_init();
+    if (!h) { err = "curl init failed"; return false; }
+    BinSink sink{ &body, maxBytes };
+    curl_easy_setopt(h, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_capped);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, &sink);
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "KWIQPlugin/0.5");
+    curl_easy_setopt(h, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA | CURLSSLOPT_NO_REVOKE);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(h, CURLOPT_TIMEOUT, timeoutSec);
+    curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(h, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(h, CURLOPT_XFERINFOFUNCTION, on_progress);
+    curl_easy_setopt(h, CURLOPT_XFERINFODATA, (void*)cancel);
+    CURLcode res = curl_easy_perform(h);
+    long code = 0;
+    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_cleanup(h);
+    if (sink.tooBig) { err = "download larger than allowed"; return false; }
+    if (res != CURLE_OK) { err = curl_easy_strerror(res); return false; }
+    if (code != 200) { err = "HTTP " + std::to_string(code); return false; }
+    return true;
+}
+
 } // namespace kwiq_net
 
 static void add_message(FetchResult& r, const char* sender, string text, bool alert) {
