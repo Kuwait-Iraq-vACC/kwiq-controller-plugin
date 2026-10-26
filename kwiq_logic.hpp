@@ -503,4 +503,12 @@ inline bool UpdateAvailable(const std::string& running, const std::string& lates
     return !latest.empty() && sha.size() == 64 && CompareVersions(running, latest) < 0;
 }
 
+// Personal API key from myKWIQ: "kwiq_" then 40 letters and digits. The first 8 after "kwiq_" are its ID.
+inline bool IsApiKey(const std::string& k) {
+    if (k.size() != 45 || k.compare(0, 5, "kwiq_") != 0) return false;
+    for (size_t i = 5; i < k.size(); i++) if (!std::isalnum((unsigned char)k[i])) return false;
+    return true;
+}
+inline std::string ApiKeyId(const std::string& k) { return IsApiKey(k) ? k.substr(5, 8) : std::string(); }
+
 } // namespace kwiq

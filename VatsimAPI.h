@@ -76,4 +76,6 @@ bool HttpGetBinary(const std::string& url, std::string& body, std::string& err, 
                    long timeoutSec, const std::atomic<bool>* cancel);
 void GlobalInit();
 void GlobalCleanup();
+// Requests to URLs starting with urlPrefix (Core) carry X-KWIQ-Key (when set) and X-KWIQ-Version.
+void SetCoreAuth(const std::string& urlPrefix, const std::string& key, const std::string& version);
 }

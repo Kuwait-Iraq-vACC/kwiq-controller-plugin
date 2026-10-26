@@ -18,7 +18,9 @@ add_library(KWIQPlugin SHARED
 )
 
 target_include_directories(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/libs)
-target_compile_definitions(KWIQPlugin PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+# Set by GitHub Actions to its run number, so each build has its own version (0.5.0.42)
+set(KWIQ_BUILD_NUMBER 0 CACHE STRING "Build number added to the plugin version")
+target_compile_definitions(KWIQPlugin PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
 target_link_libraries(KWIQPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/libs/EuroScopePlugInDll.lib
     CURL::libcurl

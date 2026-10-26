@@ -20,7 +20,18 @@
 #include "VatsimAPI.h"
 
 #define KWIQ_PLUGIN_NAME      "KWIQ Controller Plugin"
-#define KWIQ_PLUGIN_VERSION   "0.5.0"
+// Change the base version by hand; GitHub Actions adds its build number (0.5.0.42) to every release.
+#define KWIQ_PLUGIN_VERSION_BASE "0.5.0"
+#ifndef KWIQ_BUILD_NUMBER
+#define KWIQ_BUILD_NUMBER 0
+#endif
+#define KWIQ_STR2(x) #x
+#define KWIQ_STR(x) KWIQ_STR2(x)
+#if KWIQ_BUILD_NUMBER > 0
+#define KWIQ_PLUGIN_VERSION   KWIQ_PLUGIN_VERSION_BASE "." KWIQ_STR(KWIQ_BUILD_NUMBER)
+#else
+#define KWIQ_PLUGIN_VERSION   KWIQ_PLUGIN_VERSION_BASE
+#endif
 #define KWIQ_PLUGIN_AUTHOR    "Kuwait & Iraq vACC"
 #define KWIQ_PLUGIN_COPYRIGHT "GPL-3.0-or-later"
 
@@ -45,7 +56,20 @@ enum {
     KWIQ_ITEM_SECTOR      = 1005,   // sector indicator of the ORBB station that tracks the aircraft
     KWIQ_FUNC_EVENT_ROUTES = 2001,   // "Open event routes window"
     KWIQ_FUNC_FPC_EXPLAIN  = 2002,   // "Explain FPC result"
-    KWIQ_FUNC_SRD_SEARCH   = 2003    // "Open SRD search window"
+    KWIQ_FUNC_SRD_SEARCH   = 2003,   // "Open SRD search window"
+    // the KWIQ button on the radar screen and its menu
+    KWIQ_OBJ_BUTTON        = 2100,
+    KWIQ_MENU_KEY          = 2101,
+    KWIQ_MENU_KEY_EDIT     = 2102,
+    KWIQ_MENU_SECTORS      = 2103,
+    KWIQ_MENU_AUTOREFRESH  = 2104,
+    KWIQ_MENU_EVENT_ROUTES = 2105,
+    KWIQ_MENU_SRD          = 2106,
+    KWIQ_MENU_SECTORFILE   = 2107,
+    KWIQ_MENU_UPDATE       = 2108,
+    KWIQ_MENU_REFRESH      = 2109,
+    KWIQ_MENU_STATUS       = 2110,
+    KWIQ_MENU_HIDE         = 2111
 };
 
 // ---------------------------------------------------------------------------
@@ -384,7 +408,7 @@ static CKWIQPlugin* gPlugin = nullptr;
 
 // ---- Local sector file version -------------------------------------------------
 // EuroScope does not expose the sector file version to plugins, so it is read from disk:
-//   1. AIRAC_VERSION.txt (e.g. "2610/02") next to the sector file / install package, or
+//   1. AIRAC_VERSION.txt (e.g. "2610/02") in the package's Plugins folder or next to the sector file, or
 //   2. the "AIRAC 2610/1" line in the header of the .ese in that folder.
 // Folder = the path set with ".kwiq sectorfile <folder|file>", else the plugin DLL's folder and its parents.
 namespace sf {
@@ -401,8 +425,12 @@ static bool IsDir(const std::string& p) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 static kwiq::Airac FromDir(const std::string& dir, std::string& src) {
-    kwiq::Airac a = kwiq::FindAirac(ReadHead(dir + "\\AIRAC_VERSION.txt", 256));
-    if (a.valid()) { src = dir + "\\AIRAC_VERSION.txt"; return a; }
+    // The packages keep it in <package>\Plugins\AIRAC_VERSION.txt
+    for (const std::string& f : { dir + "\\AIRAC_VERSION.txt", dir + "\\Plugins\\AIRAC_VERSION.txt" }) {
+        kwiq::Airac a = kwiq::FindAirac(ReadHead(f, 256));
+        if (a.valid()) { src = f; return a; }
+    }
+    kwiq::Airac a;
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA((dir + "\\*.ese").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return {};
@@ -488,13 +516,42 @@ static kwiq::Airac Local(const std::string& userPath, std::string& src) {
         return a;
     }
     std::string d = DllDir();
-    for (int i = 0; i < 3 && !d.empty(); i++, d = ParentOf(d)) {
+    for (int i = 0; i < 4 && !d.empty(); i++, d = ParentOf(d)) {
         kwiq::Airac a = FromDir(d, src);
         if (a.valid()) return a;
     }
     return {};
 }
 } // namespace sf
+
+// ---- personal API key ------------------------------------------------------------------------
+// Generated on myKWIQ and kept in %APPDATA%\KWIQ\plugin-key.txt, outside the EuroScope profile files,
+// so it is never shared along with a sector file package or someone's settings.
+namespace apikey {
+static std::string Dir() {
+    char b[MAX_PATH] = {};
+    DWORD n = GetEnvironmentVariableA("APPDATA", b, MAX_PATH);
+    return n && n < MAX_PATH ? std::string(b) + "\\KWIQ" : std::string();
+}
+static std::string Load() {
+    std::string d = Dir();
+    if (d.empty()) return "";
+    std::string k = kwiq::Trim(sf::ReadHead(d + "\\plugin-key.txt", 128));
+    return kwiq::IsApiKey(k) ? k : "";
+}
+static bool Save(const std::string& key) {
+    std::string d = Dir();
+    if (d.empty()) return false;
+    CreateDirectoryA(d.c_str(), nullptr);
+    std::string f = d + "\\plugin-key.txt";
+    if (key.empty()) { DeleteFileA(f.c_str()); return true; }
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, f.c_str(), "wb") != 0 || !fp) return false;
+    bool ok = fwrite(key.data(), 1, key.size(), fp) == key.size();
+    fclose(fp);
+    return ok;
+}
+} // namespace apikey
 
 // Values Core controls (defaults apply until the first config arrives or if Core is unreachable).
 struct UiCfg {
@@ -529,7 +586,10 @@ public:
         RegisterTagItemFunction("Open SRD search window",   KWIQ_FUNC_SRD_SEARCH);
         kwiq_ui::gOnSearch = &SrdSearchThunk;
         kwiq_ui::gOnNotice = &NoticeThunk;
-        Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded", false);
+        apiKey_ = apikey::Load();
+        kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
+        Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded" +
+            (apiKey_.empty() ? ". Enter your personal API key from myKWIQ with .kwiq key <your key>" : ""), false);
     }
     virtual ~CKWIQPlugin() {
         kwiq_ui::gOnSearch = nullptr;
@@ -552,6 +612,11 @@ public:
             settingsLoaded_ = true;
             const char* sp = GetDataFromSettings("kwiq_sectorfile_path");
             if (sp && *sp) { std::lock_guard<std::mutex> g(mu_); sectorPath_ = sp; }
+            const char* bs = GetDataFromSettings("kwiq_button");
+            if (bs && *bs == '0') buttonShown_ = false;
+            const char* bp = GetDataFromSettings("kwiq_button_pos");
+            int bx, by;
+            if (bp && sscanf_s(bp, "%d,%d", &bx, &by) == 2) { buttonDx_ = bx; buttonDy_ = by; }
             DeleteFileA((sf::DllPath() + ".old").c_str());   // left over from a previous self-update (fails while still loaded)
         }
         TickConnection();
@@ -578,6 +643,7 @@ public:
     }
 
     virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override {
+        if (FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_HIDE) { MenuAction(FunctionId, sItemString, Pt, Area); return; }
         switch (FunctionId) {
         case KWIQ_FUNC_EVENT_ROUTES: OpenRoutesWindow(Pt); return;
         case KWIQ_FUNC_FPC_EXPLAIN:  ExplainSelected(); return;
@@ -681,6 +747,18 @@ public:
             Msg(std::string("Sector indicators on the radar: ") + (sectorDraw_ ? "on" : "off"), false);
             return true;
         }
+        if (c == ".KWIQ KEY" || c.compare(0, 10, ".KWIQ KEY ") == 0) {
+            std::string key = kwiq::Trim(std::string(sCommandLine).substr(9));
+            if (key.empty()) Msg(apiKey_.empty() ? "No API key has been entered. Generate one on myKWIQ, then use: .kwiq key <your key>"
+                                                 : "API key " + kwiq::ApiKeyId(apiKey_) + " is in use.", false);
+            else if (kwiq::Upper(key) == "CLEAR") SetApiKey("");
+            else SetApiKey(key);
+            return true;
+        }
+        if (c == ".KWIQ BUTTON") {
+            ShowButton(!buttonShown_);
+            return true;
+        }
         if (c == ".KWIQ AUTOREFRESH") {
             autoRefresh_ = !autoRefresh_;
             Msg(std::string("Slot auto refresh: ") + (autoRefresh_ ? "on" : "off"), false);
@@ -689,6 +767,7 @@ public:
         if (c == ".KWIQ STATUS") {
             std::lock_guard<std::mutex> g(mu_);
             std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED by Core") +
+                " | API key " + (apiKey_.empty() ? std::string("not set") : kwiq::ApiKeyId(apiKey_)) +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
@@ -711,6 +790,68 @@ public:
         return it == sectors_.end() ? std::string() : it->second;
     }
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_; }
+
+    // ---- the KWIQ button and its menu (main thread) ------------------------------------------
+    // Small and dim in the bottom left of each radar screen; it can be dragged anywhere, and
+    // ".kwiq button" (or Hide Button in its menu) hides it and brings it back.
+    bool ButtonShown() const { return buttonShown_; }
+    RECT ButtonRect(const RECT& radar) const {
+        RECT r;
+        r.left = radar.left + buttonDx_;
+        r.top = radar.bottom - buttonDy_;
+        r.right = r.left + 34;
+        r.bottom = r.top + 14;
+        return r;
+    }
+    void MoveButton(const RECT& radar, POINT pt, bool released) {
+        buttonDx_ = (std::max)(0, (std::min)((int)(pt.x - radar.left) - 17, (int)(radar.right - radar.left) - 34));
+        buttonDy_ = (std::max)(14, (std::min)((int)(radar.bottom - pt.y) + 7, (int)(radar.bottom - radar.top)));
+        if (released) SaveDataToSettings("kwiq_button_pos", "KWIQ button position", (std::to_string(buttonDx_) + "," + std::to_string(buttonDy_)).c_str());
+    }
+    void ShowButton(bool shown) {
+        buttonShown_ = shown;
+        SaveDataToSettings("kwiq_button", "KWIQ button on the radar screen", shown ? "1" : "0");
+        Msg(shown ? "The KWIQ button is shown." : "The KWIQ button is hidden. Type .kwiq button to show it again.", false);
+    }
+    void OpenMenu(RECT area) {
+        std::string id = kwiq::ApiKeyId(apiKey_);
+        OpenPopupList(area, "KWIQ v" KWIQ_PLUGIN_VERSION, 2);
+        AddPopupListElement("API Key", id.empty() ? "Not set" : id.c_str(), KWIQ_MENU_KEY);
+        AddPopupListElement("Sector Indicators", sectorDraw_ ? "On" : "Off", KWIQ_MENU_SECTORS);
+        AddPopupListElement("Slot Auto Refresh", autoRefresh_ ? "On" : "Off", KWIQ_MENU_AUTOREFRESH);
+        AddPopupListElement("Event Routes", "", KWIQ_MENU_EVENT_ROUTES);
+        AddPopupListElement("SRD Search", "", KWIQ_MENU_SRD);
+        AddPopupListElement("Sector File", "Check", KWIQ_MENU_SECTORFILE);
+        AddPopupListElement("Plugin Updates", "Check", KWIQ_MENU_UPDATE);
+        AddPopupListElement("Refresh Data", "", KWIQ_MENU_REFRESH);
+        AddPopupListElement("Status", "", KWIQ_MENU_STATUS);
+        AddPopupListElement("Hide Button", "", KWIQ_MENU_HIDE, false, EuroScopePlugIn::POPUP_ELEMENT_NO_CHECKBOX, false, true);
+    }
+    void MenuAction(int id, const char* text, POINT pt, RECT area) {
+        switch (id) {
+        case KWIQ_MENU_KEY: {
+            RECT r = area;
+            r.right = r.left + 340;
+            r.bottom = r.top + 20;
+            OpenPopupEdit(r, KWIQ_MENU_KEY_EDIT, "");
+            return;
+        }
+        case KWIQ_MENU_KEY_EDIT: {
+            std::string key = kwiq::Trim(text ? text : "");
+            if (!key.empty()) SetApiKey(key);
+            return;
+        }
+        case KWIQ_MENU_SECTORS:      OnCompileCommand(".kwiq sector"); return;
+        case KWIQ_MENU_AUTOREFRESH:  OnCompileCommand(".kwiq autorefresh"); return;
+        case KWIQ_MENU_EVENT_ROUTES: OpenRoutesWindow(pt); return;
+        case KWIQ_MENU_SRD:          OpenSrdWindow(pt); return;
+        case KWIQ_MENU_SECTORFILE:   OnCompileCommand(".kwiq version"); return;
+        case KWIQ_MENU_UPDATE:       OnCompileCommand(".kwiq update"); return;
+        case KWIQ_MENU_REFRESH:      OnCompileCommand(".kwiq refresh"); return;
+        case KWIQ_MENU_STATUS:       OnCompileCommand(".kwiq status"); return;
+        case KWIQ_MENU_HIDE:         ShowButton(false); return;
+        }
+    }
     COLORREF SectorColour() { std::lock_guard<std::mutex> g(mu_); return ui_.cSector; }
 
     virtual EuroScopePlugIn::CRadarScreen* OnRadarScreenCreated(const char* sDisplayName, bool NeedRadarContent,
@@ -730,6 +871,19 @@ public:
     }
 
 private:
+    void SetApiKey(const std::string& key) {
+        if (!key.empty() && !kwiq::IsApiKey(key)) {
+            Msg("That is not a KWIQ API key. Copy it from myKWIQ, under EuroScope Plugin; it starts with kwiq_", true);
+            return;
+        }
+        if (!apikey::Save(key)) { Msg("The API key could not be saved in %APPDATA%\\KWIQ.", true); return; }
+        apiKey_ = key;
+        kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
+        { std::lock_guard<std::mutex> g(mu_); lastErr_.erase("API key"); srd_.version.clear(); }
+        lastCore_ = lastSrd_ = 0;                            // try it straight away
+        Msg(key.empty() ? "API key removed." : "API key " + kwiq::ApiKeyId(key) + " saved.", false);
+    }
+
     struct CacheEntry {
         bool valid = false;
         unsigned evGen = 0, srdGen = 0;
@@ -1040,8 +1194,8 @@ private:
         { std::lock_guard<std::mutex> g(mu_); if (!force && key == lastSfKey_) return; lastSfKey_ = key; }
         std::string tail = url.empty() ? "" : " Download: " + url;
         if (!l.valid())
-            Notify("Cannot find your " + pkg + " sector file version (current is " + u.Str() + "). Put AIRAC_VERSION.txt next to your "
-                   ".ese, or use: .kwiq sectorfile <folder or .ese path>", false);
+            Notify("Cannot find your " + pkg + " sector file version (current is " + u.Str() + "). Install the latest " + pkg +
+                   " package, which has Plugins\\AIRAC_VERSION.txt, or use: .kwiq sectorfile <folder or .ese path>", false);
         else if (CompareAirac(l, u) < 0)
             Notify(pkg + " SECTOR FILE OUT OF DATE: you have " + l.Str() + ", current is " + u.Str() + "." + tail, true);
         else if (CompareAirac(l, u) > 0)
@@ -1055,18 +1209,25 @@ private:
         try {
             using namespace kwiq;
             std::string body, err;
+            // Core refuses requests without a valid personal key once it requires them: say so once, not per request
+            auto fail = [this](const std::string& src, const std::string& e) {
+                if (e == "HTTP 401") SetError("API key", "Core did not accept your API key. Generate a new one on myKWIQ, under "
+                                                           "EuroScope Plugin, then use: .kwiq key <your key>");
+                else SetError(src, e);
+            };
 
             if (doCore) {
                 if (kwiq_net::HttpGet(CORE_CONFIG_URL, body, err)) {
                     ClearError("Config");
+                    ClearError("API key");
                     ApplyConfig(ParseConfig(body));
-                } else SetError("Config", err);
+                } else fail("Config", err);
                 if (kwiq_net::HttpGet(CORE_EVENT_URL, body, err)) {
                     ClearError("Core");
                     EventData ev = ParseCoreEvent(body);
                     std::lock_guard<std::mutex> g(mu_);
                     ev_ = std::move(ev); evGen_++;
-                } else SetError("Core", err);
+                } else fail("Core", err);
             }
 
             if (doSrd) {                               // cheap version check, full download only on change
@@ -1081,9 +1242,9 @@ private:
                             ClearError("SRD");
                             std::lock_guard<std::mutex> g(mu_);
                             srd_ = std::move(d); srdGen_++;
-                        } else SetError("SRD", err);
+                        } else fail("SRD", err);
                     } else ClearError("SRD");
-                } else SetError("SRD", err);
+                } else fail("SRD", err);
             }
             if (doSrd) {                               // sector aliases: tiny, refreshed with the SRD
                 if (kwiq_net::HttpGet(CORE_SECTORS_URL, body, err)) {
@@ -1091,7 +1252,7 @@ private:
                     SectorMap m = ParseSectors(body);
                     std::lock_guard<std::mutex> g(mu_);
                     sectors_ = std::move(m);
-                } else SetError("Sectors", err);
+                } else fail("Sectors", err);
             }
         } catch (...) {}
         busy_ = false;
@@ -1104,6 +1265,9 @@ private:
     std::atomic<bool> enabled_{ true };
     std::atomic<int> coreEvery_{ 60 }, srdEvery_{ 300 }, slotsEvery_{ 60 };
     bool settingsLoaded_ = false;                                   // main thread only
+    bool buttonShown_ = true;                                       // main thread only
+    int buttonDx_ = 8, buttonDy_ = 22;                              // main thread only: from the radar's bottom left
+    std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     bool connected_ = false, alertDone_ = true;                     // main thread only
     std::string alertUrl_, promptedFor_;                            // main thread only
     std::thread updateThread_;
@@ -1135,12 +1299,17 @@ public:
         font_ = CreateFontA(-12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                             CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
     }
-    virtual ~CKWIQRadar() { if (font_) DeleteObject(font_); }
+    virtual ~CKWIQRadar() {
+        if (font_) DeleteObject(font_);
+        if (small_) DeleteObject(small_);
+    }
 
     virtual void OnAsrContentToBeClosed(void) override { delete this; }
 
     virtual void OnRefresh(HDC hDC, int Phase) override {
-        if (Phase != EuroScopePlugIn::REFRESH_PHASE_AFTER_TAGS || !gPlugin || !gPlugin->SectorDrawEnabled()) return;
+        if (!gPlugin) return;
+        if (Phase == EuroScopePlugIn::REFRESH_PHASE_AFTER_LISTS && gPlugin->ButtonShown()) DrawButton(hDC);
+        if (Phase != EuroScopePlugIn::REFRESH_PHASE_AFTER_TAGS || !gPlugin->SectorDrawEnabled()) return;
         RECT area = GetRadarArea();
         int saved = SaveDC(hDC);
         SetBkMode(hDC, TRANSPARENT);
@@ -1164,8 +1333,39 @@ public:
         RestoreDC(hDC, saved);
     }
 
+    virtual void OnClickScreenObject(int ObjectType, const char*, POINT, RECT Area, int) override {
+        if (ObjectType == KWIQ_OBJ_BUTTON && gPlugin) gPlugin->OpenMenu(Area);
+    }
+    virtual void OnMoveScreenObject(int ObjectType, const char*, POINT Pt, RECT, bool Released) override {
+        if (ObjectType != KWIQ_OBJ_BUTTON || !gPlugin) return;
+        gPlugin->MoveButton(GetRadarArea(), Pt, Released);
+        RequestRefresh();
+    }
+    // the menu and the key box opened from the button report back here
+    virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override {
+        if (gPlugin && FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_HIDE) gPlugin->MenuAction(FunctionId, sItemString, Pt, Area);
+    }
+
 private:
+    void DrawButton(HDC hDC) {
+        RECT r = gPlugin->ButtonRect(GetRadarArea());
+        int saved = SaveDC(hDC);
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
+        SelectObject(hDC, pen);
+        SelectObject(hDC, GetStockObject(NULL_BRUSH));
+        Rectangle(hDC, r.left, r.top, r.right, r.bottom);
+        SetBkMode(hDC, TRANSPARENT);
+        SetTextColor(hDC, RGB(130, 130, 130));
+        if (small_) SelectObject(hDC, small_);
+        DrawTextA(hDC, "KWIQ", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RestoreDC(hDC, saved);
+        DeleteObject(pen);
+        AddScreenObject(KWIQ_OBJ_BUTTON, "KWIQ", r, true, "KWIQ options");
+    }
+
     HFONT font_ = nullptr;
+    HFONT small_ = CreateFontA(-10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                               CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
 };
 
 EuroScopePlugIn::CRadarScreen* CKWIQPlugin::OnRadarScreenCreated(const char*, bool, bool, bool, bool) {

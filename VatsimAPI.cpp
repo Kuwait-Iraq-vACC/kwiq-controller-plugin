@@ -45,13 +45,28 @@ static void setup_curl_modern(CURL* h, const char* url, string* response) {
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
 }
 
+// The personal API key and plugin version, sent to Core only (never to VATSIM or VATCAN)
+static std::mutex authMutex;
+static string authPrefix, authKey, authVersion;
+
+static curl_slist* core_headers(const string& url) {
+    std::lock_guard<std::mutex> g(authMutex);
+    if (authPrefix.empty() || url.compare(0, authPrefix.size(), authPrefix) != 0) return nullptr;
+    curl_slist* h = curl_slist_append(nullptr, ("X-KWIQ-Version: " + authVersion).c_str());
+    if (!authKey.empty()) h = curl_slist_append(h, ("X-KWIQ-Key: " + authKey).c_str());
+    return h;
+}
+
 static CURLcode fetch_url(const char* url, string& response, long* httpCode = nullptr) {
     CURL* curl = curl_easy_init();
     if (!curl) { return CURLE_FAILED_INIT; }
     setup_curl_modern(curl, url, &response);
+    curl_slist* headers = core_headers(url);
+    if (headers) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     CURLcode res = curl_easy_perform(curl);
     if (httpCode) { curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, httpCode); }
     curl_easy_cleanup(curl);
+    curl_slist_free_all(headers);
     return res;
 }
 
@@ -59,6 +74,11 @@ namespace kwiq_net {
 
 void GlobalInit() { curl_global_init(CURL_GLOBAL_DEFAULT); }
 void GlobalCleanup() { curl_global_cleanup(); }
+
+void SetCoreAuth(const string& urlPrefix, const string& key, const string& version) {
+    std::lock_guard<std::mutex> g(authMutex);
+    authPrefix = urlPrefix; authKey = key; authVersion = version;
+}
 
 bool HttpGet(const string& url, string& body, string& err) {
     body.clear();
@@ -105,10 +125,13 @@ bool HttpGetBinary(const string& url, string& body, string& err, size_t maxBytes
     curl_easy_setopt(h, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(h, CURLOPT_XFERINFOFUNCTION, on_progress);
     curl_easy_setopt(h, CURLOPT_XFERINFODATA, (void*)cancel);
+    curl_slist* headers = core_headers(url);
+    if (headers) curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
     CURLcode res = curl_easy_perform(h);
     long code = 0;
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
     curl_easy_cleanup(h);
+    curl_slist_free_all(headers);
     if (sink.tooBig) { err = "download larger than allowed"; return false; }
     if (res != CURLE_OK) { err = curl_easy_strerror(res); return false; }
     if (code != 200) { err = "HTTP " + std::to_string(code); return false; }

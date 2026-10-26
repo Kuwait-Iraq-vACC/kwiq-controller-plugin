@@ -6,7 +6,7 @@ Kuwait & Iraq vACC EuroScope plugin: VCH, event routes and slots, FPC and SRD se
 1. Set the three Core URLs near the top of `KWIQPlugin.cpp`.
 2. Push this folder to your private repo (branch `main`).
 3. Open **Actions > build**. It runs the logic tests, then builds a 32-bit `KWIQPlugin.dll` on a Windows runner (about 5-10 minutes the first time, faster once vcpkg is cached).
-4. Open the finished run and download the **KWIQPlugin** artifact. Pushing a tag such as `v0.3.0` also creates a draft release with the DLL attached.
+4. Open the finished run and download the **KWIQPlugin** artifact. Every build on `main` is also published as a release, versioned `KWIQ_PLUGIN_VERSION_BASE` plus the run number (e.g. `v0.5.0.42`), which Core then offers to controllers. Each pull request gets a test pre-release (`pr-<number>`), replaced on every push and removed when the pull request is closed; running the workflow by hand on another branch makes one named after the branch. Core never offers pre-releases. Change `KWIQ_PLUGIN_VERSION_BASE` in `KWIQPlugin.cpp` for a new minor or major version.
 
 ## Load it in EuroScope
 Plugins > Load > pick `KWIQPlugin.dll`. VCH is built in: do not load VCH separately.
@@ -24,22 +24,27 @@ Functions: **Open event routes window** (left button on Event Route), **Explain 
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
-`.kwiq status`, `.kwiq refresh`, `.kwiq sector`, `.kwiq autorefresh`, `.kwiq update` (offer a pending plugin update), `.kwiq alert` (preview the sector file alert), `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or .ese>` (tell the plugin where your sector file is; empty = automatic), plus VCH's own `.vch ...` commands.
+`.kwiq key <key>` (your personal API key from myKWIQ; `.kwiq key` shows which is in use, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq sector`, `.kwiq autorefresh`, `.kwiq update` (offer a pending plugin update), `.kwiq alert` (preview the sector file alert), `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or .ese>` (tell the plugin where your sector file is; empty = automatic), plus VCH's own `.vch ...` commands.
 
 ## What Core controls
 Only the Core address is compiled in. `/api/plugin/config` supplies: kill switch, minimum plugin version, message of the day, refresh intervals, tag texts and colours, sector indicator colour/default, and the current sector file AIRAC. Sector aliases, the SRD and events have their own endpoints. All of it is edited in Filament (Plugin settings, Sector aliases, SRD routes, Plugin events).
 
 ## Plugin updates
-Core mirrors the DLL of the newest *published* GitHub release (`php artisan plugin:sync-release`, scheduled every 5 minutes; the build workflow creates the release as a draft, so review and publish it). Set `plugin.github_repo` in Plugin settings, plus `PLUGIN_GITHUB_TOKEN` if the repo is private. When Core advertises a newer version, the plugin shows a "PLUGIN UPDATE" popup (Update now / Later). Update now downloads in the background, checks the SHA-256 Core published and that the file is a 32-bit DLL, then swaps the file (the running DLL is renamed to `.old`, removed at next start). EuroScope is not interrupted. The new version loads the next time EuroScope starts: EuroScope cannot safely reload a plugin inside a running session. `.kwiq update` asks again.
+Core mirrors the DLL of the newest *published* GitHub release (`php artisan plugin:sync-release`, scheduled every 5 minutes; every build on `main` is published as a release). Set `plugin.github_repo` in Plugin settings, plus `PLUGIN_GITHUB_TOKEN` if the repo is private. When Core advertises a newer version, the plugin shows a "PLUGIN UPDATE" popup (Update now / Later). Update now downloads in the background, checks the SHA-256 Core published and that the file is a 32-bit DLL, then swaps the file (the running DLL is renamed to `.old`, removed at next start). EuroScope is not interrupted. The new version loads the next time EuroScope starts: EuroScope cannot safely reload a plugin inside a running session. `.kwiq update` asks again.
 
 ## Outdated sector file alert
 When a controller logs on (direct, proxy or sweatbox) and the local sector file is older than Core's version, a flashing red "OUTDATED SCT FILE" popup appears and `conflict_alert.wav` plays. It flashes between two colours for `alert.flash_seconds`, then stays solid; it never takes keyboard focus. The sound is searched for in the sector file's package (`Sounds` folder, also one folder down), near the plugin, then in every package under `%APPDATA%\EuroScope` (newest wins); a system beep is the fallback. `.kwiq alert` previews it. All alert settings are in Core (`alert.*`).
 
 ## Sector file version check
-OKAC and ORBB are released separately, so Core holds a current AIRAC for each (`sectorfile.airac.okac` and `sectorfile.airac.orbb`, e.g. `2610/02`), filled by `php artisan sectorfile:sync` from `AIRAC_VERSION.txt` in each package's repository (see `docs/sector-file-release.yml`). The plugin compares the loaded sector file with its own package's version: the package is taken from the sector file's path (the OKAC or ORBB folder or file nearest it), otherwise from the controller's callsign (OR... is ORBB, OK... is OKAC). The plugin finds the local version from `AIRAC_VERSION.txt` or the `AIRAC 2610/1` line in the `.ese` header, looking in the folder given with `.kwiq sectorfile`, otherwise in the plugin DLL's folder and its two parents. Ship the plugin and `AIRAC_VERSION.txt` in the same install package and it works with no setup. "2610/2" and "2610/02" are treated as equal.
+OKAC and ORBB are released separately, so Core holds a current AIRAC for each (`sectorfile.airac.okac` and `sectorfile.airac.orbb`, e.g. `2610/02`), filled by `php artisan sectorfile:sync` from `AIRAC_VERSION.txt` in each package's repository, falling back to the tag of its latest release. The plugin compares the loaded sector file with its own package's version: the package is taken from the sector file's path (the OKAC or ORBB folder or file nearest it), otherwise from the controller's callsign (OR... is ORBB, OK... is OKAC). The plugin finds the local version from `AIRAC_VERSION.txt` or the `AIRAC 2610/1` line in the `.ese` header, looking in the folder given with `.kwiq sectorfile`, otherwise in the plugin DLL's folder and its three parents, in each case also in its `Plugins` folder. The packages keep it in `OKAC\Plugins\AIRAC_VERSION.txt` and `ORBB\Plugins\AIRAC_VERSION.txt`, which is also where Core reads the current version from, so it works with no setup. "2610/2" and "2610/02" are treated as equal.
 
 ## Tests
 `g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic && ./test_logic`
 
 ## Licence
 GPL-3.0-or-later. Read `NOTICE.md` before distributing the DLL.
+
+## Personal API key and the KWIQ button
+Home and visiting controllers generate a personal API key on myKWIQ (EuroScope Plugin), where the plugin can also be downloaded. Enter it with `.kwiq key <key>` or from the KWIQ button; it is kept in `%APPDATA%\KWIQ\plugin-key.txt`, outside the EuroScope profile, and sent to Core as `X-KWIQ-Key` with the plugin version as `X-KWIQ-Version`. Core only refuses requests without a valid key once `api.require_key` is set to 1, so it can be switched on after everyone has a version that sends one. Staff can see and invalidate keys in Core under EuroScope Plugin > API Keys.
+
+The KWIQ button is a small, dim box in the bottom left of each radar screen. Click it for the plugin's menu: API key, sector indicators, slot auto refresh, event routes, SRD search, sector file and update checks, refresh and status. Drag it to move it; `.kwiq button` or Hide Button in the menu hides it, and `.kwiq button` brings it back.

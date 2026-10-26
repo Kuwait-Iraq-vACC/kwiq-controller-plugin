@@ -1,17 +1,26 @@
 name: build
 
+# main:          every build is published as a release (v0.5.0.<run>), which Core offers to controllers
+# pull requests: each one gets a test pre-release (pr-<number>), replaced on every push and removed when
+#                the pull request is closed. Core never offers pre-releases.
+# manual run on another branch: a test pre-release named after the branch.
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
+    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 permissions:
-  contents: write   # needed to create a draft release on tags
+  contents: write   # to create releases
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,8 +34,19 @@ jobs:
     runs-on: windows-2022
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          base=$(sed -n 's/^#define KWIQ_PLUGIN_VERSION_BASE "\(.*\)"/\1/p' KWIQPlugin.cpp)
+          [ -n "$base" ] || { echo "KWIQ_PLUGIN_VERSION_BASE not found"; exit 1; }
+          echo "version=$base.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "Building $base.${{ github.run_number }}"
 
       - name: Prepare vcpkg cache
         run: New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
@@ -41,6 +61,7 @@ jobs:
           cmake -S . -B build -A Win32
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=x86-windows-static-md
+          -DKWIQ_BUILD_NUMBER=${{ github.run_number }}
 
       - name: Build
         run: cmake --build build --config Release
@@ -62,8 +83,45 @@ jobs:
           path: build/Release/KWIQPlugin.dll
           if-no-files-found: error
 
-      - name: Draft release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    needs: build
+    # pull requests from forks get a read-only token, so they only get the artifact
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: KWIQPlugin
+
+      - name: Release (main)
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        run: |
+          gh release create "v$VERSION" KWIQPlugin.dll --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
+
+      - name: Test pre-release (pull requests and other branches)
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" build/Release/KWIQPlugin.dll --draft --generate-notes
+          PR: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -n "$PR" ]; then tag="pr-$PR"; title="Test build for #$PR: $PR_TITLE ($VERSION)"
+          else tag="test-$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"; title="Test build of $GITHUB_REF_NAME ($VERSION)"; fi
+          gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$tag" KWIQPlugin.dll --prerelease --target "$SHA" --title "$title" \
+            --notes "For testing only. Core does not offer pre-releases to controllers. Built from ${SHA:0:7}."
+
+  cleanup:
+    # a closed pull request no longer needs its test build
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Remove the test pre-release
+        run: gh release delete "pr-${{ github.event.pull_request.number }}" --cleanup-tag --yes || true
