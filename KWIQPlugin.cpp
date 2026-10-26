@@ -44,7 +44,7 @@ enum {
     KWIQ_ITEM_EVENT_FLAG  = 1002,
     KWIQ_ITEM_EVENT_SLOT  = 1003,
     KWIQ_ITEM_FPC         = 1004,
-    KWIQ_ITEM_SECTOR      = 1005,   // sector indicator of the ORBB station that tracks the aircraft
+    KWIQ_ITEM_SECTOR      = 1005,   // sector indicator of the position that tracks the aircraft
     KWIQ_FUNC_EVENT_ROUTES = 2001,   // "Open event routes window"
     KWIQ_FUNC_FPC_EXPLAIN  = 2002,   // "Explain FPC result"
     KWIQ_FUNC_SRD_SEARCH   = 2003,   // "Open SRD search window"
@@ -793,7 +793,7 @@ public:
         return CVCHPlugin::OnCompileCommand(sCommandLine);
     }
 
-    // Sector indicator of the ORBB station tracking an aircraft; empty if none / not an ORBB station.
+    // Sector indicator of the position tracking an aircraft; empty if none or it has no alias in Core.
     std::string SectorFor(const char* trackerCallsign) {
         std::lock_guard<std::mutex> g(mu_);
         auto it = sectors_.find(trackerCallsign);
@@ -1317,7 +1317,7 @@ private:
 };
 
 // Radar screen overlay: draws the sector indicator above the symbol of every aircraft that is
-// tracked by an ORBB FIR station (NR / SR ...). Core decides which stations and which text.
+// tracked by a position with an alias in Core (NR, SR, BGD ...). Core decides which positions and which text.
 class CKWIQRadar : public EuroScopePlugIn::CRadarScreen {
 public:
     CKWIQRadar() {
@@ -1357,7 +1357,7 @@ public:
             const char* tracker = fp.GetTrackingControllerCallsign();       // empty when nobody tracks it
             if (!tracker || !*tracker) continue;
             std::string alias = gPlugin->SectorFor(tracker);
-            if (alias.empty()) continue;                                    // not an ORBB station
+            if (alias.empty()) continue;                                    // no alias for that position
             POINT p = ConvertCoordFromPositionToPixel(rt.GetPosition().GetPosition());
             if (p.x < area.left || p.x > area.right || p.y < area.top || p.y > area.bottom) continue;
             TextOutA(hDC, p.x, p.y - 9, alias.c_str(), (int)alias.size());

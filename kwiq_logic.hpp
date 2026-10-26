@@ -301,15 +301,12 @@ inline std::vector<size_t> SrdSearch(const SrdData& d, const std::string& adep, 
 }
 
 
-// ---- Sector indicators (ORBB only) -----------------------------------------
-// Core /api/plugin/sectors (plain text):  SECTOR|<ORBB position callsign>|<alias, max 4 chars>
-// The alias is what controllers see on the radar (e.g. ORBB_S_CTR -> SR); it is independent of
-// the id used in the ESE file.
+// ---- Sector indicators -------------------------------------------------------
+// Core /api/plugin/sectors (plain text):  SECTOR|<position callsign>|<alias, max 4 chars>
+// The alias is what controllers see on the radar (e.g. ORBB_S_CTR -> SR, BGD_APP -> BGD); it is
+// independent of the id used in the ESE file. Any position Core lists gets one.
 using SectorMap = std::unordered_map<std::string, std::string>;   // callsign -> alias
 
-inline bool IsOrbbCallsign(const std::string& cs) {
-    return cs.size() >= 4 && cs.compare(0, 4, "ORBB") == 0 && (cs.size() == 4 || cs[4] == '_');
-}
 inline SectorMap ParseSectors(const std::string& body) {
     SectorMap m;
     for (const auto& line : SplitChar(body, '\n')) {
@@ -317,7 +314,7 @@ inline SectorMap ParseSectors(const std::string& body) {
         if (f[0] != "SECTOR" || f.size() < 3) continue;
         std::string cs = Upper(Trim(f[1])), alias = Upper(Trim(f[2]));
         if (alias.size() > 4) alias.resize(4);
-        if (!IsOrbbCallsign(cs) || alias.empty()) continue;      // only ORBB FIR stations get an indicator
+        if (cs.empty() || alias.empty()) continue;
         m[cs] = alias;
     }
     return m;

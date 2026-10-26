@@ -72,11 +72,10 @@ int main() {
     CHECK(SrdSearch(srd, "ABC", "XYZ", 0).size() == 1);
     CHECK(SrdSearch(srd, "NOPE", "", 0).empty());
 
-    // sector indicators (ORBB only)
-    SectorMap sm = ParseSectors("SECTOR|orbb_s_ctr|sr\nSECTOR|ORBB_N_CTR|NR\nSECTOR|OKAC_CTR|KR\nSECTOR|ORBB_X|\nSECTOR|ORBB_LONG|ABCDE\nbad\n");
-    CHECK(sm.size() == 3 && sm["ORBB_S_CTR"] == "SR" && sm["ORBB_N_CTR"] == "NR" && sm["ORBB_LONG"] == "ABCD");
-    CHECK(sm.find("OKAC_CTR") == sm.end() && sm.find("ORBB_X") == sm.end());
-    CHECK(IsOrbbCallsign("ORBB_S_CTR") && IsOrbbCallsign("ORBB") && !IsOrbbCallsign("ORBBX") && !IsOrbbCallsign("OKAC_CTR") && !IsOrbbCallsign(""));
+    // sector indicators, for any position Core lists
+    SectorMap sm = ParseSectors("SECTOR|orbb_s_ctr|sr\nSECTOR|ORBB_N_CTR|NR\nSECTOR|BGD_APP|BGD\nSECTOR|ORBB_X|\nSECTOR|ORBB_LONG|ABCDE\nbad\n");
+    CHECK(sm.size() == 4 && sm["ORBB_S_CTR"] == "SR" && sm["ORBB_N_CTR"] == "NR" && sm["BGD_APP"] == "BGD" && sm["ORBB_LONG"] == "ABCD");
+    CHECK(sm.find("ORBB_X") == sm.end());
     CHECK(ParseSectors("NONE\n").empty());
 
 
