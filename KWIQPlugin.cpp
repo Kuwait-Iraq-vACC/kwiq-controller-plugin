@@ -994,6 +994,12 @@ private:
         { std::lock_guard<std::mutex> g(mu_); ups = upstreamAirac_; urls = sectorUrl_; path = sectorPath_; callsign = myCallsign_; }
         std::string src;
         Airac l = sf::Local(path, src);
+        // Last resort: the version in the package's folder name, e.g. ...\ORBB-2610_02\ORBB\Plugins
+        for (const std::string& p : { path, sf::DllDir() }) {
+            if (l.valid() || p.empty()) break;
+            l = AiracFromPath(p);
+            if (l.valid()) src = p;
+        }
         std::string pkg = SectorPackage(src.empty() ? path : src, callsign);
         if (pkg.empty()) {
             { std::lock_guard<std::mutex> g(mu_); sf_ = SfStatus{}; }

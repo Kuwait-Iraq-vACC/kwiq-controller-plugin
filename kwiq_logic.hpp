@@ -404,6 +404,21 @@ inline Airac FindAirac(const std::string& text, const std::string& marker = "") 
     return {};
 }
 // <0 = local older than upstream, 0 = same, >0 = local newer
+// The version in a sector file package's folder name, e.g. ...\ORBB-2610_02 - Copy\ORBB\ -> 2610/02.
+// Used when the package has no AIRAC_VERSION.txt and its .ese header gives no version.
+inline Airac AiracFromPath(const std::string& path) {
+    std::string p = Upper(path);
+    for (const char* pkg : { "OKAC-", "ORBB-" }) {
+        size_t at = p.rfind(pkg);
+        if (at == std::string::npos) continue;
+        std::string rest = p.substr(at + 5, 8);
+        std::replace(rest.begin(), rest.end(), '_', '/');
+        Airac a = FindAirac(rest);
+        if (a.valid()) return a;
+    }
+    return {};
+}
+
 // Which sector file package is loaded, "OKAC" or "ORBB" ("" if it can't be told). The package's name
 // in the sector file's path wins (the folder nearest the file, e.g. ...\ORBB-2610_02\ORBB\ORBB.ese);
 // otherwise the controller's own callsign: OR... is Iraq (ORBB), OK... is Kuwait (OKAC).

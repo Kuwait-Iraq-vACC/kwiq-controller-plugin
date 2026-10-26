@@ -125,6 +125,10 @@ int main() {
     CHECK(SectorPackage("", "OKBK_GND") == "OKAC");
     CHECK(SectorPackage("C:\\EuroScope\\Sector\\x.ese", "LON_CTR") == "");
 
+    CHECK(AiracFromPath("C:\\Users\\x\\EuroScope\\ORBB-2610_02 - Copy\\ORBB\\Plugins").Str() == "2610/02");
+    CHECK(AiracFromPath("C:\\EuroScope\\okac-2608_1\\OKAC").Str() == "2608/01");
+    CHECK(!AiracFromPath("C:\\EuroScope\\ORBB\\Plugins").valid());
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
