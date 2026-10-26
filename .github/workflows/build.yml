@@ -86,8 +86,8 @@ jobs:
             throw "KWIQPlugin.dll does not contain the plugin"
           }
 
-      # KWIQPlugin.dll (with the plugin built in) is what controllers download from myKWIQ;
-      # KWIQPluginCore.dll is what installed copies update to
+      # Releases carry KWIQPlugin.dll only (the plugin is built in): controllers download it from
+      # myKWIQ, and installed copies update from it. The artifact also has KWIQPluginCore.dll on its own.
       - uses: actions/upload-artifact@v4
         with:
           name: KWIQPlugin
@@ -113,7 +113,7 @@ jobs:
       - name: Release (main)
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         run: |
-          gh release create "v$VERSION" KWIQPlugin.dll KWIQPluginCore.dll --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
+          gh release create "v$VERSION" KWIQPlugin.dll --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
 
       - name: Test pre-release (pull requests and other branches)
         if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
@@ -125,7 +125,7 @@ jobs:
           if [ -n "$PR" ]; then tag="pr-$PR"; title="Test build for #$PR: $PR_TITLE ($VERSION)"
           else tag="test-$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"; title="Test build of $GITHUB_REF_NAME ($VERSION)"; fi
           gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
-          gh release create "$tag" KWIQPlugin.dll KWIQPluginCore.dll --prerelease --target "$SHA" --title "$title" \
+          gh release create "$tag" KWIQPlugin.dll --prerelease --target "$SHA" --title "$title" \
             --notes "For testing only. Core does not offer pre-releases to controllers. Built from ${SHA:0:7}."
 
   cleanup:

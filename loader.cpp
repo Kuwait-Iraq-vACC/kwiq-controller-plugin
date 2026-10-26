@@ -2,7 +2,8 @@
 //
 // The plugin itself, KWIQPluginCore.dll, is built into this file. It is kept up to date in
 // %APPDATA%\KWIQ\plugin and loaded from there: put there from this file the first time (or when
-// this file carries a newer version), and updated from Core. As EuroScope starts, before the plugin
+// this file carries a newer version), and updated by taking it out of the latest KWIQPlugin.dll
+// from Core, which also replaces this file for the next start. As EuroScope starts, before the plugin
 // is loaded, the loader asks Core for the latest version; if there is a newer one it offers it in a
 // Windows message box, downloads it, checks its SHA-256 against the one Core publishes and that it
 // is a 32-bit DLL, and replaces the file. The new version then runs straight away: nothing to
@@ -132,17 +133,13 @@ static std::string InstalledVersion(const std::string& core) {
     return out;
 }
 
-// Download, check and put in place. Returns why it failed, or "" when done.
-static std::string Install(const std::string& core, const std::string& installed, const std::string& sha) {
-    std::string dll;
-    int status = CoreGet(CORE_PATH L"/download", installed.empty() ? "0" : installed, dll, 40u * 1024 * 1024, 60000);
-    if (status == 401) return "Core did not accept your API key. Connect it again from myKWIQ.";
-    if (status != 200) return status ? "Core answered with HTTP " + std::to_string(status) + "." : "Core could not be reached.";
-    if (kwiq::Sha256Hex(dll) != kwiq::Lower(sha)) return "The download did not match the checksum Core published.";
-    if (!kwiq::LooksLikeX86Dll(dll)) return "The download is not a 32-bit plugin DLL.";
-    if (!WriteWhole(core, dll.data(), dll.size()))
-        return "The plugin file could not be replaced (" + core + "). Is EuroScope open twice?";
-    return "";
+// The plugin built into a KWIQPlugin.dll's resources (this file, or a newer one just downloaded)
+static bool ExtractFrom(HMODULE m, const std::string& core) {
+    HRSRC res = m ? FindResourceA(m, "KWIQCORE", MAKEINTRESOURCEA(10)) : nullptr;     // 10 = RT_RCDATA
+    HGLOBAL data = res ? LoadResource(m, res) : nullptr;
+    const void* bytes = data ? LockResource(data) : nullptr;
+    DWORD size = res ? SizeofResource(m, res) : 0;
+    return bytes && size && WriteWhole(core, bytes, size);
 }
 
 // Puts the plugin built into this file in place, the first time or when this file's is newer
@@ -151,55 +148,66 @@ static void ExtractBuiltIn(const std::string& core) {
     if (!installed.empty() && installed != "0" && kwiq::CompareVersions(installed, KWIQ_PLUGIN_VERSION) >= 0) return;
     HMODULE self = nullptr;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&ExtractBuiltIn, &self);
-    HRSRC res = FindResourceA(self, "KWIQCORE", MAKEINTRESOURCEA(10));     // 10 = RT_RCDATA
-    HGLOBAL data = res ? LoadResource(self, res) : nullptr;
-    const void* bytes = data ? LockResource(data) : nullptr;
-    DWORD size = res ? SizeofResource(self, res) : 0;
-    if (!bytes || !size) return;
     CreateDirectoryA(KwiqDir().c_str(), nullptr);
     CreateDirectoryA((KwiqDir() + "\\plugin").c_str(), nullptr);
-    if (!WriteWhole(core, bytes, size) && installed.empty())
+    if (!ExtractFrom(self, core) && installed.empty())
         MessageBoxA(nullptr, ("The plugin could not be installed in " + core + ".").c_str(), kTitle, MB_OK | MB_ICONWARNING | MB_TOPMOST);
 }
 
-// This file replaces itself with the latest KWIQPlugin.dll, quietly, for the next start: Windows lets
-// a loaded DLL be renamed but not overwritten, so it moves aside to KWIQPlugin.dll.old (removed then)
-static void UpdateSelf(const kwiq::PluginConfig& cfg) {
-    std::string self = SelfPath(), latest = kwiq::Trim(cfg.Get("plugin.latest_version"));
-    std::string sha = kwiq::Lower(kwiq::Trim(cfg.Get("plugin.loader_sha256")));
-    if (self.empty() || sha.size() != 64 || kwiq::CompareVersions(KWIQ_PLUGIN_VERSION, latest) >= 0) return;
-    std::string mine = ReadSmallFile(self, 64u * 1024 * 1024);
-    if (mine.empty() || kwiq::Sha256Hex(mine) == sha) return;     // unreadable: leave it rather than fetch every start
-
-    std::string dll;
-    if (CoreGet(CORE_PATH L"/download/loader", KWIQ_PLUGIN_VERSION, dll, 64u * 1024 * 1024, 60000) != 200) return;
-    if (kwiq::Sha256Hex(dll) != sha || !kwiq::LooksLikeX86Dll(dll)) return;
-    std::string old = self + ".old";
+// This file replaces itself with a newer KWIQPlugin.dll for the next start: Windows lets a loaded DLL
+// be renamed but not overwritten, so it moves aside to KWIQPlugin.dll.old (removed then)
+static void ReplaceSelf(const std::string& dll) {
+    std::string self = SelfPath(), old = self + ".old";
+    if (self.empty()) return;
     DeleteFileA(old.c_str());
     if (!MoveFileExA(self.c_str(), old.c_str(), 0)) return;
     if (!WriteWhole(self, dll.data(), dll.size())) MoveFileExA(old.c_str(), self.c_str(), 0);   // put it back
+}
+
+// The latest KWIQPlugin.dll from Core, checked against plugin.loader_sha256. Returns why it failed, or "".
+static std::string Download(const std::string& sha, std::string& dll) {
+    int status = CoreGet(CORE_PATH L"/download/loader", KWIQ_PLUGIN_VERSION, dll, 64u * 1024 * 1024, 60000);
+    if (status == 401) return "Core did not accept your API key. Connect it again from myKWIQ.";
+    if (status != 200) return status ? "Core answered with HTTP " + std::to_string(status) + "." : "Core could not be reached.";
+    if (kwiq::Sha256Hex(dll) != sha) return "The download did not match the checksum Core published.";
+    if (!kwiq::LooksLikeX86Dll(dll)) return "The download is not a 32-bit plugin DLL.";
+    return "";
+}
+
+// Updates the installed plugin from the latest KWIQPlugin.dll, then this file. Returns why it failed, or "".
+static std::string Install(const std::string& core, const std::string& sha) {
+    std::string dll, err = Download(sha, dll);
+    if (!err.empty()) return err;
+    // Its resources are read from a copy on disk; nothing in it is run
+    std::string tmp = core + ".download";
+    if (!WriteWhole(tmp, dll.data(), dll.size())) return "The plugin's folder cannot be written to (" + core + ").";
+    HMODULE m = LoadLibraryExA(tmp.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    bool ok = ExtractFrom(m, core);
+    if (m) FreeLibrary(m);
+    DeleteFileA(tmp.c_str());
+    if (!ok) return "The plugin file could not be replaced (" + core + "). Is EuroScope open twice?";
+    ReplaceSelf(dll);
+    return "";
 }
 
 static void CheckForUpdate(const std::string& core) {
     std::string installed = InstalledVersion(core), body;
     if (CoreGet(CORE_PATH L"/config", installed.empty() ? "0" : installed, body, 1024 * 1024, 5000) != 200) return;
     kwiq::PluginConfig cfg = kwiq::ParseConfig(body);
-    UpdateSelf(cfg);
-    std::string latest = kwiq::Trim(cfg.Get("plugin.latest_version")), sha = kwiq::Trim(cfg.Get("plugin.sha256"));
+    std::string latest = kwiq::Trim(cfg.Get("plugin.latest_version")), sha = kwiq::Lower(kwiq::Trim(cfg.Get("plugin.loader_sha256")));
 
-    if (installed.empty()) {                             // the main file is missing: put it back without asking
-        if (latest.empty() || sha.size() != 64) return;
-        std::string err = Install(core, installed, sha);
-        if (!err.empty()) MessageBoxA(nullptr, ("The plugin could not be installed. " + err).c_str(), kTitle, MB_OK | MB_ICONWARNING | MB_TOPMOST);
+    if (!kwiq::UpdateAvailable(installed, latest, sha)) {
+        // The plugin is up to date but this file is older (it was updated from another copy, say): catch up quietly
+        std::string dll;
+        if (sha.size() == 64 && kwiq::CompareVersions(KWIQ_PLUGIN_VERSION, latest) < 0 && Download(sha, dll).empty()) ReplaceSelf(dll);
         return;
     }
-    if (!kwiq::UpdateAvailable(installed, latest, sha)) return;
 
     std::string ask = "Version " + latest + " of the KWIQ Controller Plugin is available. You have version " + installed +
                       ".\n\nWould you like to update now? It only takes a moment, and the new version starts straight away.";
     if (MessageBoxA(nullptr, ask.c_str(), kTitle, MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND) != IDYES) return;
 
-    std::string err = Install(core, installed, sha);
+    std::string err = Install(core, sha);
     if (err.empty())
         MessageBoxA(nullptr, ("The KWIQ Controller Plugin has been updated to version " + latest + ".").c_str(), kTitle, MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
     else

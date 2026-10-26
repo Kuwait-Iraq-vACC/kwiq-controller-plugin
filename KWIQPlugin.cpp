@@ -609,6 +609,7 @@ public:
         kwiq_ui::gOnNotice = nullptr;
         kwiq_ui::Shutdown();
         keyLink_.Stop();
+        if (soundLooping_) PlaySoundA(nullptr, nullptr, 0);
         quit_ = true;                                        // aborts a running update download
         if (worker_.joinable()) worker_.join();
         CDataHandler::Shutdown();
@@ -1014,9 +1015,10 @@ private:
     }
 
     // ---- outdated sector file (main thread) --------------------------------------------------
-    // Once logged on with an outdated sector file, a red OUTDATED SCT FILE box is drawn on every radar
-    // screen until the sector file is up to date or the controller logs off. It flashes between the
-    // two alert colours for alert.flash_seconds, then stays solid, and the alert sound plays once.
+    // Once logged on with an outdated sector file, a red OUTDATED SCT FILE box is drawn in the middle of
+    // every radar screen until the sector file is up to date or the controller logs off. It flashes
+    // between the two alert colours for alert.flash_seconds, then stays solid, and the alert sound
+    // plays on a loop for as long as it is up.
     void TickConnection(std::time_t now) {
         int ct = GetConnectionType();
         bool net = ct == EuroScopePlugIn::CONNECTION_TYPE_DIRECT || ct == EuroScopePlugIn::CONNECTION_TYPE_VIA_PROXY ||
@@ -1024,20 +1026,25 @@ private:
         if (net && !connected_) {
             connected_ = true;
             connectedAt_ = now;
-            soundPlayed_ = false;
             // Our position can tell OKAC from ORBB; the check runs on the next refresh, brought forward
             { std::lock_guard<std::mutex> g(mu_); myCallsign_ = ControllerMyself().GetCallsign(); }
             lastCore_ = 0;
         }
         if (!net) connected_ = false;
 
+        // The alert sound plays on a loop for as long as the box is up, and stops when it goes
         bool shown = SctBannerShown(now);
-        if (shown && connected_ && !soundPlayed_) {
+        if (shown && !soundPlayed_) {
             soundPlayed_ = true;
             SfStatus s;
             { std::lock_guard<std::mutex> g(mu_); s = sf_; }
-            if (s.sound.empty() || !PlaySoundA(s.sound.c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT))
-                MessageBeep(MB_ICONWARNING);                 // sound file not found: never alert silently
+            soundLooping_ = !s.sound.empty() && PlaySoundA(s.sound.c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+        }
+        if (shown && !soundLooping_ && now % 3 == 0) MessageBeep(MB_ICONWARNING);   // sound file not found: never alert silently
+        if (!shown && soundPlayed_) {
+            soundPlayed_ = false;
+            if (soundLooping_) PlaySoundA(nullptr, nullptr, 0);
+            soundLooping_ = false;
         }
         // Redraw while it flashes, and once whenever it appears or goes
         if (shown != bannerWas_ || (shown && SctBannerFlashing(now))) RefreshRadars();
@@ -1139,7 +1146,7 @@ private:
             std::lock_guard<std::mutex> g(mu_);
             ui_ = u;
             latest_ = Trim(c.Get("plugin.latest_version"));
-            latestSha_ = Lower(Trim(c.Get("plugin.sha256")));
+            latestSha_ = Lower(Trim(c.Get("plugin.loader_sha256")));
             // OKAC and ORBB are released separately, each with its own version
             upstreamAirac_ = { { "OKAC", c.Get("sectorfile.airac.okac") }, { "ORBB", c.Get("sectorfile.airac.orbb") } };
             sectorUrl_ = { { "OKAC", c.Get("sectorfile.url.okac") }, { "ORBB", c.Get("sectorfile.url.orbb") } };
@@ -1304,7 +1311,7 @@ private:
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
     std::atomic<bool> keyRefused_{ false };
-    bool connected_ = false, soundPlayed_ = false, bannerWas_ = false;   // main thread only
+    bool connected_ = false, soundPlayed_ = false, soundLooping_ = false, bannerWas_ = false;   // main thread only
     std::time_t connectedAt_ = 0, previewUntil_ = 0;                // main thread only
     static constexpr std::time_t PREVIEW_SECONDS = 15;
     static constexpr std::time_t STARTUP_SECONDS = 180;             // popups are only shown this soon after starting
@@ -1391,7 +1398,7 @@ public:
     }
 
 private:
-    // Red box with white OUTDATED SCT FILE, centred a third of the way down the radar screen
+    // Red box with white OUTDATED SCT FILE, in the middle of the radar screen
     void DrawSctBanner(HDC hDC, COLORREF fill) {
         static const char* text = "OUTDATED SCT FILE";
         RECT area = GetRadarArea();
@@ -1399,7 +1406,7 @@ private:
         SelectObject(hDC, banner_);
         SIZE sz; GetTextExtentPoint32A(hDC, text, (int)strlen(text), &sz);
         int w = sz.cx + 56, h = sz.cy + 22;
-        int x = area.left + ((area.right - area.left) - w) / 2, y = area.top + (area.bottom - area.top) / 3 - h / 2;
+        int x = area.left + ((area.right - area.left) - w) / 2, y = area.top + ((area.bottom - area.top) - h) / 2;
         RECT r = { x, y, x + w, y + h };
         HBRUSH b = CreateSolidBrush(fill);
         HPEN pen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
