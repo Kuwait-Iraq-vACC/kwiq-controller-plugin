@@ -402,10 +402,10 @@ class CKWIQPlugin;
 static CKWIQPlugin* gPlugin = nullptr;
 
 // ---- Local sector file version -------------------------------------------------
-// EuroScope does not expose the sector file version to plugins, so it is read from disk:
-//   1. AIRAC_VERSION.txt (e.g. "2610/02") in the package's Plugins folder or next to the sector file, or
-//   2. the "AIRAC 2610/1" line in the header of the .ese in that folder.
-// Folder = the path set with ".kwiq sectorfile <folder|file>", else the plugin DLL's folder and its parents.
+// EuroScope does not expose the sector file version to plugins, so it is read from disk, and only ever
+// from AIRAC_VERSION.txt (e.g. "2610/02"), which each package keeps in its Plugins folder. It is looked
+// for in the folder set with ".kwiq sectorfile <folder|file>", else the plugin's folder and its parents,
+// each with its Plugins folder.
 namespace sf {
 static std::string ReadHead(const std::string& path, size_t max = 16384) {
     FILE* f = nullptr;
@@ -425,16 +425,7 @@ static kwiq::Airac FromDir(const std::string& dir, std::string& src) {
         kwiq::Airac a = kwiq::FindAirac(ReadHead(f, 256));
         if (a.valid()) { src = f; return a; }
     }
-    kwiq::Airac a;
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA((dir + "\\*.ese").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return {};
-    std::string last;                                   // names are timestamped: the last one is the newest
-    do { if (last.empty() || last < fd.cFileName) last = fd.cFileName; } while (FindNextFileA(h, &fd));
-    FindClose(h);
-    a = kwiq::FindAirac(ReadHead(dir + "\\" + last), "AIRAC");
-    if (a.valid()) src = dir + "\\" + last;
-    return a;
+    return {};
 }
 static std::string ParentOf(const std::string& p) {
     size_t i = p.find_last_of("\\/");
@@ -507,11 +498,8 @@ static std::string FindSound(const std::string& file, const std::vector<std::str
 }
 static kwiq::Airac Local(const std::string& userPath, std::string& src) {
     if (!userPath.empty()) {
-        if (IsDir(userPath)) return FromDir(userPath, src);
-        kwiq::Airac a = kwiq::FindAirac(ReadHead(userPath), "AIRAC");
-        if (!a.valid()) a = kwiq::FindAirac(ReadHead(userPath, 256));
-        if (a.valid()) src = userPath;
-        return a;
+        // A folder, AIRAC_VERSION.txt itself, or any file in the package's folder (the .ese, say)
+        return FromDir(IsDir(userPath) ? userPath : ParentOf(userPath), src);
     }
     std::string d = DllDir();
     for (int i = 0; i < 4 && !d.empty(); i++, d = ParentOf(d)) {
@@ -1177,13 +1165,6 @@ private:
         { std::lock_guard<std::mutex> g(mu_); ups = upstreamAirac_; urls = sectorUrl_; path = sectorPath_; callsign = myCallsign_; name = sectorName_; }
         std::string src;
         Airac l = sf::Local(path, src);
-        // Last resort: the version in the package's folder name (...\ORBB-2610_02\ORBB\Plugins) or the sector file's name
-        for (const std::string& p : { path, sf::DllDir(), name }) {
-            if (l.valid() || p.empty()) break;
-            l = AiracFromPath(p);
-            if (!l.valid() && p == name) l = FindAirac(p);
-            if (l.valid()) src = p;
-        }
         // OKAC or ORBB: from where the version was found, the folder given, the sector file's name, where
         // the plugin is installed, then the callsign
         std::string pkg;
@@ -1196,7 +1177,7 @@ private:
             { std::lock_guard<std::mutex> g(mu_); if (!force && key == lastSfKey_) return; lastSfKey_ = key; }
             if (l.valid() || force)
                 Notify("Cannot tell whether your sector file is OKAC or ORBB, so its version was not checked. "
-                       "Use: .kwiq sectorfile <folder or .ese path>", false);
+                       "Use: .kwiq sectorfile <folder or AIRAC_VERSION.txt path>", false);
             return;
         }
         std::string up = ups[pkg], url = urls[pkg];
@@ -1230,7 +1211,7 @@ private:
         std::string tail = url.empty() ? "" : " Download: " + url;
         if (!l.valid())
             Notify("Cannot find your " + pkg + " sector file version (current is " + u.Str() + "). Install the latest " + pkg +
-                   " package, which has Plugins\\AIRAC_VERSION.txt, or use: .kwiq sectorfile <folder or .ese path>", false);
+                   " package, which has Plugins\\AIRAC_VERSION.txt, or use: .kwiq sectorfile <folder or AIRAC_VERSION.txt path>", false);
         else if (CompareAirac(l, u) < 0)
             Notify(pkg + " SECTOR FILE OUT OF DATE: you have " + l.Str() + ", current is " + u.Str() + "." + tail, true);
         else if (CompareAirac(l, u) > 0)
