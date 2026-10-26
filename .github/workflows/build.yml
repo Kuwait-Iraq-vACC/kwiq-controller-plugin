@@ -66,21 +66,35 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
-      - name: Check the DLL exists and exports the entry points
+      - name: Check both DLLs exist and export their entry points
         run: |
-          $dll = "build/Release/KWIQPlugin.dll"
-          if (-not (Test-Path $dll)) { throw "KWIQPlugin.dll was not produced" }
-          Get-Item $dll | Select-Object Name, Length
-          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $dll))
-          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-          foreach ($n in "EuroScopePlugInInit", "EuroScopePlugInExit") {
-            if ($text -notmatch [regex]::Escape($n)) { throw "export $n not found in the DLL" }
+          $checks = @{
+            "build/Release/KWIQPlugin.dll"     = @("EuroScopePlugInInit", "EuroScopePlugInExit")
+            "build/Release/KWIQPluginCore.dll" = @("KWIQCoreInit", "KWIQCoreExit", "KWIQCoreVersion")
           }
+          foreach ($dll in $checks.Keys) {
+            if (-not (Test-Path $dll)) { throw "$dll was not produced" }
+            Get-Item $dll | Select-Object Name, Length
+            $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes((Resolve-Path $dll)))
+            foreach ($n in $checks[$dll]) {
+              if ($text -notmatch [regex]::Escape($n)) { throw "export $n not found in $dll" }
+            }
+          }
+
+      # What controllers download from myKWIQ: both files, to go in the same Plugins folder
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item build/Release/KWIQPlugin.dll, build/Release/KWIQPluginCore.dll dist/
+          Compress-Archive -Path dist/KWIQPlugin.dll, dist/KWIQPluginCore.dll -DestinationPath dist/KWIQPlugin.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: KWIQPlugin
-          path: build/Release/KWIQPlugin.dll
+          path: |
+            dist/KWIQPlugin.dll
+            dist/KWIQPluginCore.dll
+            dist/KWIQPlugin.zip
           if-no-files-found: error
 
   release:
@@ -100,7 +114,7 @@ jobs:
       - name: Release (main)
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         run: |
-          gh release create "v$VERSION" KWIQPlugin.dll --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
+          gh release create "v$VERSION" KWIQPluginCore.dll KWIQPlugin.zip --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
 
       - name: Test pre-release (pull requests and other branches)
         if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
@@ -112,7 +126,7 @@ jobs:
           if [ -n "$PR" ]; then tag="pr-$PR"; title="Test build for #$PR: $PR_TITLE ($VERSION)"
           else tag="test-$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"; title="Test build of $GITHUB_REF_NAME ($VERSION)"; fi
           gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
-          gh release create "$tag" KWIQPlugin.dll --prerelease --target "$SHA" --title "$title" \
+          gh release create "$tag" KWIQPluginCore.dll KWIQPlugin.zip --prerelease --target "$SHA" --title "$title" \
             --notes "For testing only. Core does not offer pre-releases to controllers. Built from ${SHA:0:7}."
 
   cleanup:

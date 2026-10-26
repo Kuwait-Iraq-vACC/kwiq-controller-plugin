@@ -45,7 +45,6 @@ static const char* CORE_EVENT_URL       = CORE_BASE "/event";
 static const char* CORE_SRD_URL         = CORE_BASE "/srd";
 static const char* CORE_SRD_VERSION_URL = CORE_BASE "/srd/version";
 static const char* CORE_SECTORS_URL     = CORE_BASE "/sectors";
-static const char* CORE_DOWNLOAD_URL    = CORE_BASE "/download";   // latest plugin DLL (checksum comes from /config)
 // myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
 static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
 // ---------------------------------------------------------------------------
@@ -260,41 +259,38 @@ static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows, size_t total)
 }
 
 // ---- Notice popups -------------------------------------------------------------------------
-// One look for both: a coloured header band with the title, a dark body, up to two buttons. They
-// never take keyboard focus (a controller may be typing), stay on top and close on a button.
-// The sector file alert flashes its header between exactly two colours, slowly, for a few seconds,
-// then stays solid; the update prompt does not flash.
-enum { NOTICE_ALERT = 1, NOTICE_UPDATE = 2, NOTICE_KEY = 3 };
-static void (*gOnNotice)(int kind, int button) = nullptr;       // button 1 = primary, 2 = secondary
+// Windows-style message boxes (title bar, icon, message, buttons on a grey strip), but not modal:
+// EuroScope keeps running behind them and they never take keyboard focus. They are only shown when
+// EuroScope starts, never in the middle of a session.
+enum { NOTICE_ALERT = 1, NOTICE_KEY = 2, NOTICE_INFO = 3 };
+static void (*gOnNotice)(int kind, int button) = nullptr;       // button 1 = first, 2 = second (or closed)
 static const char* const kNoticeClass = "KWIQNoticeWnd";
 static bool gNoticeReg = false;
-enum { NW = 460, NHEAD = 70, NBODY = 104, NFOOT = 52, FLASH_PERIOD = 700 };
+enum { NW = 440, NPAD = 22, NICON = 32, NBTN_W = 112, NBTN_H = 28, NFOOT = 48 };
 struct Notice {
     HWND hwnd = nullptr;
-    int kind = 0, flashMs = 0, elapsed = 0;
-    bool phaseB = false;
-    std::string title, body;
-    COLORREF colA = RGB(211, 47, 47), colB = RGB(74, 14, 14);
+    int kind = 0, textH = 0;
+    LPCSTR icon = nullptr;
+    std::string body;
 };
-static Notice gAlert, gUpd, gKey;
-static HFONT gFontTitle = nullptr, gFontBody = nullptr;
+static Notice gAlert, gKey, gInfo;
+static HFONT gFontBody = nullptr;
 
 static void PaintNotice(HWND h, const Notice& n) {
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(h, &ps);
-    RECT head = { 0, 0, NW, NHEAD }, body = { 0, NHEAD, NW, NHEAD + NBODY + NFOOT };
-    HBRUSH b1 = CreateSolidBrush(n.phaseB ? n.colB : n.colA);
-    FillRect(dc, &head, b1); DeleteObject(b1);
-    HBRUSH b2 = CreateSolidBrush(RGB(30, 32, 36));
-    FillRect(dc, &body, b2); DeleteObject(b2);
+    RECT rc; GetClientRect(h, &rc);
+    RECT body = rc, foot = rc;
+    body.bottom = rc.bottom - NFOOT; foot.top = body.bottom;
+    FillRect(dc, &body, (HBRUSH)GetStockObject(WHITE_BRUSH));
+    HBRUSH f = CreateSolidBrush(RGB(240, 240, 240));
+    FillRect(dc, &foot, f); DeleteObject(f);
+    if (n.icon) DrawIcon(dc, NPAD, NPAD, LoadIconA(nullptr, n.icon));
     SetBkMode(dc, TRANSPARENT);
-    HGDIOBJ old = SelectObject(dc, gFontTitle);
-    SetTextColor(dc, RGB(255, 255, 255));
-    DrawTextA(dc, n.title.c_str(), -1, &head, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dc, gFontBody);
-    SetTextColor(dc, RGB(222, 224, 228));
-    RECT tb = { 20, NHEAD + 16, NW - 20, NHEAD + NBODY };
-    DrawTextA(dc, n.body.c_str(), -1, &tb, DT_WORDBREAK | DT_LEFT);
+    SetTextColor(dc, RGB(0, 0, 0));
+    HGDIOBJ old = SelectObject(dc, gFontBody);
+    RECT tb = { NPAD + NICON + 14, NPAD + 6, rc.right - NPAD, body.bottom - NPAD };
+    DrawTextA(dc, n.body.c_str(), -1, &tb, DT_WORDBREAK | DT_LEFT | DT_NOPREFIX);
     SelectObject(dc, old);
     EndPaint(h, &ps);
 }
@@ -310,15 +306,6 @@ static LRESULT CALLBACK NoticeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_PAINT:
         if (n) { PaintNotice(h, *n); return 0; }
         break;
-    case WM_TIMER:
-        if (n && w == 1) {
-            n->elapsed += FLASH_PERIOD;
-            if (n->elapsed >= n->flashMs) { n->phaseB = false; KillTimer(h, 1); }   // settle on solid colour A
-            else n->phaseB = !n->phaseB;
-            RECT r = { 0, 0, NW, NHEAD };
-            InvalidateRect(h, &r, FALSE);
-        }
-        return 0;
     case WM_COMMAND: {
         int id = LOWORD(w);
         if (n && (id == 1 || id == 2)) {
@@ -328,7 +315,12 @@ static LRESULT CALLBACK NoticeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         return 0;
     }
-    case WM_CLOSE: DestroyWindow(h); return 0;
+    case WM_CLOSE: {                                     // the title bar's X counts as the last button
+        int kind = n ? n->kind : 0;
+        DestroyWindow(h);
+        if (gOnNotice && kind) gOnNotice(kind, 2);
+        return 0;
+    }
     case WM_NCDESTROY:
         if (n) *n = Notice();
         SetWindowLongPtrA(h, GWLP_USERDATA, 0);
@@ -337,8 +329,9 @@ static LRESULT CALLBACK NoticeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcA(h, m, w, l);
 }
 
-static bool ShowNotice(Notice& n, int kind, const std::string& title, const std::string& body,
-                       const char* btn1, const char* btn2, COLORREF a, COLORREF b, int flashSec) {
+// btn1 is on the right, as the main choice; btn2 (optional) to its left
+static bool ShowNotice(Notice& n, int kind, const std::string& title, const std::string& body, LPCSTR icon,
+                       const char* btn1, const char* btn2) {
     if (!gMod)
         GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            (LPCSTR)&NoticeProc, &gMod);
@@ -352,61 +345,72 @@ static bool ShowNotice(Notice& n, int kind, const std::string& title, const std:
         if (!RegisterClassExA(&wc)) return false;
         gNoticeReg = true;
     }
-    if (!gFontTitle) gFontTitle = CreateFontA(-28, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-    if (!gFontBody) gFontBody = CreateFontA(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    if (!gFontBody) {                                    // the font Windows uses in its own message boxes
+        NONCLIENTMETRICSA ncm; ZeroMemory(&ncm, sizeof(ncm));
+        ncm.cbSize = sizeof(ncm);
+        gFontBody = SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)
+            ? CreateFontIndirectA(&ncm.lfMessageFont) : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    }
     if (n.hwnd) DestroyWindow(n.hwnd);                  // WM_NCDESTROY resets n
     n = Notice();
-    n.kind = kind; n.title = title; n.body = body; n.colA = a; n.colB = b;
-    n.flashMs = flashSec > 0 ? flashSec * 1000 : 0;
+    n.kind = kind; n.body = body; n.icon = icon;
 
-    DWORD style = WS_POPUP | WS_BORDER, ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-    RECT rc = { 0, 0, NW, NHEAD + NBODY + NFOOT };
+    HDC dc = GetDC(nullptr);
+    HGDIOBJ old = SelectObject(dc, gFontBody);
+    RECT tr = { 0, 0, NW - 2 * NPAD - NICON - 14, 0 };
+    DrawTextA(dc, body.c_str(), -1, &tr, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+    SelectObject(dc, old);
+    ReleaseDC(nullptr, dc);
+    int bodyH = (std::max)((int)(tr.bottom - tr.top) + 12, NICON) + 2 * NPAD;
+
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOPMOST | WS_EX_DLGMODALFRAME | WS_EX_NOACTIVATE;
+    RECT rc = { 0, 0, NW, bodyH + NFOOT };
     AdjustWindowRectEx(&rc, style, FALSE, ex);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
     RECT wa; SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
-    int x = wa.left + ((wa.right - wa.left) - ww) / 2, y = wa.top + (wa.bottom - wa.top) / 6;
+    int x = wa.left + ((wa.right - wa.left) - ww) / 2, y = wa.top + ((wa.bottom - wa.top) - wh) / 3;
     HWND h = CreateWindowExA(ex, kNoticeClass, title.c_str(), style, x, y, ww, wh, nullptr, nullptr, gMod, &n);
     if (!h) { n = Notice(); return false; }
     n.hwnd = h;
-    int by = NHEAD + NBODY + 8, bw = 140, bh = 32;
+    int by = bodyH + (NFOOT - NBTN_H) / 2;
+    HWND b1 = Child("BUTTON", btn1, BS_DEFPUSHBUTTON, NW - NPAD - NBTN_W, by, NBTN_W, NBTN_H, h, 1);
+    SendMessageA(b1, WM_SETFONT, (WPARAM)gFontBody, TRUE);
     if (btn2 && *btn2) {
-        Child("BUTTON", btn1, BS_DEFPUSHBUTTON, NW - 20 - bw - 10 - bw, by, bw, bh, h, 1);
-        Child("BUTTON", btn2, BS_PUSHBUTTON, NW - 20 - bw, by, bw, bh, h, 2);
-    } else {
-        Child("BUTTON", btn1, BS_DEFPUSHBUTTON, NW - 20 - bw, by, bw, bh, h, 1);
+        HWND b2 = Child("BUTTON", btn2, BS_PUSHBUTTON, NW - NPAD - 2 * NBTN_W - 8, by, NBTN_W, NBTN_H, h, 2);
+        SendMessageA(b2, WM_SETFONT, (WPARAM)gFontBody, TRUE);
     }
     ShowWindow(h, SW_SHOWNOACTIVATE);
-    if (n.flashMs > 0) SetTimer(h, 1, FLASH_PERIOD, nullptr);
     return true;
 }
 
-// Red, flashing "OUTDATED SCT FILE" alert.
-static void ShowSctAlert(const std::string& title, const std::string& body, bool hasDownload, COLORREF a, COLORREF b, int flashSec) {
-    if (hasDownload) ShowNotice(gAlert, NOTICE_ALERT, title, body, "Get sector file", "Dismiss", a, b, flashSec);
-    else             ShowNotice(gAlert, NOTICE_ALERT, title, body, "Dismiss", nullptr, a, b, flashSec);
+// Outdated sector file: warning, with a link to the download when Core has one. The title bar
+// flashes for flashSec seconds so it is noticed.
+static void ShowSctAlert(const std::string& body, bool hasDownload, int flashSec) {
+    bool ok = hasDownload ? ShowNotice(gAlert, NOTICE_ALERT, "Outdated Sector File", body, IDI_WARNING, "Get Sector File", "Dismiss")
+                          : ShowNotice(gAlert, NOTICE_ALERT, "Outdated Sector File", body, IDI_WARNING, "OK", nullptr);
+    if (ok && flashSec > 0) {
+        FLASHWINFO fi = { sizeof(fi), gAlert.hwnd, FLASHW_CAPTION | FLASHW_TRAY, (UINT)(flashSec * 2), 500 };
+        FlashWindowEx(&fi);
+    }
 }
-// Plugin update prompt (calm blue, no flashing).
-static void ShowUpdatePrompt(const std::string& title, const std::string& body) {
-    ShowNotice(gUpd, NOTICE_UPDATE, title, body, "Update now", "Later", RGB(21, 101, 192), RGB(21, 101, 192), 0);
-}
-
 // API key setup: waits while the controller connects on myKWIQ, and closes once the key arrives.
 static void ShowKeyPrompt() {
-    ShowNotice(gKey, NOTICE_KEY, "API KEY SETUP",
-               "Please sign in to myKWIQ in your web browser and click Connect EuroScope. This window closes by itself "
-               "once your API key has been received. If the page did not open, click Reopen Browser.",
-               "Reopen Browser", "Cancel", RGB(185, 28, 28), RGB(185, 28, 28), 0);
+    ShowNotice(gKey, NOTICE_KEY, "KWIQ API Key Setup",
+               "Please go to your web browser, sign in to myKWIQ and click Connect EuroScope. This window will close "
+               "automatically once your API key has been received. If the page did not open, click Reopen Browser.",
+               IDI_INFORMATION, "Reopen Browser", "Cancel");
 }
 static bool KeyPromptOpen() { return gKey.hwnd != nullptr; }
 static void CloseKeyPrompt() { if (gKey.hwnd) DestroyWindow(gKey.hwnd); }
+// A plain confirmation, e.g. once the API key has been saved
+static void ShowInfo(const std::string& title, const std::string& body) {
+    ShowNotice(gInfo, NOTICE_INFO, title, body, IDI_INFORMATION, "OK", nullptr);
+}
 
 static void Shutdown() {
     if (gAlert.hwnd) DestroyWindow(gAlert.hwnd);
     if (gKey.hwnd) DestroyWindow(gKey.hwnd);
-    if (gUpd.hwnd) DestroyWindow(gUpd.hwnd);
-    if (gFontTitle) { DeleteObject(gFontTitle); gFontTitle = nullptr; }
+    if (gInfo.hwnd) DestroyWindow(gInfo.hwnd);
     if (gFontBody) { DeleteObject(gFontBody); gFontBody = nullptr; }
     if (gNoticeReg && gMod) { UnregisterClassA(kNoticeClass, gMod); gNoticeReg = false; }
     if (gEvt.hwnd) DestroyWindow(gEvt.hwnd);
@@ -573,7 +577,6 @@ struct UiCfg {
     // outdated sector file alert
     bool alertOn = true;
     int flashSec = 10;
-    COLORREF alertA = RGB(211, 47, 47), alertB = RGB(74, 14, 14);   // the two flash colours
     std::string sound = "conflict_alert.wav";
 };
 // Result of comparing the local sector file with Core's current version.
@@ -613,6 +616,11 @@ public:
             return;
         }
         Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded", false);
+        // Installed from the zip, EuroScope loads KWIQPlugin.dll, which updates and then loads this file.
+        // Loaded directly, nothing updates it.
+        if (kwiq::Lower(sf::DllPath()).find("kwiqplugincore.dll") == std::string::npos)
+            Msg("This copy of the plugin cannot update itself. Please download it again from myKWIQ (EuroScope Plugin) "
+                "and load KWIQPlugin.dll.", true);
     }
     virtual ~CKWIQPlugin() {
         kwiq_ui::gOnSearch = nullptr;
@@ -621,7 +629,6 @@ public:
         keyLink_.Stop();
         quit_ = true;                                        // aborts a running update download
         if (worker_.joinable()) worker_.join();
-        if (updateThread_.joinable()) updateThread_.join();
         CDataHandler::Shutdown();
         kwiq_net::GlobalCleanup();
         if (instanceLock_) CloseHandle(instanceLock_);
@@ -646,8 +653,7 @@ public:
             DeleteFileA((sf::DllPath() + ".old").c_str());   // left over from a previous self-update (fails while still loaded)
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
-        TickConnection();
-        TickUpdatePrompt();
+        TickConnection(now);
         TickKeySetup(now);
         CDataHandler::refreshInterval = slotsEvery_;
         std::string code;
@@ -754,7 +760,8 @@ public:
         if (c == ".KWIQ UPDATE") {
             std::string latest, sha;
             { std::lock_guard<std::mutex> g(mu_); latest = latest_; sha = latestSha_; }
-            if (kwiq::UpdateAvailable(KWIQ_PLUGIN_VERSION, latest, sha)) { promptedFor_ = latest; ShowUpdatePromptNow(latest); }
+            if (kwiq::UpdateAvailable(KWIQ_PLUGIN_VERSION, latest, sha))
+                Msg("Version " + latest + " is available. You will be asked to install it the next time EuroScope starts.", false);
             else Msg("Plugin v" KWIQ_PLUGIN_VERSION " is up to date.", false);
             return true;
         }
@@ -913,9 +920,14 @@ private:
     }
     void TickKeySetup(std::time_t now) {
         std::string key = keyLink_.Take();
-        if (!key.empty()) { SetApiKey(key); return; }
+        if (!key.empty()) {
+            SetApiKey(key);
+            kwiq_ui::ShowInfo("KWIQ API Key", "Your API key has been received and saved. The plugin is now connected.");
+            return;
+        }
         if (kwiq_ui::KeyPromptOpen() && !keyLink_.Running()) kwiq_ui::CloseKeyPrompt();   // gave up waiting
-        if (!keyPrompted_ && now - startedAt_ >= 5 && (apiKey_.empty() || keyRefused_)) {
+        // Only as EuroScope starts: a refused key later in a session is reported in the chat instead
+        if (!keyPrompted_ && now - startedAt_ >= 5 && now - startedAt_ <= STARTUP_SECONDS && (apiKey_.empty() || keyRefused_)) {
             keyPrompted_ = true;
             StartKeySetup();
         }
@@ -1009,21 +1021,20 @@ private:
     }
 
     // ---- sector file alert (main thread) ----------------------------------------------------
-    // On logon (connection type goes from none to network) show the alert once, as soon as both
-    // versions are known; if the version only becomes known after logon it still appears then.
-    void TickConnection() {
+    // Shown once, when EuroScope starts, as soon as both versions are known; never later in a session.
+    // Logging on still tells us the callsign, which can tell OKAC from ORBB.
+    void TickConnection(std::time_t now) {
         int ct = GetConnectionType();
         bool net = ct == EuroScopePlugIn::CONNECTION_TYPE_DIRECT || ct == EuroScopePlugIn::CONNECTION_TYPE_VIA_PROXY ||
                    ct == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX;
         if (net && !connected_) {
-            connected_ = true; alertDone_ = false;
-            // Our position tells OKAC from ORBB when the sector file's path doesn't; the check itself
-            // (and any search for the sound) runs on the next background refresh, which is brought forward
+            connected_ = true;
             { std::lock_guard<std::mutex> g(mu_); myCallsign_ = ControllerMyself().GetCallsign(); }
             lastCore_ = 0;
         }
         if (!net) connected_ = false;
-        if (!connected_ || alertDone_) return;
+        if (alertDone_) return;
+        if (now - startedAt_ > STARTUP_SECONDS) { alertDone_ = true; return; }
         SfStatus s; bool on;
         { std::lock_guard<std::mutex> g(mu_); s = sf_; on = ui_.alertOn; }
         if (!s.known) return;
@@ -1034,32 +1045,15 @@ private:
         UiCfg ui;
         { std::lock_guard<std::mutex> g(mu_); ui = ui_; }
         alertUrl_ = s.url.rfind("https://", 0) == 0 ? s.url : "";
-        std::string body = "Your " + s.package + " sector file is " + s.local + ".\nThe current version is " + s.upstream +
-                           ".\nInstall the latest sector file package before you control.";
-        kwiq_ui::ShowSctAlert("OUTDATED SCT FILE", body, !alertUrl_.empty(), ui.alertA, ui.alertB, ui.flashSec);
+        std::string body = "Your " + s.package + " sector file is " + s.local + ", but the current version is " + s.upstream +
+                           ". Please install the latest " + s.package + " sector file before you control.";
+        kwiq_ui::ShowSctAlert(body, !alertUrl_.empty(), ui.flashSec);
         if (!s.sound.empty() && PlaySoundA(s.sound.c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT)) return;
-        MessageBeep(MB_ICONHAND);                            // sound file not found: never alert silently
+        MessageBeep(MB_ICONWARNING);                         // sound file not found: never alert silently
     }
 
-    // ---- self-update -------------------------------------------------------------------------
-    void TickUpdatePrompt() {
-        std::string latest, sha;
-        bool skip;
-        { std::lock_guard<std::mutex> g(mu_); latest = latest_; sha = latestSha_; skip = latest == stagedVer_; }
-        if (updating_ || skip || latest == promptedFor_ || !kwiq::UpdateAvailable(KWIQ_PLUGIN_VERSION, latest, sha)) return;
-        promptedFor_ = latest;                               // ask once per version and session; ".kwiq update" asks again
-        ShowUpdatePromptNow(latest);
-    }
-    void ShowUpdatePromptNow(const std::string& latest) {
-        std::string body = "KWIQ Controller Plugin " + latest + " is available (you have " KWIQ_PLUGIN_VERSION ").\n" +
-                           (tooOld_ ? "This update is required: your version is no longer supported.\n" : "") +
-                           "It downloads in the background and EuroScope keeps running. The new version starts "
-                           "the next time you open EuroScope.";
-        kwiq_ui::ShowUpdatePrompt("PLUGIN UPDATE", body);
-    }
 public:
     void OnNotice(int kind, int button) {
-        if (kind == kwiq_ui::NOTICE_UPDATE && button == 1) StartUpdate();
         if (kind == kwiq_ui::NOTICE_KEY && button == 1) { OpenConnectPage(); kwiq_ui::ShowKeyPrompt(); }
         if (kind == kwiq_ui::NOTICE_KEY && button == 2) {
             keyLink_.Stop();
@@ -1069,64 +1063,6 @@ public:
             ShellExecuteA(nullptr, "open", alertUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 private:
-    void StartUpdate() {
-        if (updating_.exchange(true)) return;
-        if (updateThread_.joinable()) updateThread_.join();
-        std::string v, sha;
-        { std::lock_guard<std::mutex> g(mu_); v = latest_; sha = latestSha_; }
-        updateThread_ = std::thread(&CKWIQPlugin::DoUpdate, this, v, sha);
-    }
-    // update thread. Download -> verify SHA-256 (published by Core) -> check it is an x86 DLL -> swap files.
-    // Windows lets a loaded DLL be renamed but not overwritten, so the running file is renamed to
-    // KWIQPlugin.dll.old and the new one takes its name; the next EuroScope start loads it, and the
-    // .old file is removed then.
-    void DoUpdate(std::string ver, std::string sha) {
-        try {
-            Notify("Downloading plugin update v" + ver + " ...", false);
-            std::string data, err;
-            if (!kwiq_net::HttpGetBinary(CORE_DOWNLOAD_URL, data, err, 40u * 1024 * 1024, 90, &quit_)) {
-                Notify("Update failed (download): " + err, true); updating_ = false; return;
-            }
-            if (kwiq::Sha256Hex(data) != kwiq::Lower(sha)) {
-                Notify("Update failed: checksum does not match what Core published. Nothing was changed.", true);
-                updating_ = false; return;
-            }
-            if (!kwiq::LooksLikeX86Dll(data)) {
-                Notify("Update failed: the download is not a 32-bit plugin DLL. Nothing was changed.", true);
-                updating_ = false; return;
-            }
-            std::string dll = sf::DllPath();
-            if (dll.empty()) { Notify("Update failed: cannot locate the plugin file.", true); updating_ = false; return; }
-            std::string nu = dll + ".new", old = dll + ".old";
-            FILE* f = nullptr;
-            bool wrote = fopen_s(&f, nu.c_str(), "wb") == 0 && f && fwrite(data.data(), 1, data.size(), f) == data.size();
-            if (f) fclose(f);
-            if (!wrote) {
-                DeleteFileA(nu.c_str());
-                Notify("Update failed: cannot write next to the plugin (" + dll + "). Check folder permissions.", true);
-                updating_ = false; return;
-            }
-            bool firstSwap;
-            { std::lock_guard<std::mutex> g(mu_); firstSwap = stagedVer_.empty(); }
-            bool ok;
-            if (firstSwap) {                                  // running image -> .old, new file takes the real name
-                DeleteFileA(old.c_str());
-                ok = MoveFileExA(dll.c_str(), old.c_str(), 0) != 0;
-                if (ok && !MoveFileExA(nu.c_str(), dll.c_str(), 0)) { MoveFileExA(old.c_str(), dll.c_str(), 0); ok = false; }
-            } else {                                          // an earlier update this session: the real name is not loaded
-                ok = MoveFileExA(nu.c_str(), dll.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
-            }
-            if (!ok) {
-                DeleteFileA(nu.c_str());
-                Notify("Update failed: could not replace " + dll + " (permissions?). Nothing was changed.", true);
-                updating_ = false; return;
-            }
-            { std::lock_guard<std::mutex> g(mu_); stagedVer_ = ver; }
-            Notify("Plugin updated to v" + ver + ". It becomes active the next time EuroScope starts. Nothing to download or copy.", false);
-        } catch (...) { Notify("Update failed (unexpected error).", true); }
-        updating_ = false;
-    }
-
     void Msg(const std::string& m, bool err) {
         DisplayUserMessage("KWIQ", err ? "Error" : "Info", m.c_str(), true, err, false, false, false);
     }
@@ -1172,8 +1108,6 @@ private:
         tooOld_ = tooOld;
         u.alertOn = c.GetBool("alert.enabled", true);
         u.flashSec = c.GetInt("alert.flash_seconds", 10, 0, 60);
-        u.alertA = (COLORREF)ParseColour(c.Get("alert.colour_a"), u.alertA);
-        u.alertB = (COLORREF)ParseColour(c.Get("alert.colour_b"), u.alertB);
         { std::string f = c.Get("alert.sound_file", u.sound); size_t i = f.find_last_of("\\/"); u.sound = i == std::string::npos ? f : f.substr(i + 1); }
         bool on = c.GetBool("plugin.enabled", true) && !tooOld;
         bool wasOn = enabled_.exchange(on);
@@ -1352,10 +1286,10 @@ private:
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
     std::atomic<bool> keyRefused_{ false };
-    bool connected_ = false, alertDone_ = true;                     // main thread only
-    std::string alertUrl_, promptedFor_;                            // main thread only
-    std::thread updateThread_;
-    std::atomic<bool> updating_{ false }, quit_{ false }, tooOld_{ false };
+    bool connected_ = false, alertDone_ = false;                     // main thread only
+    std::string alertUrl_;                                          // main thread only
+    static constexpr std::time_t STARTUP_SECONDS = 180;             // popups are only shown this soon after starting
+    std::atomic<bool> quit_{ false }, tooOld_{ false };
     std::time_t lastCore_ = 0, lastSrd_ = 0, lastSlotFetch_ = 0;   // main thread only
     long todayIdx_ = -1;                                            // main thread only
     std::string todayStr_;
@@ -1369,7 +1303,7 @@ private:
     std::vector<std::pair<std::string, bool>> pending_;
     UiCfg ui_;
     SfStatus sf_;
-    std::string latest_, latestSha_, stagedVer_;
+    std::string latest_, latestSha_;
     std::map<std::string, std::string> upstreamAirac_, sectorUrl_;   // per package: OKAC, ORBB
     std::string sectorPath_, motd_, lastSfKey_, myCallsign_, sectorName_;
     std::map<std::string, std::string> lastErr_;
@@ -1465,7 +1399,8 @@ static void NoticeThunk(int kind, int button) {
     if (gPlugin) gPlugin->OnNotice(kind, button);
 }
 
-// Entry points: declared (with dllexport) in EuroScopePlugIn.h, so no extern "C" here.
+// Entry points: declared (with dllexport) in EuroScopePlugIn.h, so no extern "C" here. The loader
+// (KWIQPlugin.dll, loader.cpp) uses the KWIQCore* ones below instead, after any update.
 void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
     *ppPlugInInstance = gPlugin = new CKWIQPlugin();
 }
@@ -1473,4 +1408,14 @@ void __declspec(dllexport) EuroScopePlugInExit(void) {
     CKWIQPlugin* p = gPlugin;
     gPlugin = nullptr;
     delete p;
+}
+
+extern "C" __declspec(dllexport) void KWIQCoreInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
+    EuroScopePlugInInit(ppPlugInInstance);
+}
+extern "C" __declspec(dllexport) void KWIQCoreExit() {
+    EuroScopePlugInExit();
+}
+extern "C" __declspec(dllexport) const char* KWIQCoreVersion() {
+    return KWIQ_PLUGIN_VERSION;
 }

@@ -9,7 +9,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")   # /
 find_package(CURL CONFIG REQUIRED)               # from vcpkg (static, Windows schannel TLS)
 find_package(nlohmann_json CONFIG REQUIRED)      # from vcpkg
 
-add_library(KWIQPlugin SHARED
+# KWIQPluginCore.dll: the plugin itself
+add_library(KWIQPluginCore SHARED
     KWIQPlugin.cpp
     VatsimAPI.cpp
     keylink.cpp          # receives the API key from myKWIQ
@@ -18,11 +19,11 @@ add_library(KWIQPlugin SHARED
     usefulStuff.cpp      # VCH
 )
 
-target_include_directories(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/libs)
+target_include_directories(KWIQPluginCore PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/libs)
 # Set by GitHub Actions to its run number, so each build has its own version (0.5.0.42)
 set(KWIQ_BUILD_NUMBER 0 CACHE STRING "Build number added to the plugin version")
-target_compile_definitions(KWIQPlugin PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
-target_link_libraries(KWIQPlugin PRIVATE
+target_compile_definitions(KWIQPluginCore PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
+target_link_libraries(KWIQPluginCore PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/libs/EuroScopePlugInDll.lib
     CURL::libcurl
     nlohmann_json::nlohmann_json
@@ -30,4 +31,11 @@ target_link_libraries(KWIQPlugin PRIVATE
     winmm                                         # PlaySound (sector file alert)
     ws2_32                                        # API key from myKWIQ (keylink.cpp)
 )
+set_target_properties(KWIQPluginCore PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginCore")
+
+# KWIQPlugin.dll: what EuroScope loads. It updates KWIQPluginCore.dll at start-up, then loads it (loader.cpp)
+add_library(KWIQPlugin SHARED loader.cpp)
+target_include_directories(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/libs)
+target_compile_definitions(KWIQPlugin PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libs/EuroScopePlugInDll.lib winhttp)
 set_target_properties(KWIQPlugin PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugin")
