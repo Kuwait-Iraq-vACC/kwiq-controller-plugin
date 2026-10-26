@@ -838,19 +838,31 @@ public:
         Msg(shown ? "The KWIQ button is shown." : "The KWIQ button is hidden. Type .kwiq button to show it again.", false);
     }
     void OpenMenu(RECT area) {
-        OpenPopupList(area, "KWIQ v" KWIQ_PLUGIN_VERSION, 2);
-        AddPopupListElement("API Key", apiKey_.empty() ? "Not set" : "Connected", KWIQ_MENU_KEY);
-        AddPopupListElement("Sector Indicators", sectorDraw_ ? "On" : "Off", KWIQ_MENU_SECTORS);
-        AddPopupListElement("Slot Auto Refresh", autoRefresh_ ? "On" : "Off", KWIQ_MENU_AUTOREFRESH);
+        // One column, each line padded so the values line up on the right (the list uses a fixed-width font)
+        auto line = [](const char* label, const char* value) {
+            std::string l = label, v = value;
+            return l + std::string(l.size() + v.size() < 28 ? 28 - l.size() - v.size() : 1, ' ') + v;
+        };
+        OpenPopupList(area, "KWIQ v" KWIQ_PLUGIN_VERSION, 1);
+        AddPopupListElement(line("API Key", apiKey_.empty() ? "Not set" : "Connected").c_str(), "", KWIQ_MENU_KEY);
+        AddPopupListElement(line("Sector Indicators", sectorDraw_ ? "On" : "Off").c_str(), "", KWIQ_MENU_SECTORS);
+        AddPopupListElement(line("Slot Auto Refresh", autoRefresh_ ? "On" : "Off").c_str(), "", KWIQ_MENU_AUTOREFRESH);
         AddPopupListElement("Event Routes", "", KWIQ_MENU_EVENT_ROUTES);
         AddPopupListElement("SRD Search", "", KWIQ_MENU_SRD);
-        AddPopupListElement("Sector File", "Check", KWIQ_MENU_SECTORFILE);
-        AddPopupListElement("Plugin Updates", "Check", KWIQ_MENU_UPDATE);
+        AddPopupListElement(line("Sector File", "Check").c_str(), "", KWIQ_MENU_SECTORFILE);
+        AddPopupListElement(line("Plugin Updates", "Check").c_str(), "", KWIQ_MENU_UPDATE);
         AddPopupListElement("Refresh Data", "", KWIQ_MENU_REFRESH);
         AddPopupListElement("Status", "", KWIQ_MENU_STATUS);
         AddPopupListElement("Hide Button", "", KWIQ_MENU_HIDE, false, EuroScopePlugIn::POPUP_ELEMENT_NO_CHECKBOX, false, true);
     }
     void MenuAction(int id, const char*, POINT pt, RECT) {
+        // EuroScope can report one choice to both the radar screen and the plugin: act on it once,
+        // or a switch would go off and straight back on
+        static int lastId = 0;
+        static DWORD lastAt = 0;
+        DWORD tick = GetTickCount();
+        if (id == lastId && tick - lastAt < 500) return;
+        lastId = id; lastAt = tick;
         switch (id) {
         case KWIQ_MENU_KEY:          StartKeySetup(); return;
         case KWIQ_MENU_SECTORS:      OnCompileCommand(".kwiq sector"); return;
