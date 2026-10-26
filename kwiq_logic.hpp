@@ -368,7 +368,7 @@ inline unsigned long ParseColour(const std::string& s, unsigned long def) {
 // "0.3.0" style compare: <0, 0, >0
 inline int CompareVersions(const std::string& a, const std::string& b) {
     auto pa = SplitChar(a, '.'), pb = SplitChar(b, '.');
-    for (size_t i = 0; i < std::max(pa.size(), pb.size()); i++) {
+    for (size_t i = 0; i < (std::max)(pa.size(), pb.size()); i++) {
         int x = i < pa.size() ? std::atoi(pa[i].c_str()) : 0, y = i < pb.size() ? std::atoi(pb[i].c_str()) : 0;
         if (x != y) return x < y ? -1 : 1;
     }
