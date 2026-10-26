@@ -404,6 +404,23 @@ inline Airac FindAirac(const std::string& text, const std::string& marker = "") 
     return {};
 }
 // <0 = local older than upstream, 0 = same, >0 = local newer
+// Which sector file package is loaded, "OKAC" or "ORBB" ("" if it can't be told). The package's name
+// in the sector file's path wins (the folder nearest the file, e.g. ...\ORBB-2610_02\ORBB\ORBB.ese);
+// otherwise the controller's own callsign: OR... is Iraq (ORBB), OK... is Kuwait (OKAC).
+inline std::string SectorPackage(const std::string& sectorPath, const std::string& callsign) {
+    std::string p = Upper(sectorPath);
+    size_t okac = p.rfind("OKAC"), orbb = p.rfind("ORBB");
+    if (okac != std::string::npos || orbb != std::string::npos) {
+        if (okac == std::string::npos) return "ORBB";
+        if (orbb == std::string::npos) return "OKAC";
+        return okac > orbb ? "OKAC" : "ORBB";
+    }
+    std::string c = Upper(Trim(callsign));
+    if (c.rfind("OR", 0) == 0) return "ORBB";
+    if (c.rfind("OK", 0) == 0) return "OKAC";
+    return "";
+}
+
 inline int CompareAirac(const Airac& local, const Airac& upstream) {
     if (local.cycle != upstream.cycle) return local.cycle < upstream.cycle ? -1 : 1;
     if (local.rev != upstream.rev) return local.rev < upstream.rev ? -1 : 1;

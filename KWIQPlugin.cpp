@@ -11,6 +11,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <map>
 #include <cstring>
 #include <mmsystem.h>       // PlaySound (link winmm)
 #include <shellapi.h>       // ShellExecute
@@ -508,7 +509,7 @@ struct UiCfg {
 // Result of comparing the local sector file with Core's current version.
 struct SfStatus {
     bool known = false, outdated = false;
-    std::string local, upstream, url, sound;                        // sound = resolved wav path or empty
+    std::string package, local, upstream, url, sound;               // package = OKAC or ORBB; sound = resolved wav path or empty
 };
 static void SrdSearchThunk(const std::string& adep, const std::string& ades, const std::string& lvl);
 static void NoticeThunk(int kind, int button);
@@ -688,7 +689,9 @@ public:
         if (c == ".KWIQ STATUS") {
             std::lock_guard<std::mutex> g(mu_);
             std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED by Core") +
-                " | sector file " + (upstreamAirac_.empty() ? "?" : upstreamAirac_) + " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
+                " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
+                " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
+                " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
                 std::to_string(sectors_.size()) + " | ";
             s += ev_.active
                 ? ev_.name + " | event routes " + std::to_string(ev_.routes.size()) +
@@ -805,7 +808,13 @@ private:
         int ct = GetConnectionType();
         bool net = ct == EuroScopePlugIn::CONNECTION_TYPE_DIRECT || ct == EuroScopePlugIn::CONNECTION_TYPE_VIA_PROXY ||
                    ct == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX;
-        if (net && !connected_) { connected_ = true; alertDone_ = false; }
+        if (net && !connected_) {
+            connected_ = true; alertDone_ = false;
+            // Our position tells OKAC from ORBB when the sector file's path doesn't; the check itself
+            // (and any search for the sound) runs on the next background refresh, which is brought forward
+            { std::lock_guard<std::mutex> g(mu_); myCallsign_ = ControllerMyself().GetCallsign(); }
+            lastCore_ = 0;
+        }
         if (!net) connected_ = false;
         if (!connected_ || alertDone_) return;
         SfStatus s; bool on;
@@ -818,7 +827,7 @@ private:
         UiCfg ui;
         { std::lock_guard<std::mutex> g(mu_); ui = ui_; }
         alertUrl_ = s.url.rfind("https://", 0) == 0 ? s.url : "";
-        std::string body = "Your sector file is " + s.local + ".\nThe current version is " + s.upstream +
+        std::string body = "Your " + s.package + " sector file is " + s.local + ".\nThe current version is " + s.upstream +
                            ".\nInstall the latest sector file package before you control.";
         kwiq_ui::ShowSctAlert("OUTDATED SCT FILE", body, !alertUrl_.empty(), ui.alertA, ui.alertB, ui.flashSec);
         if (!s.sound.empty() && PlaySoundA(s.sound.c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT)) return;
@@ -967,30 +976,47 @@ private:
             ui_ = u;
             latest_ = Trim(c.Get("plugin.latest_version"));
             latestSha_ = Lower(Trim(c.Get("plugin.sha256")));
-            upstreamAirac_ = c.Get("sectorfile.airac");
-            sectorUrl_ = c.Get("sectorfile.url");
+            // OKAC and ORBB are released separately, each with its own version
+            upstreamAirac_ = { { "OKAC", c.Get("sectorfile.airac.okac") }, { "ORBB", c.Get("sectorfile.airac.orbb") } };
+            sectorUrl_ = { { "OKAC", c.Get("sectorfile.url.okac") }, { "ORBB", c.Get("sectorfile.url.orbb") } };
             if (!motd.empty() && motd != motd_) pending_.emplace_back(motd, false);
             motd_ = motd;
         }
         CheckSectorFile(false);
     }
 
-    // Compare the user's local sector file against Core's upstream value. Messages once per distinct
-    // (local, upstream) pair; force = user asked (.kwiq version / .kwiq sectorfile).
+    // Compare the user's local sector file against Core's version of the same package (OKAC or ORBB).
+    // Messages once per distinct (package, local, upstream); force = user asked (.kwiq version / .kwiq sectorfile).
     void CheckSectorFile(bool force) {
         using namespace kwiq;
-        std::string up, url, path;
-        { std::lock_guard<std::mutex> g(mu_); up = upstreamAirac_; url = sectorUrl_; path = sectorPath_; }
-        Airac u = FindAirac(up);
-        if (!u.valid()) { if (force) Notify("Core has not published a sector file version yet.", false); return; }
+        std::map<std::string, std::string> ups, urls;
+        std::string path, callsign;
+        { std::lock_guard<std::mutex> g(mu_); ups = upstreamAirac_; urls = sectorUrl_; path = sectorPath_; callsign = myCallsign_; }
         std::string src;
         Airac l = sf::Local(path, src);
+        std::string pkg = SectorPackage(src.empty() ? path : src, callsign);
+        if (pkg.empty()) {
+            { std::lock_guard<std::mutex> g(mu_); sf_ = SfStatus{}; }
+            std::string key = "?pkg>" + (l.valid() ? l.Str() : std::string("?"));
+            { std::lock_guard<std::mutex> g(mu_); if (!force && key == lastSfKey_) return; lastSfKey_ = key; }
+            if (l.valid() || force)
+                Notify("Cannot tell whether your sector file is OKAC or ORBB, so its version was not checked. "
+                       "Use: .kwiq sectorfile <folder or .ese path>", false);
+            return;
+        }
+        std::string up = ups[pkg], url = urls[pkg];
+        Airac u = FindAirac(up);
+        if (!u.valid()) {
+            { std::lock_guard<std::mutex> g(mu_); sf_ = SfStatus{}; }
+            if (force) Notify("Core has not published a version of the " + pkg + " sector file yet.", false);
+            return;
+        }
         // status for the logon alert (main thread reads it); resolve the sound only when it will be needed
         {
             SfStatus st;
             st.known = l.valid();
             st.outdated = l.valid() && CompareAirac(l, u) < 0;
-            st.local = l.Str(); st.upstream = u.Str(); st.url = url;
+            st.package = pkg; st.local = l.Str(); st.upstream = u.Str(); st.url = url;
             std::string soundFile, prev;
             { std::lock_guard<std::mutex> g(mu_); soundFile = ui_.sound; prev = sf_.sound; }
             st.sound = prev;
@@ -1004,18 +1030,18 @@ private:
             std::lock_guard<std::mutex> g(mu_);
             sf_ = st;
         }
-        std::string key = (l.valid() ? l.Str() : std::string("?")) + ">" + u.Str();
+        std::string key = pkg + ":" + (l.valid() ? l.Str() : std::string("?")) + ">" + u.Str();
         { std::lock_guard<std::mutex> g(mu_); if (!force && key == lastSfKey_) return; lastSfKey_ = key; }
         std::string tail = url.empty() ? "" : " Download: " + url;
         if (!l.valid())
-            Notify("Cannot find your sector file version (current is " + u.Str() + "). Put AIRAC_VERSION.txt next to your "
+            Notify("Cannot find your " + pkg + " sector file version (current is " + u.Str() + "). Put AIRAC_VERSION.txt next to your "
                    ".ese, or use: .kwiq sectorfile <folder or .ese path>", false);
         else if (CompareAirac(l, u) < 0)
-            Notify("SECTOR FILE OUT OF DATE: you have " + l.Str() + ", current is " + u.Str() + "." + tail, true);
+            Notify(pkg + " SECTOR FILE OUT OF DATE: you have " + l.Str() + ", current is " + u.Str() + "." + tail, true);
         else if (CompareAirac(l, u) > 0)
-            Notify("Sector file " + l.Str() + " is newer than Core's " + u.Str() + " (Core not updated yet?).", false);
+            Notify(pkg + " sector file " + l.Str() + " is newer than Core's " + u.Str() + " (Core not updated yet?).", false);
         else
-            Notify("Sector file " + l.Str() + " is up to date.", false);
+            Notify(pkg + " sector file " + l.Str() + " is up to date.", false);
     }
 
     // worker thread: Core event + SRD (slots and the data feed run in CDataHandler)
@@ -1090,7 +1116,8 @@ private:
     UiCfg ui_;
     SfStatus sf_;
     std::string latest_, latestSha_, stagedVer_;
-    std::string upstreamAirac_, sectorUrl_, sectorPath_, motd_, lastSfKey_;
+    std::map<std::string, std::string> upstreamAirac_, sectorUrl_;   // per package: OKAC, ORBB
+    std::string sectorPath_, motd_, lastSfKey_, myCallsign_;
     std::map<std::string, std::string> lastErr_;
 };
 
