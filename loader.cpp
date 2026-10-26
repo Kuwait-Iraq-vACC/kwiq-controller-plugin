@@ -48,7 +48,7 @@ static std::string Here() {
 }
 
 static std::string ReadSmallFile(const std::string& path, size_t max) {
-    HANDLE f = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    HANDLE f = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (f == INVALID_HANDLE_VALUE) return "";
     DWORD size = GetFileSize(f, nullptr);
     size_t want = size == INVALID_FILE_SIZE ? max : (std::min)((size_t)size, max);
@@ -168,7 +168,8 @@ static void UpdateSelf(const kwiq::PluginConfig& cfg) {
     std::string self = SelfPath(), latest = kwiq::Trim(cfg.Get("plugin.latest_version"));
     std::string sha = kwiq::Lower(kwiq::Trim(cfg.Get("plugin.loader_sha256")));
     if (self.empty() || sha.size() != 64 || kwiq::CompareVersions(KWIQ_PLUGIN_VERSION, latest) >= 0) return;
-    if (kwiq::Sha256Hex(ReadSmallFile(self, 64u * 1024 * 1024)) == sha) return;
+    std::string mine = ReadSmallFile(self, 64u * 1024 * 1024);
+    if (mine.empty() || kwiq::Sha256Hex(mine) == sha) return;     // unreadable: leave it rather than fetch every start
 
     std::string dll;
     if (CoreGet(CORE_PATH L"/download/loader", KWIQ_PLUGIN_VERSION, dll, 64u * 1024 * 1024, 60000) != 200) return;
