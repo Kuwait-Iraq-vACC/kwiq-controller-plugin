@@ -588,6 +588,11 @@ class CKWIQPlugin : public CVCHPlugin {
 public:
     CKWIQPlugin()
         : CVCHPlugin(KWIQ_PLUGIN_NAME, KWIQ_PLUGIN_VERSION, KWIQ_PLUGIN_AUTHOR, KWIQ_PLUGIN_COPYRIGHT) {
+        // Loaded twice (two copies in Other Set > Plug-ins) every message, check and button would appear twice:
+        // the second copy stays idle and says so
+        std::string lock = "Local\\KWIQPlugin-" + std::to_string(GetCurrentProcessId());
+        instanceLock_ = CreateMutexA(nullptr, FALSE, lock.c_str());
+        duplicate_ = instanceLock_ && GetLastError() == ERROR_ALREADY_EXISTS;
         kwiq_net::GlobalInit();
         RegisterTagItemType("Event Route", KWIQ_ITEM_EVENT_ROUTE);
         RegisterTagItemType("Event Flag",  KWIQ_ITEM_EVENT_FLAG);
@@ -602,6 +607,11 @@ public:
         apiKey_ = apikey::Load();
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
         startedAt_ = std::time(nullptr);
+        if (duplicate_) {
+            Msg("The KWIQ plugin is loaded twice, so this copy (" + sf::DllPath() + ") will do nothing. "
+                "Remove one of them in Other Set > Plug-ins.", true);
+            return;
+        }
         Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded", false);
     }
     virtual ~CKWIQPlugin() {
@@ -614,9 +624,11 @@ public:
         if (updateThread_.joinable()) updateThread_.join();
         CDataHandler::Shutdown();
         kwiq_net::GlobalCleanup();
+        if (instanceLock_) CloseHandle(instanceLock_);
     }
 
     virtual void OnTimer(int Counter) override {
+        if (duplicate_) return;
         CVCHPlugin::OnTimer(Counter);                       // VCH housekeeping
         CDataHandler::ApplyPending(this);                   // slot/feed results, main thread
         FlushMessages();
@@ -633,6 +645,7 @@ public:
             if (bp && sscanf_s(bp, "%d,%d", &bx, &by) == 2 && bx >= 0 && by >= 0) { buttonX_ = bx; buttonY_ = by; }
             DeleteFileA((sf::DllPath() + ".old").c_str());   // left over from a previous self-update (fails while still loaded)
         }
+        if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
         TickConnection();
         TickUpdatePrompt();
         TickKeySetup(now);
@@ -723,6 +736,7 @@ public:
     }
 
     virtual bool OnCompileCommand(const char* sCommandLine) override {
+        if (duplicate_) return false;                        // the copy that is in use answers
         std::string c = kwiq::Upper(kwiq::Trim(sCommandLine));
         if (c == ".KWIQ REFRESH") {
             lastCore_ = lastSrd_ = lastSlotFetch_ = 0;
@@ -808,13 +822,14 @@ public:
         auto it = sectors_.find(trackerCallsign);
         return it == sectors_.end() ? std::string() : it->second;
     }
-    bool SectorDrawEnabled() const { return sectorDraw_ && enabled_; }
+    bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_; }
+    bool Duplicate() const { return duplicate_; }
 
     // ---- the KWIQ button and its menu (main thread) ------------------------------------------
     // A small red button at the top centre of each radar screen; it can be dragged anywhere, and
     // ".kwiq button" (or Hide Button in its menu) hides it and brings it back.
     static constexpr int BUTTON_W = 44, BUTTON_H = 18;
-    bool ButtonShown() const { return buttonShown_; }
+    bool ButtonShown() const { return buttonShown_ && !duplicate_; }
     RECT ButtonRect(const RECT& radar) const {
         // Top centre until it is dragged somewhere else; always kept inside the radar area
         int w = radar.right - radar.left, h = radar.bottom - radar.top;
@@ -1184,20 +1199,38 @@ private:
 
     // Compare the user's local sector file against Core's version of the same package (OKAC or ORBB).
     // Messages once per distinct (package, local, upstream); force = user asked (.kwiq version / .kwiq sectorfile).
+    // main thread: the loaded sector file's name ([INFO] line and the name EuroScope reports), e.g.
+    // "ORBB-2610_02", which names the package even when its folders don't
+    void ReadSectorName() {
+        std::string n;
+        EuroScopePlugIn::CSectorElement info = SectorFileElementSelectFirst(EuroScopePlugIn::SECTOR_ELEMENT_INFO);
+        if (info.IsValid() && info.GetName()) n = info.GetName();
+        EuroScopePlugIn::CController me = ControllerMyself();
+        if (me.IsValid() && me.GetSectorFileName()) n += std::string(" ") + me.GetSectorFileName();
+        std::lock_guard<std::mutex> g(mu_);
+        sectorName_ = kwiq::Trim(n);
+    }
+
     void CheckSectorFile(bool force) {
         using namespace kwiq;
         std::map<std::string, std::string> ups, urls;
-        std::string path, callsign;
-        { std::lock_guard<std::mutex> g(mu_); ups = upstreamAirac_; urls = sectorUrl_; path = sectorPath_; callsign = myCallsign_; }
+        std::string path, callsign, name;
+        { std::lock_guard<std::mutex> g(mu_); ups = upstreamAirac_; urls = sectorUrl_; path = sectorPath_; callsign = myCallsign_; name = sectorName_; }
         std::string src;
         Airac l = sf::Local(path, src);
-        // Last resort: the version in the package's folder name, e.g. ...\ORBB-2610_02\ORBB\Plugins
-        for (const std::string& p : { path, sf::DllDir() }) {
+        // Last resort: the version in the package's folder name (...\ORBB-2610_02\ORBB\Plugins) or the sector file's name
+        for (const std::string& p : { path, sf::DllDir(), name }) {
             if (l.valid() || p.empty()) break;
             l = AiracFromPath(p);
+            if (!l.valid() && p == name) l = FindAirac(p);
             if (l.valid()) src = p;
         }
-        std::string pkg = SectorPackage(src.empty() ? path : src, callsign);
+        // OKAC or ORBB: from where the version was found, the folder given, the sector file's name, where
+        // the plugin is installed, then the callsign
+        std::string pkg;
+        for (const std::string& p : { src, path, name, sf::DllPath() })
+            if (pkg.empty() && !p.empty()) pkg = SectorPackage(p, "");
+        if (pkg.empty()) pkg = SectorPackage("", callsign);
         if (pkg.empty()) {
             { std::lock_guard<std::mutex> g(mu_); sf_ = SfStatus{}; }
             std::string key = "?pkg>" + (l.valid() ? l.Str() : std::string("?"));
@@ -1315,7 +1348,9 @@ private:
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     bool keyPrompted_ = false;                                      // main thread only
-    std::time_t startedAt_ = 0;
+    std::time_t startedAt_ = 0, lastNameRead_ = 0;
+    HANDLE instanceLock_ = nullptr;
+    bool duplicate_ = false;
     std::atomic<bool> keyRefused_{ false };
     bool connected_ = false, alertDone_ = true;                     // main thread only
     std::string alertUrl_, promptedFor_;                            // main thread only
@@ -1336,7 +1371,7 @@ private:
     SfStatus sf_;
     std::string latest_, latestSha_, stagedVer_;
     std::map<std::string, std::string> upstreamAirac_, sectorUrl_;   // per package: OKAC, ORBB
-    std::string sectorPath_, motd_, lastSfKey_, myCallsign_;
+    std::string sectorPath_, motd_, lastSfKey_, myCallsign_, sectorName_;
     std::map<std::string, std::string> lastErr_;
 };
 
