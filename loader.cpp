@@ -10,6 +10,7 @@
 
 #include <windows.h>
 #include <winhttp.h>
+#include <algorithm>
 #include <string>
 #include "EuroScopePlugIn.h"
 #include "kwiq_logic.hpp"
@@ -33,12 +34,15 @@ public:
 };
 static CKWIQUnavailable* gFallback = nullptr;
 
-static std::string Here() {
+// This file (KWIQPlugin.dll) and its folder
+static std::string SelfPath() {
     HMODULE m = nullptr;
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&Here, &m);
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&SelfPath, &m);
     char b[MAX_PATH] = {};
-    if (!m || !GetModuleFileNameA(m, b, MAX_PATH)) return "";
-    std::string p = b;
+    return m && GetModuleFileNameA(m, b, MAX_PATH) ? std::string(b) : std::string();
+}
+static std::string Here() {
+    std::string p = SelfPath();
     size_t i = p.find_last_of("\\/");
     return i == std::string::npos ? std::string() : p.substr(0, i);
 }
@@ -46,9 +50,11 @@ static std::string Here() {
 static std::string ReadSmallFile(const std::string& path, size_t max) {
     HANDLE f = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (f == INVALID_HANDLE_VALUE) return "";
-    std::string b(max, '\0');
+    DWORD size = GetFileSize(f, nullptr);
+    size_t want = size == INVALID_FILE_SIZE ? max : (std::min)((size_t)size, max);
+    std::string b(want, '\0');
     DWORD n = 0;
-    ReadFile(f, &b[0], (DWORD)max, &n, nullptr);
+    if (want) ReadFile(f, &b[0], (DWORD)want, &n, nullptr);
     CloseHandle(f);
     b.resize(n);
     return b;
@@ -156,10 +162,28 @@ static void ExtractBuiltIn(const std::string& core) {
         MessageBoxA(nullptr, ("The plugin could not be installed in " + core + ".").c_str(), kTitle, MB_OK | MB_ICONWARNING | MB_TOPMOST);
 }
 
+// This file replaces itself with the latest KWIQPlugin.dll, quietly, for the next start: Windows lets
+// a loaded DLL be renamed but not overwritten, so it moves aside to KWIQPlugin.dll.old (removed then)
+static void UpdateSelf(const kwiq::PluginConfig& cfg) {
+    std::string self = SelfPath(), latest = kwiq::Trim(cfg.Get("plugin.latest_version"));
+    std::string sha = kwiq::Lower(kwiq::Trim(cfg.Get("plugin.loader_sha256")));
+    if (self.empty() || sha.size() != 64 || kwiq::CompareVersions(KWIQ_PLUGIN_VERSION, latest) >= 0) return;
+    if (kwiq::Sha256Hex(ReadSmallFile(self, 64u * 1024 * 1024)) == sha) return;
+
+    std::string dll;
+    if (CoreGet(CORE_PATH L"/download/loader", KWIQ_PLUGIN_VERSION, dll, 64u * 1024 * 1024, 60000) != 200) return;
+    if (kwiq::Sha256Hex(dll) != sha || !kwiq::LooksLikeX86Dll(dll)) return;
+    std::string old = self + ".old";
+    DeleteFileA(old.c_str());
+    if (!MoveFileExA(self.c_str(), old.c_str(), 0)) return;
+    if (!WriteWhole(self, dll.data(), dll.size())) MoveFileExA(old.c_str(), self.c_str(), 0);   // put it back
+}
+
 static void CheckForUpdate(const std::string& core) {
     std::string installed = InstalledVersion(core), body;
     if (CoreGet(CORE_PATH L"/config", installed.empty() ? "0" : installed, body, 1024 * 1024, 5000) != 200) return;
     kwiq::PluginConfig cfg = kwiq::ParseConfig(body);
+    UpdateSelf(cfg);
     std::string latest = kwiq::Trim(cfg.Get("plugin.latest_version")), sha = kwiq::Trim(cfg.Get("plugin.sha256"));
 
     if (installed.empty()) {                             // the main file is missing: put it back without asking
@@ -195,6 +219,7 @@ void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlug
         return;
     }
     if (dir != Here()) DeleteFileA((Here() + "\\KWIQPluginCore.dll").c_str());   // left next to this file by v0.5.0.11, which came as two files
+    DeleteFileA((SelfPath() + ".old").c_str());          // left by updating this file last time
     ExtractBuiltIn(core);
     CheckForUpdate(core);
 
