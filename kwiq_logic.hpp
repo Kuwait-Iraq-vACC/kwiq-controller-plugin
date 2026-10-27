@@ -320,6 +320,45 @@ inline SectorMap ParseSectors(const std::string& body) {
     return m;
 }
 
+// The indicator is drawn in the colour of the aircraft's tag. Both packages draw their tags with
+// TopSky, which colours them from Color_<state>=R,G,B in TopSkySettings.txt (TopSkySettingsLocal.txt
+// overrides it), so those colours are read and picked by the EuroScope flight plan state.
+using TagColours = std::unordered_map<std::string, unsigned long>;   // TopSky colour name -> 0x00BBGGRR
+
+// Adds the Color_ lines of one TopSky settings file to c, replacing what an earlier file set.
+inline void ParseTopSkyColours(const std::string& text, TagColours& c) {
+    for (const auto& line : SplitChar(text, '\n')) {
+        std::string t = Trim(line);
+        size_t eq = t.find('=');
+        if (t.compare(0, 6, "Color_") != 0 || eq == std::string::npos) continue;
+        auto rgb = SplitChar(Trim(t.substr(eq + 1)), ',');
+        if (rgb.size() != 3) continue;
+        unsigned long v[3];
+        bool ok = true;
+        for (int i = 0; i < 3 && ok; i++) {
+            std::string n = Trim(rgb[i]);
+            ok = !n.empty() && n.size() <= 3 && AllDigits(n, 0, n.size()) && std::atoi(n.c_str()) <= 255;
+            if (ok) v[i] = (unsigned long)std::atoi(n.c_str());
+        }
+        if (ok) c[Trim(t.substr(6, eq - 6))] = v[0] | (v[1] << 8) | (v[2] << 16);
+    }
+}
+// TopSky colour name for a EuroScope flight plan state (FLIGHT_PLAN_STATE_*: 0 non concerned, 1 notified,
+// 2 coordinated, 3 transfer to me initiated, 4 transfer from me initiated, 5 assumed, 7 redundant).
+inline const char* TopSkyStateColour(int state) {
+    switch (state) {
+    case 1: case 2: return "Concerned";
+    case 3:         return "Coordination";
+    case 4: case 5: return "Assumed";
+    case 7:         return "Redundant";
+    default:        return "Unconcerned";
+    }
+}
+inline unsigned long TagColour(const TagColours& c, int state, unsigned long def) {
+    auto it = c.find(TopSkyStateColour(state));
+    return it == c.end() ? def : it->second;
+}
+
 // ---- Core-managed configuration ---------------------------------------------
 // Core /api/plugin/config (plain text):  KEY|value   one per line.
 // Anything missing falls back to the built-in default, so the plugin still works if Core is down.

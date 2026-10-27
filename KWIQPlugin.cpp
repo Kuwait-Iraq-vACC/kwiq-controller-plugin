@@ -508,6 +508,18 @@ static kwiq::Airac Local(const std::string& userPath, std::string& src) {
     }
     return {};
 }
+// The tag colours of the TopSky that EuroScope has loaded, from the settings files next to TopSky.dll;
+// empty if TopSky is not loaded.
+static kwiq::TagColours TopSkyColours() {
+    kwiq::TagColours c;
+    HMODULE m = GetModuleHandleA("TopSky.dll");
+    char b[MAX_PATH] = {};
+    if (!m || !GetModuleFileNameA(m, b, MAX_PATH)) return c;
+    std::string dir = ParentOf(b);
+    kwiq::ParseTopSkyColours(ReadHead(dir + "\\TopSkySettings.txt", 1 << 20), c);
+    kwiq::ParseTopSkyColours(ReadHead(dir + "\\TopSkySettingsLocal.txt", 1 << 20), c);
+    return c;
+}
 } // namespace sf
 
 // ---- personal API key ------------------------------------------------------------------------
@@ -624,6 +636,7 @@ public:
             DeleteFileA((sf::DllPath() + ".old").c_str());   // left over from a previous self-update (fails while still loaded)
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
+        if (now - lastTagColours_ >= 60) { lastTagColours_ = now; tagColours_ = sf::TopSkyColours(); }
         TickConnection(now);
         TickKeySetup(now);
         CDataHandler::refreshInterval = slotsEvery_;
@@ -866,6 +879,8 @@ public:
         }
     }
     COLORREF SectorColour() { std::lock_guard<std::mutex> g(mu_); return ui_.cSector; }
+    // main thread: the colour of the aircraft's tag for that flight plan state, else Core's sector colour
+    COLORREF SectorColour(int state, COLORREF def) const { return (COLORREF)kwiq::TagColour(tagColours_, state, def); }
 
     virtual EuroScopePlugIn::CRadarScreen* OnRadarScreenCreated(const char* sDisplayName, bool NeedRadarContent,
                                                                 bool GeoReferenced, bool CanBeSaved, bool CanBeCreated) override;
@@ -1288,7 +1303,8 @@ private:
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     bool keyPrompted_ = false;                                      // main thread only
-    std::time_t startedAt_ = 0, lastNameRead_ = 0;
+    std::time_t startedAt_ = 0, lastNameRead_ = 0, lastTagColours_ = 0;
+    kwiq::TagColours tagColours_;                                   // main thread only: TopSky's, refreshed every minute
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
     std::atomic<bool> keyRefused_{ false };
@@ -1345,7 +1361,7 @@ public:
         RECT area = GetRadarArea();
         int saved = SaveDC(hDC);
         SetBkMode(hDC, TRANSPARENT);
-        SetTextColor(hDC, gPlugin->SectorColour());
+        COLORREF fallback = gPlugin->SectorColour();
         SetTextAlign(hDC, TA_CENTER | TA_BOTTOM);
         if (font_) SelectObject(hDC, font_);
         EuroScopePlugIn::CPlugIn* plugin = GetPlugIn();
@@ -1360,6 +1376,7 @@ public:
             if (alias.empty()) continue;                                    // no alias for that position
             POINT p = ConvertCoordFromPositionToPixel(rt.GetPosition().GetPosition());
             if (p.x < area.left || p.x > area.right || p.y < area.top || p.y > area.bottom) continue;
+            SetTextColor(hDC, gPlugin->SectorColour(fp.GetState(), fallback));   // same colour as its tag
             TextOutA(hDC, p.x, p.y - 9, alias.c_str(), (int)alias.size());
         }
         RestoreDC(hDC, saved);

@@ -78,6 +78,17 @@ int main() {
     CHECK(sm.find("ORBB_X") == sm.end());
     CHECK(ParseSectors("NONE\n").empty());
 
+    // sector indicator colour follows the TopSky tag colour of the flight plan state
+    TagColours tc;
+    ParseTopSkyColours("System_TrueColorMode=1\r\nColor_Unconcerned=90,90,90\r\nColor_Concerned=57,166,73\n"
+                       "Color_Assumed=255,255,255\nColor_Redundant=225,190,45\nColor_Bad=1,2\nColor_Big=256,0,0\n", tc);
+    CHECK(tc.size() == 4 && tc["Unconcerned"] == 0x005A5A5Aul && tc["Concerned"] == 0x0049A639ul);
+    ParseTopSkyColours("Color_Assumed = 125, 255, 125\n", tc);              // TopSkySettingsLocal.txt overrides
+    CHECK(TagColour(tc, 5, 7) == 0x007DFF7Dul && TagColour(tc, 4, 7) == 0x007DFF7Dul);
+    CHECK(TagColour(tc, 0, 7) == 0x005A5A5Aul && TagColour(tc, 1, 7) == 0x0049A639ul && TagColour(tc, 2, 7) == 0x0049A639ul);
+    CHECK(TagColour(tc, 7, 7) == 0x002DBEE1ul);
+    CHECK(TagColour(tc, 3, 7) == 7 && TagColour(TagColours(), 5, 7) == 7);   // no colour for that state: Core's
+
 
     // Core config
     PluginConfig cfg = ParseConfig("plugin.enabled|1\r\nui.text_ok|GOOD\nrefresh.core_s|5\nbad line\nui.colour_ok|#00BE00\nplugin.message|\n");
