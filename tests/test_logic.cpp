@@ -1,5 +1,6 @@
 // Logic tests: g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic && ./test_logic
 #include "kwiq_logic.hpp"
+#include "squawk_logic.hpp"
 using namespace kwiq;
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -152,6 +153,66 @@ int main() {
     CHECK(QueryValue("GET /?key=a%20b HTTP/1.1\r\n", "key") == "");
     CHECK(QueryValue("POST /?key=abc HTTP/1.1\r\n", "key") == "");
     CHECK(QueryValue("GET /favicon.ico HTTP/1.1\r\n", "key") == "");
+
+    // squawk assignment (rules from the UK Controller Plugin)
+    {
+        using namespace kwiq::squawk;
+        CHECK(ValidSquawk("4521") && !ValidSquawk("4528") && !ValidSquawk("452") && !ValidSquawk("45a1"));
+        CHECK(!AllowedSquawk("7700") && !AllowedSquawk("2200") && AllowedSquawk("4521"));
+        CHECK(!HasAssignedSquawk("2200") && !HasAssignedSquawk("2000") && !HasAssignedSquawk("") && HasAssignedSquawk("7000"));
+        CHECK(PositionMatches("OKBK_TWR", "OKBK_N_TWR") && PositionMatches("OKBK_TWR", "okbk_twr"));
+        CHECK(!PositionMatches("OKBK_TWR", "OKBK_APP") && !PositionMatches("OKBK_TWR", "OKBK"));
+        CHECK(CallsignPrefix("OKBK_N_TWR") == "OKBK" && CallsignSuffix("OKBK_N_TWR") == "TWR");
+
+        // top-down: the lowest position anyone is on gives departures their squawk
+        TopDown td = ParseTopDown("TOPDOWN|okbk|OKBK_DEL, OKBK_GND,OKBK_TWR,OKAC_CTR\r\nTOPDOWN|BAD|X_Y\nJUNK\n");
+        CHECK(td.size() == 1 && td["OKBK"].size() == 4);
+        CHECK(DeliveryByMe(td, "OKBK", "OKAC_CTR", {}));
+        CHECK(!DeliveryByMe(td, "OKBK", "OKAC_CTR", { "OKBK_TWR" }));
+        CHECK(DeliveryByMe(td, "OKBK", "OKBK_GND", { "OKBK_TWR", "OKAC_CTR" }));
+        CHECK(!DeliveryByMe(td, "ORBI", "OKAC_CTR", {}));          // no order from Core: only its own positions
+        CHECK(DeliveryByMe(td, "ORBI", "ORBI_TWR", { "ORBI_APP" }));
+
+        User twr{ true, "OKBK_TWR" }, ctr{ true, "OKAC_CTR" }, app{ true, "OKBK_APP" }, obs{ false, "" };
+        Aircraft gnd;                                               // on the ground at OKBK, IFR with a SID
+        gnd.callsign = "KAC123"; gnd.origin = "OKBK"; gnd.destination = "OMDB"; gnd.hasSid = true; gnd.cruise = 35000;
+        gnd.fromOrigin = 0.5; gnd.altitude = 200; gnd.groundSpeed = 0; gnd.deliveryByMe = true;
+        CHECK(Decide(twr, gnd, nullptr, false) == Action::General);
+        Aircraft a = gnd; a.deliveryByMe = false;
+        CHECK(Decide(twr, a, nullptr, false) == Action::None);
+        a = gnd; a.groundSpeed = 140;                               // untracked and rolling
+        CHECK(Decide(twr, a, nullptr, false) == Action::None);
+        a = gnd; a.squawk = "4521";
+        CHECK(Decide(twr, a, nullptr, false) == Action::None);
+        a = gnd; a.altitude = 0;                                    // no position yet
+        CHECK(Decide(twr, a, nullptr, false) == Action::None);
+        CHECK(Decide(obs, gnd, nullptr, false) == Action::None);
+        a = gnd; a.vfr = true; a.route = "VFR CIRCUITS";
+        CHECK(Decide(twr, a, nullptr, true) == Action::Circuit);
+        CHECK(Decide(twr, a, nullptr, false) == Action::Local);     // no circuit code from Core: VFR gets a local one
+        a = gnd; a.hasSid = false; a.cruise = 4000;
+        CHECK(Decide(twr, a, nullptr, false) == Action::Local);
+        Stored same{ "OKBK", "OMDB", "4521", 0 }, moved{ "OKBK", "OTHH", "4521", 0 };
+        CHECK(Decide(twr, gnd, &same, false) == Action::Previous);  // reconnected: same code back
+        CHECK(ForceNeeded(&moved, gnd) && Decide(twr, gnd, &moved, false) == Action::General);
+
+        Aircraft trk = gnd;                                         // tracked by the user, airborne
+        trk.tracked = trk.trackedByMe = true; trk.deliveryByMe = false;
+        trk.groundSpeed = 450; trk.fromOrigin = 120; trk.altitude = 30000; trk.fromMe = 100;
+        CHECK(Decide(ctr, trk, nullptr, false) == Action::General);
+        trk.cruise = 5000;
+        CHECK(Decide(ctr, trk, nullptr, false) == Action::Local);
+        CHECK(Decide(app, trk, nullptr, false) == Action::General); // APP/TWR: local only when low and near
+        trk.altitude = 3000; trk.fromMe = 20;
+        CHECK(Decide(app, trk, nullptr, false) == Action::Local);
+
+        Aircraft other = gnd; other.tracked = true;
+        CHECK(ChangeAllowed(twr, gnd) && !ChangeAllowed(twr, other) && !ChangeAllowed(obs, gnd));
+        CHECK(ParseSquawk("SQUAWK|4521\r\n") == "4521" && ParseSquawk("SQUAWK|7700") == "" && ParseSquawk("nope") == "");
+        CHECK(ParseError("ERROR|No codes left\n") == "No codes left" && ParseError("SQUAWK|4521") == "");
+        CHECK(UrlSafeCallsign("KAC123") && !UrlSafeCallsign("KAC/12") && !UrlSafeCallsign(""));
+        CHECK(FormEncode({ { "type", "general" }, { "origin", "OK BK" } }) == "type=general&origin=OK%20BK");
+    }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
