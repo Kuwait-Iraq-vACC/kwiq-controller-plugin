@@ -605,6 +605,13 @@ public:
         kwiq_ui::gOnNotice = &NoticeThunk;
         apiKey_ = apikey::Load();
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
+        // myKWIQ's one-off code, swapped for the key with Core on the listener's thread
+        keyLink_.Claim = [](const std::string& code) {
+            std::string body, err;
+            if (!kwiq_net::HttpGet(std::string(CORE_BASE "/claim/") + code, body, err)) return std::string();
+            std::string t = kwiq::Trim(body);
+            return t.compare(0, 4, "KEY|") == 0 ? kwiq::Trim(t.substr(4)) : std::string();
+        };
         startedAt_ = std::time(nullptr);
         esVersion_ = EuroScopeVersion();
         if (duplicate_) {
@@ -932,8 +939,11 @@ public:
 
 private:
     // ---- API key setup through myKWIQ (main thread) -------------------------------------------
-    // Without a key (or when Core refuses it) the setup opens once per session, as soon as EuroScope
-    // has settled; the KWIQ button's API Key and .kwiq connect open it at any time.
+    // Whenever there is no key, or Core refuses it as missing, invalid, revoked or expired, the setup
+    // opens: as EuroScope starts, or later in a session once the controller is not logged on (a
+    // logged-on controller is told in the chat, and it opens when they log off). It opens once for each
+    // problem; Cancel leaves it until the next start, the KWIQ button's API Key or .kwiq connect. A key
+    // refused because they left the roster or are suspended is only reported, as a new one wouldn't help.
     void StartKeySetup() {
         if (!keyLink_.Start()) {
             Msg("The API key setup could not start. Copy your key from myKWIQ and use: .kwiq key <your key>", true);
@@ -944,7 +954,8 @@ private:
     }
     void OpenConnectPage() {
         if (!keyLink_.Running()) return;
-        std::string url = std::string(MYKWIQ_CONNECT_URL) + "?port=" + std::to_string(keyLink_.Port()) + "&state=" + keyLink_.State();
+        // v=2: myKWIQ hands over a one-off code that is swapped for the key with Core (KeyLink::Claim)
+        std::string url = std::string(MYKWIQ_CONNECT_URL) + "?port=" + std::to_string(keyLink_.Port()) + "&state=" + keyLink_.State() + "&v=2";
         ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
     void TickKeySetup(std::time_t now) {
@@ -955,11 +966,25 @@ private:
             return;
         }
         if (kwiq_ui::KeyPromptOpen() && !keyLink_.Running()) kwiq_ui::CloseKeyPrompt();   // gave up waiting
-        // Only as EuroScope starts: a refused key later in a session is reported in the chat instead
-        if (!keyPrompted_ && now - startedAt_ >= 5 && now - startedAt_ <= STARTUP_SECONDS && (apiKey_.empty() || keyRefused_)) {
-            keyPrompted_ = true;
-            StartKeySetup();
+        if (now - startedAt_ < 5) return;                    // let EuroScope settle first
+
+        std::string reason;
+        { std::lock_guard<std::mutex> g(mu_); reason = keyReason_; }
+        bool fixable = reason == "missing" || reason == "invalid" || reason == "revoked" || reason == "expired";
+        if (!(apiKey_.empty() || (keyRefused_ && fixable))) return;
+
+        // One setup per problem: a new key, or a different refusal, is a new problem
+        std::string problem = apiKey_.empty() ? std::string("none") : kwiq::ApiKeyId(apiKey_) + ":" + reason;
+        if (problem == keyPromptedFor_ || keyLink_.Running()) return;
+        if (connected_) {
+            if (problem != keyToldFor_) {
+                keyToldFor_ = problem;
+                Msg("Your API key needs connecting again. The setup will open when you log off, or use the KWIQ button and API Key.", true);
+            }
+            return;
         }
+        keyPromptedFor_ = problem;
+        StartKeySetup();
     }
 
     // ---- EuroScope version (main thread) ---------------------------------------------------------
@@ -980,6 +1005,15 @@ private:
             kwiq_ui::ShowEsVersion("You are on an incorrect EuroScope version: " + esVersion_ + ". The Kuwait & Iraq vACC uses " +
                                    list + ".\n\nPress OK to open the EuroScope setup guide.");
         Msg("Incorrect EuroScope version " + esVersion_ + " (the vACC uses " + list + "). Setup guide: " + url, true);
+    }
+
+    static std::string KeyRefusedMessage(const std::string& reason) {
+        if (reason == "missing") return "Core needs your personal API key. Connect it with the KWIQ button and API Key, or .kwiq connect";
+        if (reason == "revoked") return "Your API key has been invalidated. Connect a new one with the KWIQ button and API Key, or .kwiq connect";
+        if (reason == "expired") return "Your API key has expired. Connect a new one with the KWIQ button and API Key, or .kwiq connect";
+        if (reason == "unlinked") return "Your API key no longer works, as you are no longer on the Kuwait & Iraq vACC roster.";
+        if (reason == "suspended") return "Your API key is paused while your VATSIM account is suspended.";
+        return "Core did not recognise your API key. Connect it again with the KWIQ button and API Key, or .kwiq connect";
     }
 
     void SetApiKey(const std::string& key) {
@@ -1307,10 +1341,13 @@ private:
             using namespace kwiq;
             std::string body, err;
             // Core refuses requests without a valid personal key once it requires them: say so once, not per request
-            auto fail = [this](const std::string& src, const std::string& e) {
+            // Only a 401 means the key itself: anything else (Core down, a timeout) never sends anyone to myKWIQ
+            auto fail = [this, &body](const std::string& src, const std::string& e) {
                 if (e == "HTTP 401") {
+                    std::string reason = kwiq::Trim(body).compare(0, 4, "KEY|") == 0 ? kwiq::Trim(kwiq::Trim(body).substr(4)) : "invalid";
+                    { std::lock_guard<std::mutex> g(mu_); keyReason_ = reason; }
                     keyRefused_ = true;
-                    SetError("API key", "Core did not accept your API key. Connect it again from the KWIQ button, or with .kwiq connect");
+                    SetError("API key", KeyRefusedMessage(reason));
                 }
                 else SetError(src, e);
             };
@@ -1319,6 +1356,7 @@ private:
                 if (kwiq_net::HttpGet(CORE_CONFIG_URL, body, err)) {
                     ClearError("Config");
                     ClearError("API key");
+                    keyRefused_ = false;
                     ApplyConfig(ParseConfig(body));
                 } else fail("Config", err);
                 if (kwiq_net::HttpGet(CORE_EVENT_URL, body, err)) {
@@ -1368,13 +1406,14 @@ private:
     int buttonX_ = -1, buttonY_ = -1;                               // main thread only: from the radar's top left; -1 = top centre
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
-    bool keyPrompted_ = false;                                      // main thread only
+    std::string keyPromptedFor_, keyToldFor_;                      // main thread only: the key problem last offered / told about
     std::string esVersion_;                                         // the running EuroScope's, read once at start
     bool esChecked_ = false;                                        // main thread only
     std::time_t startedAt_ = 0, lastNameRead_ = 0;
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
     std::atomic<bool> keyRefused_{ false };
+    std::string keyReason_;                                          // guarded by mu_: why Core last refused the key
     bool connected_ = false, soundPlayed_ = false, soundLooping_ = false, bannerWas_ = false;   // main thread only
     std::time_t connectedAt_ = 0, previewUntil_ = 0;                // main thread only
     static constexpr std::time_t PREVIEW_SECONDS = 15;

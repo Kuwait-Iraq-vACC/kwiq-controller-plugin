@@ -26,7 +26,7 @@ static void Reply(SOCKET c, int status, const std::string& message) {
         "<div style=\"max-width:32rem;padding:2rem;border-radius:12px;background:#13203a;border-top:4px solid #b91c1c\">"
         "<h1 style=\"margin:0 0 .75rem;font-size:1.4rem\">KWIQ Controller Plugin</h1><p style=\"margin:0;line-height:1.6\">" +
         message + "</p></div></body></html>";
-    std::string head = "HTTP/1.1 " + std::string(status == 200 ? "200 OK" : status == 404 ? "404 Not Found" : "400 Bad Request") +
+    std::string head = "HTTP/1.1 " + std::string(status == 200 ? "200 OK" : status == 404 ? "404 Not Found" : status == 502 ? "502 Bad Gateway" : "400 Bad Request") +
                        "\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n"
                        "Connection: close\r\nContent-Length: " + std::to_string(html.size()) + "\r\n\r\n";
     std::string out = head + html;
@@ -88,9 +88,13 @@ void KeyLink::Loop() {
             if (n <= 0) break;
             req.append(buf, n);
         }
-        std::string key = kwiq::QueryValue(req, "key"), state = kwiq::QueryValue(req, "state");
+        std::string key = kwiq::QueryValue(req, "key"), code = kwiq::QueryValue(req, "code"), state = kwiq::QueryValue(req, "state");
+        bool fromCode = !code.empty() && state == state_;
+        if (fromCode && Claim) key = Claim(code);
         bool ok = kwiq::IsApiKey(key) && state == state_;
-        if (ok) {
+        if (fromCode && !ok) {
+            Reply(c, 502, "Your API key could not be collected from Core. Please try again from EuroScope, with the KWIQ button and API Key.");
+        } else if (ok) {
             Reply(c, 200, "Your API key has been received. You can close this window and return to EuroScope.");
             { std::lock_guard<std::mutex> g(mu_); received_ = key; }
             stop_ = true;

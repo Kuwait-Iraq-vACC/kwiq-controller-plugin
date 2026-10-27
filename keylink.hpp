@@ -1,11 +1,14 @@
 // keylink.hpp - receives the personal API key from myKWIQ.
 //
 // The plugin listens on 127.0.0.1 (a free port) and opens myKWIQ's Connect EuroScope page with that
-// port and a one-off code. After the controller clicks Connect there, the browser is sent to
-// http://127.0.0.1:<port>/?key=...&state=<code>; the key is accepted only with the right code.
+// port and a one-off state. After the controller clicks Connect there, the browser is sent to
+// http://127.0.0.1:<port>/?code=...&state=<state>, and only with the right state is the code swapped
+// for the key with Core (Claim), so the key never goes through the browser. ?key= is still accepted
+// from a myKWIQ that hands the key over itself.
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -13,6 +16,8 @@
 class KeyLink {
 public:
     ~KeyLink() { Stop(); }
+    // Swaps myKWIQ's one-off code for the key with Core; "" if Core says no. Runs on the listener's thread
+    std::function<std::string(const std::string& code)> Claim;
     // Starts listening (if not already); false if no port could be opened
     bool Start();
     void Stop();
