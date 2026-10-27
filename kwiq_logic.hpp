@@ -328,8 +328,7 @@ using EsePositions = std::unordered_map<std::string, std::string>;   // position
 inline EsePositions ParseEsePositions(const std::string& text) {
     EsePositions m;
     bool in = false;
-    for (const auto& line : SplitChar(text, '
-')) {
+    for (const auto& line : SplitChar(text, '\n')) {
         std::string t = Trim(line);
         if (t.empty() || t[0] == ';') continue;
         if (t[0] == '[') { in = Upper(t).compare(0, 11, "[POSITIONS]") == 0; continue; }

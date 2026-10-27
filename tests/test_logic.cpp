@@ -79,20 +79,10 @@ int main() {
     CHECK(ParseSectors("NONE\n").empty());
 
     // sector indicators from the ESE for positions Core does not list
-    EsePositions ep = ParseEsePositions("[SIDSSTARS]
-SID:ORBI:33L:X:Y
-[POSITIONS]
-; comment
-"
-        "ORBB_CTR:Baghdad Control:124.400:B::ORBB:CTR:::1000:1077:N033.15.45.000:E044.14.04.000
-"
-        "ORBB_S_CTR:Baghdad Control:128.700:BS:S:ORBB:CTR:::1000:1077
-"
-        "ORBB_X_CTR:Dup:128.000:bs:X:ORBB:CTR
-short:line
-[AIRSPACE]
-X_CTR:a:1:ZZ:b:c:d
-");
+    EsePositions ep = ParseEsePositions("[SIDSSTARS]\nSID:ORBI:33L:X:Y\n[POSITIONS]\r\n; comment\r\n"
+        "ORBB_CTR:Baghdad Control:124.400:B::ORBB:CTR:::1000:1077:N033.15.45.000:E044.14.04.000\r\n"
+        "ORBB_S_CTR:Baghdad Control:128.700:BS:S:ORBB:CTR:::1000:1077\n"
+        "ORBB_X_CTR:Dup:128.000:bs:X:ORBB:CTR\nshort:line\n[AIRSPACE]\nX_CTR:a:1:ZZ:b:c:d\n");
     CHECK(ep.size() == 2 && ep["B"] == "ORBB_CTR" && ep["BS"] == "ORBB_S_CTR" && ep.find("ZZ") == ep.end());
     CHECK(ParseEsePositions("ORBB_CTR:Baghdad Control:124.400:B::ORBB:CTR").empty());   // not in [POSITIONS]
 
