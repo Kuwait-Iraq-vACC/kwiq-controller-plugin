@@ -319,6 +319,13 @@ static LRESULT CALLBACK NoticeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_ERASEBKGND: return 1;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_NCHITTEST: {                                 // the key setup cannot be dragged by its title bar
+        LRESULT hit = DefWindowProcA(h, m, w, l);
+        return (n && n->kind == NOTICE_KEY && hit == HTCAPTION) ? HTCLIENT : hit;
+    }
+    case WM_SYSCOMMAND:
+        if (n && n->kind == NOTICE_KEY && (w & 0xFFF0) == SC_MOVE) return 0;
+        break;
     case WM_PAINT:
         if (n) { PaintNotice(h, *n); return 0; }
         break;
@@ -404,9 +411,8 @@ static bool ShowNotice(Notice& n, int kind, const std::string& title, const std:
 // API key setup: waits while the controller connects on myKWIQ, and closes only once the key arrives.
 static void ShowKeyPrompt() {
     ShowNotice(gKey, NOTICE_KEY, "KWIQ API Key Setup",
-               "Please go to your web browser, sign in to myKWIQ and click Connect EuroScope. This window will close "
-               "automatically once your API key has been received. If the page did not open, click Reopen Browser, or paste "
-               "the link from the chat into your browser. Need help? discord.kuwait-iraqvacc.net",
+               "Sign in to myKWIQ in your browser and click Connect EuroScope. This window closes once your API key "
+               "is connected. The link is also on your clipboard. Help: discord.kuwait-iraqvacc.net",
                IDI_INFORMATION, "Reopen Browser", nullptr);
 }
 static bool KeyPromptOpen() { return gKey.hwnd != nullptr; }
@@ -984,11 +990,10 @@ private:
         // v=2: myKWIQ hands over a one-off code that is swapped for the key with Core (KeyLink::Claim)
         std::string url = std::string(MYKWIQ_CONNECT_URL) + "?port=" + std::to_string(keyLink_.Port()) + "&state=" + keyLink_.State() + "&v=2";
         // Wine (EuroScope on a Mac or Linux) hands the link to the system browser; if no browser opens,
-        // there or on Windows, the link is in the chat and on the clipboard to paste in by hand
+        // there or on Windows, the link is on the clipboard to paste in by hand (never in the chat)
         bool opened = (INT_PTR)ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
         kwiq_ui::CopyToClipboard(nullptr, url);
-        Msg(std::string(opened ? "If your browser did not open, paste" : "Your browser could not be opened. Paste") +
-            " this link into it (it is on your clipboard): " + url, !opened);
+        if (!opened) Msg("Your browser could not be opened. The link is on your clipboard: paste it into your browser.", true);
     }
     void TickKeySetup(std::time_t now) {
         std::string key = keyLink_.Take();
