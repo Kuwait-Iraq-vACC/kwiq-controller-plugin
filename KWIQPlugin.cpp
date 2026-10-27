@@ -12,6 +12,7 @@
 #include <thread>
 #include <atomic>
 #include <map>
+#include <array>
 #include <cstring>
 #include <mmsystem.h>       // PlaySound (link winmm)
 #include <shellapi.h>       // ShellExecute
@@ -543,6 +544,7 @@ static bool Save(const std::string& key) {
 struct UiCfg {
     std::string ok = "OK", chk = "CHK", ev = "EV";
     COLORREF cOk = RGB(0, 190, 0), cBad = RGB(230, 30, 30), cEv = RGB(0, 170, 255), cSector = RGB(255, 255, 255);
+    std::map<std::string, COLORREF> cStates;                         // sector indicator per tag state (SectorColourName)
     // outdated sector file alert
     bool alertOn = true;
     int flashSec = 10;
@@ -793,10 +795,18 @@ public:
         return CVCHPlugin::OnCompileCommand(sCommandLine);
     }
 
-    // Sector indicator of the position tracking an aircraft; empty if none or it has no alias in Core.
+    // main thread: sector indicator of the position tracking an aircraft. The ID of the ESE position
+    // EuroScope identifies that controller as right now (by prefix, suffix and frequency, so a relief callsign
+    // or a controller covering another position gets the position actually worked), else Core's alias for
+    // the callsign. Empty if nobody tracks it or neither is known.
     std::string SectorFor(const char* trackerCallsign) {
+        std::string cs = kwiq::Upper(trackerCallsign);
+        EuroScopePlugIn::CController me = ControllerMyself();
+        EuroScopePlugIn::CController c = me.IsValid() && kwiq::Upper(me.GetCallsign()) == cs ? me : ControllerSelect(trackerCallsign);
+        if (c.IsValid() && c.GetPositionIdentified() && c.GetPositionId() && *c.GetPositionId())
+            return kwiq::Upper(c.GetPositionId()).substr(0, 4);
         std::lock_guard<std::mutex> g(mu_);
-        auto it = sectors_.find(trackerCallsign);
+        auto it = sectors_.find(cs);
         return it == sectors_.end() ? std::string() : it->second;
     }
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_; }
@@ -865,7 +875,17 @@ public:
         case KWIQ_MENU_HIDE:         ShowButton(false); return;
         }
     }
-    COLORREF SectorColour() { std::lock_guard<std::mutex> g(mu_); return ui_.cSector; }
+    // Sector indicator colour per flight plan state (FLIGHT_PLAN_STATE_*): Core's colour for that state,
+    // else Core's sector colour
+    std::array<COLORREF, 8> SectorColours() {
+        std::lock_guard<std::mutex> g(mu_);
+        std::array<COLORREF, 8> a;
+        for (int i = 0; i < 8; i++) {
+            auto it = ui_.cStates.find(kwiq::SectorColourName(i));
+            a[i] = it == ui_.cStates.end() ? ui_.cSector : it->second;
+        }
+        return a;
+    }
 
     virtual EuroScopePlugIn::CRadarScreen* OnRadarScreenCreated(const char* sDisplayName, bool NeedRadarContent,
                                                                 bool GeoReferenced, bool CanBeSaved, bool CanBeCreated) override;
@@ -1109,6 +1129,11 @@ private:
         u.cBad = (COLORREF)ParseColour(c.Get("ui.colour_bad"), u.cBad);
         u.cEv = (COLORREF)ParseColour(c.Get("ui.colour_event"), u.cEv);
         u.cSector = (COLORREF)ParseColour(c.Get("ui.colour_sector"), u.cSector);
+        for (int i = 0; i < 8; i++) {
+            std::string n = SectorColourName(i);
+            unsigned long v = ParseColour(c.Get("ui.colour_sector_" + n), 0xFFFFFFFFul);
+            if (v != 0xFFFFFFFFul) u.cStates[n] = (COLORREF)v;
+        }
         coreEvery_  = c.GetInt("refresh.core_s", 60, 30, 3600);
         srdEvery_   = c.GetInt("refresh.srd_s", 300, 60, 86400);
         slotsEvery_ = c.GetInt("refresh.slots_s", 60, 15, 3600);
@@ -1345,7 +1370,7 @@ public:
         RECT area = GetRadarArea();
         int saved = SaveDC(hDC);
         SetBkMode(hDC, TRANSPARENT);
-        SetTextColor(hDC, gPlugin->SectorColour());
+        std::array<COLORREF, 8> colours = gPlugin->SectorColours();
         SetTextAlign(hDC, TA_CENTER | TA_BOTTOM);
         if (font_) SelectObject(hDC, font_);
         EuroScopePlugIn::CPlugIn* plugin = GetPlugIn();
@@ -1360,6 +1385,8 @@ public:
             if (alias.empty()) continue;                                    // no alias for that position
             POINT p = ConvertCoordFromPositionToPixel(rt.GetPosition().GetPosition());
             if (p.x < area.left || p.x > area.right || p.y < area.top || p.y > area.bottom) continue;
+            int state = fp.GetState();
+            SetTextColor(hDC, colours[state >= 0 && state < 8 ? state : 0]);   // the colour of its tag
             TextOutA(hDC, p.x, p.y - 9, alias.c_str(), (int)alias.size());
         }
         RestoreDC(hDC, saved);

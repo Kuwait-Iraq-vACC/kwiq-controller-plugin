@@ -320,6 +320,21 @@ inline SectorMap ParseSectors(const std::string& body) {
     return m;
 }
 
+// The indicator is drawn in the colour of the aircraft's tag, which Core sets per EuroScope flight plan
+// state as ui.colour_sector_<name>, named as in EuroScope's Symbology (Datablock: ...).
+// FLIGHT_PLAN_STATE_*: 0 non concerned, 1 notified, 2 coordinated, 3 transfer to me initiated,
+// 4 transfer from me initiated, 5 assumed, 7 redundant.
+inline const char* SectorColourName(int state) {
+    switch (state) {
+    case 1:         return "notified";
+    case 2:         return "information";
+    case 3:         return "transfer_to_me_initiated";
+    case 4: case 5: return "assumed";
+    case 7:         return "redundant";
+    default:        return "non_concerned";
+    }
+}
+
 // ---- Core-managed configuration ---------------------------------------------
 // Core /api/plugin/config (plain text):  KEY|value   one per line.
 // Anything missing falls back to the built-in default, so the plugin still works if Core is down.

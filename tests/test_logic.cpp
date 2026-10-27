@@ -78,6 +78,12 @@ int main() {
     CHECK(sm.find("ORBB_X") == sm.end());
     CHECK(ParseSectors("NONE\n").empty());
 
+    // sector indicator colour by flight plan state, named as in EuroScope's Symbology
+    CHECK(std::string(SectorColourName(0)) == "non_concerned" && std::string(SectorColourName(1)) == "notified" &&
+          std::string(SectorColourName(2)) == "information" && std::string(SectorColourName(3)) == "transfer_to_me_initiated" &&
+          std::string(SectorColourName(4)) == "assumed" && std::string(SectorColourName(5)) == "assumed" &&
+          std::string(SectorColourName(7)) == "redundant" && std::string(SectorColourName(42)) == "non_concerned");
+
 
     // Core config
     PluginConfig cfg = ParseConfig("plugin.enabled|1\r\nui.text_ok|GOOD\nrefresh.core_s|5\nbad line\nui.colour_ok|#00BE00\nplugin.message|\n");
