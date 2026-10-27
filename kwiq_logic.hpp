@@ -320,27 +320,6 @@ inline SectorMap ParseSectors(const std::string& body) {
     return m;
 }
 
-// Positions Core does not list (ORBB__CTR, a relief callsign ...) get their indicator from the ESE:
-// EuroScope identifies the controller as one of its [POSITIONS] (by prefix, suffix and frequency) and gives
-// the plugin that position's ID; the ESE line with that ID names the position, which may have a Core alias.
-// [POSITIONS] lines:  NAME:RADIO CALLSIGN:FREQUENCY:ID:MIDDLE LETTER:PREFIX:SUFFIX:...
-using EsePositions = std::unordered_map<std::string, std::string>;   // position ID -> position name
-inline EsePositions ParseEsePositions(const std::string& text) {
-    EsePositions m;
-    bool in = false;
-    for (const auto& line : SplitChar(text, '\n')) {
-        std::string t = Trim(line);
-        if (t.empty() || t[0] == ';') continue;
-        if (t[0] == '[') { in = Upper(t).compare(0, 11, "[POSITIONS]") == 0; continue; }
-        if (!in) continue;
-        auto f = SplitChar(t, ':');
-        if (f.size() < 7) continue;
-        std::string name = Upper(Trim(f[0])), id = Upper(Trim(f[3]));
-        if (!name.empty() && !id.empty()) m.emplace(id, name);          // the first line with an ID wins
-    }
-    return m;
-}
-
 // The indicator is drawn in the colour of the aircraft's tag, which Core sets per EuroScope flight plan
 // state as ui.colour_sector_<name>, named as in EuroScope's Symbology (Datablock: ...).
 // FLIGHT_PLAN_STATE_*: 0 non concerned, 1 notified, 2 coordinated, 3 transfer to me initiated,

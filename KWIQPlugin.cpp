@@ -509,49 +509,6 @@ static kwiq::Airac Local(const std::string& userPath, std::string& src) {
     }
     return {};
 }
-// The ESE of the loaded sector file: the one given with ".kwiq sectorfile", else in that folder or the
-// plugin's folder and their parents, else in any package under %APPDATA%\EuroScope. The one named like the
-// loaded sector file wins, else (only near the plugin or the folder given) the newest.
-static std::vector<std::string> EseIn(const std::string& dir) {
-    std::vector<std::string> out;
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA((dir + "\\*.ese").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return out;
-    do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) out.push_back(dir + "\\" + fd.cFileName);
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-    return out;
-}
-static bool IsEse(const std::string& p) {
-    return p.size() > 4 && kwiq::Upper(p.substr(p.size() - 4)) == ".ESE";
-}
-static bool NamedLike(const std::string& ese, const std::string& sectorName) {
-    std::string f = ese.substr(ese.find_last_of("\\/") + 1);
-    f = kwiq::Upper(f.substr(0, f.size() - 4));                       // without .ese
-    return !f.empty() && kwiq::Upper(sectorName).find(f) != std::string::npos;
-}
-static std::string FindEse(const std::string& userPath, const std::string& sectorName) {
-    if (IsEse(userPath) && FileExists(userPath)) return userPath;
-    std::vector<std::string> starts, found;
-    if (!userPath.empty()) starts.push_back(IsDir(userPath) ? userPath : ParentOf(userPath));
-    starts.push_back(DllDir());
-    for (const auto& s : starts) {
-        std::string d = s;
-        for (int up = 0; up < 4 && !d.empty(); up++, d = ParentOf(d))
-            for (const auto& e : EseIn(d)) found.push_back(e);
-    }
-    std::string best;
-    for (const auto& e : found) if (NamedLike(e, sectorName)) return e;
-    for (const auto& e : found) if (best.empty() || NewerThan(e, best)) best = e;
-    if (!best.empty()) return best;
-    char app[MAX_PATH] = {};
-    if (GetEnvironmentVariableA("APPDATA", app, MAX_PATH))
-        for (const auto& pkg : SubDirs(std::string(app) + "\\EuroScope"))
-            for (const auto& e : EseIn(pkg))
-                if (NamedLike(e, sectorName) && (best.empty() || NewerThan(e, best))) best = e;
-    return best;
-}
 } // namespace sf
 
 // ---- personal API key ------------------------------------------------------------------------
@@ -669,7 +626,6 @@ public:
             DeleteFileA((sf::DllPath() + ".old").c_str());   // left over from a previous self-update (fails while still loaded)
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
-        if (now - lastEseRead_ >= 60) { lastEseRead_ = now; ReadEse(); }
         TickConnection(now);
         TickKeySetup(now);
         CDataHandler::refreshInterval = slotsEvery_;
@@ -827,7 +783,7 @@ public:
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
-                std::to_string(sectors_.size()) + " | ESE positions " + std::to_string(esePositions_.size()) + " | ";
+                std::to_string(sectors_.size()) + " | ";
             s += ev_.active
                 ? ev_.name + " | event routes " + std::to_string(ev_.routes.size()) +
                   " | VATCAN code " + ev_.vatcanCode + " | slots " + std::to_string(CDataHandler::SlotCount()) +
@@ -839,27 +795,19 @@ public:
         return CVCHPlugin::OnCompileCommand(sCommandLine);
     }
 
-    // main thread: sector indicator of the position tracking an aircraft. Core's alias for that callsign,
-    // else the ESE position EuroScope identified the controller as (ORBB__CTR is ORBB_CTR): Core's alias
-    // for that position, else its ESE ID. Empty if nobody tracks it or the position is not identified.
+    // main thread: sector indicator of the position tracking an aircraft. The ID of the ESE position
+    // EuroScope identifies that controller as right now (by prefix, suffix and frequency, so a relief callsign
+    // or a controller covering another position gets the position actually worked), else Core's alias for
+    // the callsign. Empty if nobody tracks it or neither is known.
     std::string SectorFor(const char* trackerCallsign) {
         std::string cs = kwiq::Upper(trackerCallsign);
-        {
-            std::lock_guard<std::mutex> g(mu_);
-            auto it = sectors_.find(cs);
-            if (it != sectors_.end()) return it->second;
-        }
         EuroScopePlugIn::CController me = ControllerMyself();
         EuroScopePlugIn::CController c = me.IsValid() && kwiq::Upper(me.GetCallsign()) == cs ? me : ControllerSelect(trackerCallsign);
-        if (!c.IsValid() || !c.GetPositionIdentified() || !c.GetPositionId() || !*c.GetPositionId()) return "";
-        std::string id = kwiq::Upper(c.GetPositionId());
-        auto pos = esePositions_.find(id);
-        if (pos != esePositions_.end()) {
-            std::lock_guard<std::mutex> g(mu_);
-            auto it = sectors_.find(pos->second);
-            if (it != sectors_.end()) return it->second;
-        }
-        return id.substr(0, 4);
+        if (c.IsValid() && c.GetPositionIdentified() && c.GetPositionId() && *c.GetPositionId())
+            return kwiq::Upper(c.GetPositionId()).substr(0, 4);
+        std::lock_guard<std::mutex> g(mu_);
+        auto it = sectors_.find(cs);
+        return it == sectors_.end() ? std::string() : it->second;
     }
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_; }
     bool Duplicate() const { return duplicate_; }
@@ -1225,18 +1173,6 @@ private:
     // Messages once per distinct (package, local, upstream); force = user asked (.kwiq version / .kwiq sectorfile).
     // main thread: the loaded sector file's name ([INFO] line and the name EuroScope reports), e.g.
     // "ORBB-2610_02", which names the package even when its folders don't
-    // main thread: (re)reads the ESE's positions when another ESE is found or it has changed
-    void ReadEse() {
-        std::string path, name;
-        { std::lock_guard<std::mutex> g(mu_); path = sectorPath_; name = sectorName_; }
-        std::string ese = sf::FindEse(path, name);
-        WIN32_FILE_ATTRIBUTE_DATA a = {};
-        if (ese.empty() || !GetFileAttributesExA(ese.c_str(), GetFileExInfoStandard, &a)) return;
-        if (ese == esePath_ && CompareFileTime(&a.ftLastWriteTime, &eseTime_) == 0) return;
-        esePath_ = ese;
-        eseTime_ = a.ftLastWriteTime;
-        esePositions_ = kwiq::ParseEsePositions(sf::ReadHead(ese, 8u << 20));
-    }
     void ReadSectorName() {
         std::string n;
         EuroScopePlugIn::CSectorElement info = SectorFileElementSelectFirst(EuroScopePlugIn::SECTOR_ELEMENT_INFO);
@@ -1377,10 +1313,7 @@ private:
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     bool keyPrompted_ = false;                                      // main thread only
-    std::time_t startedAt_ = 0, lastNameRead_ = 0, lastEseRead_ = 0;
-    kwiq::EsePositions esePositions_;                               // main thread only: of the loaded sector file
-    std::string esePath_;                                           // main thread only
-    FILETIME eseTime_ = {};                                         // main thread only
+    std::time_t startedAt_ = 0, lastNameRead_ = 0;
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
     std::atomic<bool> keyRefused_{ false };
