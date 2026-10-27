@@ -140,8 +140,9 @@ bool HttpGetBinary(const string& url, string& body, string& err, size_t maxBytes
 
 } // namespace kwiq_net
 
-static void add_message(FetchResult& r, const char* sender, string text, bool alert) {
-    r.messages.push_back({ sender, text, alert });
+// Errors only: a successful fetch says nothing
+static void add_message(FetchResult& r, const char* sender, string text) {
+    r.messages.push_back({ sender, text });
 }
 
 // Streaming parser for the VATSIM data feed: only reads callsign + cid of each pilot
@@ -269,7 +270,7 @@ void CDataHandler::FetchWorker(string eventCode, bool pullSlots) {
                 json cidJson = json::parse(cidString);
                 if (cidJson.contains("error")) {
                     string error = cidJson.at("error");
-                    add_message(result, "API Error", error, true);
+                    add_message(result, "API Error", error);
                 }
                 else {
                     for (auto& pilots : cidJson) {
@@ -278,16 +279,14 @@ void CDataHandler::FetchWorker(string eventCode, bool pullSlots) {
                         result.slotTime[cid] = slot;
                     }
                     result.slotsUpdated = true;
-                    add_message(result, "Update Successful",
-                                std::to_string(result.slotTime.size()) + " slot times parsed", false);
                 }
             }
             catch (std::exception& e) {
-                add_message(result, "Parse Error", string("Slots failed: ") + e.what(), true);
+                add_message(result, "Parse Error", string("Slots failed: ") + e.what());
             }
         }
         else {
-            add_message(result, "Network Error", string("Connect failed: ") + curl_easy_strerror(res), true);
+            add_message(result, "Network Error", string("Connect failed: ") + curl_easy_strerror(res));
         }
     }
 
@@ -303,7 +302,7 @@ void CDataHandler::FetchWorker(string eventCode, bool pullSlots) {
                 result.feedUpdated = true;
             }
             catch (std::exception& e) {
-                add_message(result, "Parse Error", string("VATSIM Data failed: ") + e.what(), true);
+                add_message(result, "Parse Error", string("VATSIM Data failed: ") + e.what());
             }
         }
     }
@@ -343,7 +342,7 @@ void CDataHandler::ApplyPending(EuroScopePlugIn::CPlugIn* plugin) {
     }
 
     for (auto& m : result->messages) {
-        plugin->DisplayUserMessage("VATCAN Slot Manager", m.sender.c_str(), m.text.c_str(), true, m.alert, m.alert, m.alert, m.alert);
+        plugin->DisplayUserMessage("KWIQ Events Manager", m.sender.c_str(), m.text.c_str(), true, true, true, true, true);
     }
 }
 

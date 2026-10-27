@@ -26,7 +26,6 @@ struct ACData {
 struct UserMessage {
     std::string sender;
     std::string text;
-    bool alert;
 };
 
 struct FetchResult {
