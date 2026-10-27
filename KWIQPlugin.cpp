@@ -1066,7 +1066,7 @@ private:
             msg = kwiq::ExplainFpc(srd_, kwiq::Upper(d.GetOrigin()), kwiq::Upper(d.GetDestination()),
                                    d.GetRoute(), fp.GetFinalAltitude());
         }
-        DisplayUserMessage("KWIQ", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
+        DisplayUserMessage("KWIQ Controller Plugin", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
     }
 
     // ---- outdated sector file (main thread) --------------------------------------------------
@@ -1147,7 +1147,7 @@ public:
     }
 private:
     void Msg(const std::string& m, bool err) {
-        DisplayUserMessage("KWIQ", err ? "Error" : "Info", m.c_str(), true, err, false, false, false);
+        DisplayUserMessage("KWIQ Controller Plugin", err ? "Error" : "Info", m.c_str(), true, err, false, false, false);
     }
     void FlushMessages() {
         std::vector<std::pair<std::string, bool>> out;
