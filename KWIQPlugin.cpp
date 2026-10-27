@@ -18,6 +18,7 @@
 #include <mmsystem.h>       // PlaySound (link winmm)
 #include <shellapi.h>       // ShellExecute
 #include <winver.h>         // GetFileVersionInfo (link version)
+#include <commctrl.h>       // the SRD search results list (link comctl32)
 #include "requestMenu.hpp"      // CVCHPlugin (VCH)
 #include "kwiq_logic.hpp"
 #include "VatsimAPI.h"
@@ -69,12 +70,13 @@ enum {
 };
 
 // ---------------------------------------------------------------------------
-// Windows (plain Win32, no MFC): event routes list and SRD search, Copy button per row
+// Windows (plain Win32, no MFC): event routes list (Copy button per row) and SRD search
 // ---------------------------------------------------------------------------
 namespace kwiq_ui {
 
 static const char* const kClass = "KWIQPluginWnd";
-enum { ID_SEARCH = 2900, ID_COPY_BASE = 3000, MAX_ROWS = 24, SRD_ROWS = 12 };
+enum { ID_SEARCH = 2900, ID_SRD_COPY = 2901, ID_SRD_CLOSE = 2902, ID_SRD_LIST = 2903, ID_COPY_BASE = 3000,
+       MAX_ROWS = 24, SRD_MAX_RESULTS = 500 };
 static const int M = 10, LBL = 170, EDT = 460, BTN = 70, GAP = 6, ROWH = 24, ROWGAP = 6;
 static const int CW = M + LBL + GAP + EDT + GAP + BTN + M;   // client width
 
@@ -82,7 +84,10 @@ struct Win {
     HWND hwnd = nullptr;
     std::vector<std::string> copy;
     std::vector<HWND> btns, lbls, edits;
-    HWND eAdep = nullptr, eAdes = nullptr, eLvl = nullptr, sInfo = nullptr;
+    HWND eAdep = nullptr, eAdes = nullptr, eLvl = nullptr;
+    HWND list = nullptr, notes = nullptr, copyBtn = nullptr;       // SRD search
+    std::vector<kwiq::SrdRoute> results;
+    int selected = -1;
 };
 static Win gEvt, gSrd;
 static HMODULE gMod = nullptr;
@@ -91,6 +96,7 @@ static void (*gOnSearch)(const std::string&, const std::string&, const std::stri
 
 static Win* WinOf(HWND h) { return (h && h == gEvt.hwnd) ? &gEvt : (h && h == gSrd.hwnd) ? &gSrd : nullptr; }
 static std::string TextOf(HWND h) { char b[256]; GetWindowTextA(h, b, sizeof b); return b; }
+static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows);
 
 static void CopyToClipboard(HWND owner, const std::string& text) {
     if (!OpenClipboard(owner)) return;
@@ -113,13 +119,37 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         Win* win = WinOf(h);
         if (!win || HIWORD(w) != BN_CLICKED) return 0;
         int id = (int)LOWORD(w);
-        if (id == ID_SEARCH && gOnSearch && win == &gSrd) {
-            gOnSearch(TextOf(win->eAdep), TextOf(win->eAdes), TextOf(win->eLvl));
+        if (id == ID_SEARCH && win == &gSrd) {
+            std::string adep = kwiq::Trim(TextOf(win->eAdep)), ades = kwiq::Trim(TextOf(win->eAdes));
+            if (adep.empty() || ades.empty()) {               // both are required, as in UKCP
+                SetSrdResults({});
+                SetWindowTextA(win->notes, "Enter both the origin and the destination (a fix or an airfield).");
+            } else if (gOnSearch) gOnSearch(adep, ades, TextOf(win->eLvl));
+        } else if (id == ID_SRD_COPY && win == &gSrd) {
+            if (win->selected >= 0 && win->selected < (int)win->results.size()) {
+                CopyToClipboard(h, win->results[win->selected].rte);
+                SetWindowTextA(win->copyBtn, "Copied");
+            }
+        } else if (id == ID_SRD_CLOSE) {
+            DestroyWindow(h);
         } else if (id >= ID_COPY_BASE && id - ID_COPY_BASE < (int)win->copy.size()) {
             CopyToClipboard(h, win->copy[id - ID_COPY_BASE]);
             for (HWND b : win->btns) SetWindowTextA(b, "Copy");
             SetWindowTextA((HWND)l, "Copied");
         }
+        return 0;
+    }
+    case WM_NOTIFY: {
+        // a route picked in the SRD search results: its notes, and it can be copied
+        NMHDR* nh = (NMHDR*)l;
+        if (h != gSrd.hwnd || nh->idFrom != ID_SRD_LIST || nh->code != LVN_ITEMCHANGED) return 0;
+        NMLISTVIEW* nl = (NMLISTVIEW*)l;
+        if (!(nl->uNewState & LVIS_SELECTED) || (nl->uOldState & LVIS_SELECTED)) return 0;
+        if (nl->iItem < 0 || nl->iItem >= (int)gSrd.results.size()) return 0;
+        gSrd.selected = nl->iItem;
+        SetWindowTextA(gSrd.notes, kwiq::SrdNotesText(gSrd.results[nl->iItem]).c_str());
+        SetWindowTextA(gSrd.copyBtn, "Copy Route String To Clipboard");
+        EnableWindow(gSrd.copyBtn, TRUE);
         return 0;
     }
     case WM_CLOSE:
@@ -168,7 +198,7 @@ static HWND Child(const char* cls, const char* text, DWORD style, int x, int y, 
 }
 
 // Creates the popup, stores it in `win`, destroying any previous one of the same kind.
-static bool Make(Win& win, POINT, const std::string& title, int ch) {
+static bool Make(Win& win, POINT, const std::string& title, int ch, int cw = CW) {
     if (!gMod)
         GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            (LPCSTR)&WndProc, &gMod);
@@ -186,7 +216,7 @@ static bool Make(Win& win, POINT, const std::string& title, int ch) {
     if (win.hwnd) DestroyWindow(win.hwnd);   // WM_DESTROY resets `win`
 
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
-    RECT rc = { 0, 0, CW, ch };
+    RECT rc = { 0, 0, cw, ch };
     AdjustWindowRectEx(&rc, style, FALSE, ex);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
     int x, y;
@@ -224,56 +254,105 @@ static void ShowEvent(POINT pt, const std::string& title, const std::vector<kwiq
     ShowWindow(h, SW_SHOW);
 }
 
-static void ShowSrd(POINT pt, const std::string& adep, const std::string& ades, const std::string& lvl) {
-    int rowsTop = M + ROWH + 8 + ROWH + 6;
-    int ch = rowsTop + SRD_ROWS * (ROWH + ROWGAP) - ROWGAP + M;
-    if (!Make(gSrd, pt, "KWIQ SRD Search", ch)) return;
-    HWND h = gSrd.hwnd;
-    int x = M, y = M;
-    Child("STATIC", "ADEP", SS_LEFT, x, y + 4, 36, ROWH - 4, h);
-    gSrd.eAdep = Child("EDIT", adep.c_str(), WS_BORDER | ES_AUTOHSCROLL | ES_UPPERCASE, x + 40, y, 70, ROWH, h);
-    x += 40 + 70 + 14;
-    Child("STATIC", "ADES", SS_LEFT, x, y + 4, 36, ROWH - 4, h);
-    gSrd.eAdes = Child("EDIT", ades.c_str(), WS_BORDER | ES_AUTOHSCROLL | ES_UPPERCASE, x + 40, y, 70, ROWH, h);
-    x += 40 + 70 + 14;
-    Child("STATIC", "Level", SS_LEFT, x, y + 4, 36, ROWH - 4, h);
-    gSrd.eLvl = Child("EDIT", lvl.c_str(), WS_BORDER | ES_AUTOHSCROLL | ES_UPPERCASE, x + 40, y, 70, ROWH, h);
-    x += 40 + 70 + 14;
-    Child("BUTTON", "Search", BS_PUSHBUTTON, x, y, 80, ROWH, h, ID_SEARCH);
-    gSrd.sInfo = Child("STATIC", "Enter ADEP and/or ADES (airport or waypoint) and optionally a level, then Search.",
-                       SS_LEFT, M, M + ROWH + 8 + 4, CW - 2 * M, ROWH - 4, h);
-    gSrd.copy.assign(SRD_ROWS, "");
-    for (int i = 0; i < SRD_ROWS; i++) {
-        int ry = rowsTop + i * (ROWH + ROWGAP);
-        gSrd.lbls.push_back(Child("STATIC", "", SS_LEFT, M, ry + 4, LBL, ROWH - 4, h));
-        gSrd.edits.push_back(Child("EDIT", "", WS_BORDER | ES_READONLY | ES_AUTOHSCROLL, M + LBL + GAP, ry, EDT, ROWH, h));
-        gSrd.btns.push_back(Child("BUTTON", "Copy", BS_PUSHBUTTON, M + LBL + GAP + EDT + GAP, ry, BTN, ROWH, h,
-                                  ID_COPY_BASE + i));
-        ShowWindow(gSrd.lbls.back(), SW_HIDE); ShowWindow(gSrd.edits.back(), SW_HIDE); ShowWindow(gSrd.btns.back(), SW_HIDE);
+// SRD search, laid out as the UK Controller Plugin's SRD Search dialog (src/plugin/srd/SrdSearchDialog.cpp,
+// IDD_SRD_SEARCH): origin, destination and level, Search, the results (Min, Max, FRA, Route String), the
+// selected route's notes, Copy Route String To Clipboard and Close. Not modal, so EuroScope keeps running.
+static const int SRD_W = 600, SRD_H = 528;
+static WNDPROC gEditProc = nullptr;
+// In the three boxes: Enter searches, Tab moves on, Esc closes (what the dialog manager does for UKCP's)
+static LRESULT CALLBACK SrdEditProc(HWND e, UINT m, WPARAM w, LPARAM l) {
+    HWND parent = GetParent(e);
+    if (m == WM_KEYDOWN && w == VK_RETURN) { PostMessageA(parent, WM_COMMAND, MAKEWPARAM(ID_SEARCH, BN_CLICKED), 0); return 0; }
+    if (m == WM_KEYDOWN && w == VK_ESCAPE) { PostMessageA(parent, WM_CLOSE, 0, 0); return 0; }
+    if (m == WM_KEYDOWN && w == VK_TAB) {
+        HWND next = GetNextDlgTabItem(parent, e, GetKeyState(VK_SHIFT) < 0);
+        if (next) SetFocus(next);
+        return 0;
     }
-    ShowWindow(h, SW_SHOW);
-    SetForegroundWindow(h);
-    SetFocus(gSrd.eAdep);
+    if (m == WM_CHAR && (w == '\r' || w == '\t' || w == 27)) return 0;   // no beep
+    return CallWindowProcA(gEditProc, e, m, w, l);
+}
+static void AddColumn(HWND list, int i, const char* text, int width) {
+    LVCOLUMNA c = {};
+    c.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+    c.fmt = LVCFMT_LEFT;
+    c.cx = width;
+    c.pszText = (LPSTR)text;
+    c.iSubItem = i;
+    SendMessageA(list, LVM_INSERTCOLUMNA, (WPARAM)i, (LPARAM)&c);
+}
+static void SetCell(HWND list, int row, int col, const std::string& text) {
+    LVITEMA it = {};
+    it.mask = LVIF_TEXT;
+    it.iItem = row;
+    it.iSubItem = col;
+    it.pszText = (LPSTR)text.c_str();
+    SendMessageA(list, col == 0 ? LVM_INSERTITEMA : LVM_SETITEMA, 0, (LPARAM)&it);
 }
 
-static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows, size_t total) {
-    if (!gSrd.hwnd) return;
-    for (int i = 0; i < SRD_ROWS; i++) {
-        int show = i < (int)rows.size() ? SW_SHOW : SW_HIDE;
-        if (show == SW_SHOW) {
-            const auto& r = rows[i];
-            std::string lbl = r.adep + " -> " + r.ades + "  " + LevelsText(r);
-            SetWindowTextA(gSrd.lbls[i], lbl.c_str());
-            std::string rte = r.notes.empty() ? r.rte : r.rte + "   [" + r.notes + "]";
-            SetWindowTextA(gSrd.edits[i], rte.c_str());
-            SetWindowTextA(gSrd.btns[i], "Copy");
-            gSrd.copy[i] = r.rte;
-        }
-        ShowWindow(gSrd.lbls[i], show); ShowWindow(gSrd.edits[i], show); ShowWindow(gSrd.btns[i], show);
+static void ShowSrd(POINT pt, const std::string& adep, const std::string& ades, const std::string& lvl) {
+    static bool commonControls = false;
+    if (!commonControls) {
+        INITCOMMONCONTROLSEX ic = { sizeof(ic), ICC_LISTVIEW_CLASSES };
+        commonControls = InitCommonControlsEx(&ic) != FALSE;
     }
-    std::string info = total == 0 ? "No matching routes."
-        : std::to_string(total) + " matching route(s)" + (total > rows.size() ? ", showing the first " + std::to_string(rows.size()) + " - narrow the search" : "");
-    SetWindowTextA(gSrd.sInfo, info.c_str());
+    if (!Make(gSrd, pt, "SRD Search", SRD_H, SRD_W)) return;
+    HWND h = gSrd.hwnd;
+    const int L = 180, E = 130, EH = 22, W = SRD_W - 2 * M;
+    const DWORD edit = WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL;
+    Child("STATIC", "Origin Fix or Airfield*", SS_LEFT, M, 13, L, 16, h);
+    gSrd.eAdep = Child("EDIT", adep.c_str(), edit | ES_UPPERCASE, M + L, 10, E, EH, h);
+    Child("STATIC", "Destination Fix or Airfield*", SS_LEFT, M, 41, L, 16, h);
+    gSrd.eAdes = Child("EDIT", ades.c_str(), edit | ES_UPPERCASE, M + L, 38, E, EH, h);
+    Child("STATIC", "Cruising Altitude or Level", SS_LEFT, M, 69, L, 16, h);
+    gSrd.eLvl = Child("EDIT", lvl.c_str(), edit | ES_NUMBER, M + L, 66, E, EH, h);
+    Child("STATIC", "* Required Field", SS_LEFT, M + L + E + 60, 41, 140, 16, h);
+    Child("BUTTON", "Search", BS_DEFPUSHBUTTON | WS_TABSTOP, M + L, 96, 100, 26, h, ID_SEARCH);
+
+    Child("STATIC", "Search Results", SS_CENTER, M, 132, W, 16, h);
+    gSrd.list = Child(WC_LISTVIEWA, "", WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                      M, 150, W, 160, h, ID_SRD_LIST);
+    SendMessageA(gSrd.list, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
+    AddColumn(gSrd.list, 0, "Min", 50);
+    AddColumn(gSrd.list, 1, "Max", 50);
+    AddColumn(gSrd.list, 2, "FRA", 50);
+    AddColumn(gSrd.list, 3, "Route String", 900);
+
+    Child("STATIC", "Notes", SS_CENTER, M, 318, W, 16, h);
+    gSrd.notes = Child("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, M, 336, W, 146, h);
+    gSrd.copyBtn = Child("BUTTON", "Copy Route String To Clipboard", BS_PUSHBUTTON | WS_TABSTOP | WS_DISABLED,
+                         M, 492, 230, 26, h, ID_SRD_COPY);
+    Child("BUTTON", "Close", BS_PUSHBUTTON | WS_TABSTOP, SRD_W - M - 100, 492, 100, 26, h, ID_SRD_CLOSE);
+
+    for (HWND e : { gSrd.eAdep, gSrd.eAdes, gSrd.eLvl })
+        gEditProc = (WNDPROC)SetWindowLongPtrA(e, GWLP_WNDPROC, (LONG_PTR)&SrdEditProc);
+    ShowWindow(h, SW_SHOW);
+    SetForegroundWindow(h);
+    SetFocus(adep.empty() ? gSrd.eAdep : ades.empty() ? gSrd.eAdes : gSrd.eLvl);
+}
+
+// Every result; "No routes found" when there are none (as UKCP)
+static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows) {
+    if (!gSrd.hwnd) return;
+    SendMessageA(gSrd.list, LVM_DELETEALLITEMS, 0, 0);
+    gSrd.results = rows;
+    gSrd.selected = -1;
+    SetWindowTextA(gSrd.notes, "");
+    SetWindowTextA(gSrd.copyBtn, "Copy Route String To Clipboard");
+    EnableWindow(gSrd.copyBtn, FALSE);
+    if (rows.empty()) {
+        SetCell(gSrd.list, 0, 0, "0");
+        SetCell(gSrd.list, 0, 1, "0");
+        SetCell(gSrd.list, 0, 2, "0");
+        SetCell(gSrd.list, 0, 3, "No routes found");
+        return;
+    }
+    for (int i = 0; i < (int)rows.size(); i++) {
+        SetCell(gSrd.list, i, 0, kwiq::SrdMinText(rows[i]));
+        SetCell(gSrd.list, i, 1, kwiq::SrdMaxText(rows[i]));
+        SetCell(gSrd.list, i, 2, kwiq::HasFreeRoute(rows[i].rte) ? "Yes" : "No");
+        SetCell(gSrd.list, i, 3, rows[i].rte);
+    }
 }
 
 // ---- Notice popups -------------------------------------------------------------------------
@@ -961,14 +1040,12 @@ public:
     // called from the SRD window's Search button (main thread)
     void RunSrdSearch(const std::string& adep, const std::string& ades, const std::string& lvl) {
         std::vector<kwiq::SrdRoute> rows;
-        size_t total;
         {
             std::lock_guard<std::mutex> g(mu_);
             auto hits = kwiq::SrdSearch(srd_, adep, ades, kwiq::ParseLevelFt(lvl));
-            total = hits.size();
-            for (size_t i = 0; i < hits.size() && (int)i < kwiq_ui::SRD_ROWS; i++) rows.push_back(srd_.rows[hits[i]]);
+            for (size_t i = 0; i < hits.size() && (int)i < kwiq_ui::SRD_MAX_RESULTS; i++) rows.push_back(srd_.rows[hits[i]]);
         }
-        kwiq_ui::SetSrdResults(rows, total);
+        kwiq_ui::SetSrdResults(rows);
     }
 
 private:

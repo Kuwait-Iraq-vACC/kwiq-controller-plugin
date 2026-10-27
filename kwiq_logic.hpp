@@ -363,6 +363,16 @@ inline std::string ExplainFpc(const SrdData& d, const std::string& adep, const s
     }
     return s;
 }
+// SRD search window, as the UK Controller Plugin's SRD Search dialog: Min (MC = no minimum), Max (- = no limit),
+// FRA (the route has Free Route Airspace in it) and the notes for the selected route
+inline std::string SrdMinText(const SrdRoute& r) { return r.minLvl ? std::to_string(r.minLvl / 100) : "MC"; }
+inline std::string SrdMaxText(const SrdRoute& r) { return r.maxLvl ? std::to_string(r.maxLvl / 100) : "-"; }
+inline bool HasFreeRoute(const std::string& rte) { return rte.find("<FRA>") != std::string::npos; }
+inline std::string SrdNotesText(const SrdRoute& r) {
+    std::string s = r.notes.empty() ? "No notes." : r.notes;
+    if (HasFreeRoute(r.rte)) s += "\r\n\r\nThis route contains segments of Free Route Airspace.";
+    return s;
+}
 // Empty field = wildcard. lvlFt 0 = no level filter. Exact (case-insensitive) match on ends.
 inline std::vector<size_t> SrdSearch(const SrdData& d, const std::string& adep, const std::string& ades, int lvlFt) {
     std::vector<size_t> out;
