@@ -130,6 +130,33 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcA(h, m, w, l);
 }
 
+// The work area of the screen EuroScope is on (its largest visible window), so windows open in the
+// middle of that screen rather than the main one
+static BOOL CALLBACK LargestOwnWindow(HWND h, LPARAM l) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    RECT r;
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(h) || !GetWindowRect(h, &r)) return TRUE;
+    auto* best = (std::pair<HWND, long long>*)l;
+    long long area = (long long)(r.right - r.left) * (r.bottom - r.top);
+    if (area > best->second) *best = { h, area };
+    return TRUE;
+}
+static RECT EuroScopeScreen() {
+    std::pair<HWND, long long> best = { nullptr, 0 };
+    EnumWindows(LargestOwnWindow, (LPARAM)&best);
+    MONITORINFO mi; mi.cbSize = sizeof(mi);
+    HMONITOR mon = best.first ? MonitorFromWindow(best.first, MONITOR_DEFAULTTONEAREST) : MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    if (GetMonitorInfoA(mon, &mi)) return mi.rcWork;
+    RECT wa; SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
+    return wa;
+}
+static void Centre(int ww, int wh, int& x, int& y) {
+    RECT wa = EuroScopeScreen();
+    x = wa.left + ((wa.right - wa.left) - ww) / 2;
+    y = wa.top + ((wa.bottom - wa.top) - wh) / 2;
+}
+
 static HWND Child(const char* cls, const char* text, DWORD style, int x, int y, int w, int h,
                   HWND parent, int id = 0) {
     HWND c = CreateWindowExA(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
@@ -139,7 +166,7 @@ static HWND Child(const char* cls, const char* text, DWORD style, int x, int y, 
 }
 
 // Creates the popup, stores it in `win`, destroying any previous one of the same kind.
-static bool Make(Win& win, POINT pt, const std::string& title, int ch) {
+static bool Make(Win& win, POINT, const std::string& title, int ch) {
     if (!gMod)
         GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            (LPCSTR)&WndProc, &gMod);
@@ -160,12 +187,8 @@ static bool Make(Win& win, POINT pt, const std::string& title, int ch) {
     RECT rc = { 0, 0, CW, ch };
     AdjustWindowRectEx(&rc, style, FALSE, ex);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
-    RECT wa; SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
-    int x = (int)pt.x, y = (int)pt.y;
-    if (x + ww > wa.right)  x = wa.right - ww;
-    if (y + wh > wa.bottom) y = wa.bottom - wh;
-    if (x < wa.left) x = wa.left;
-    if (y < wa.top)  y = wa.top;
+    int x, y;
+    Centre(ww, wh, x, y);                    // in the middle of EuroScope's screen
 
     HWND h = CreateWindowExA(ex, kClass, title.c_str(), style, x, y, ww, wh, nullptr, nullptr, gMod, nullptr);
     if (!h) return false;
@@ -310,6 +333,7 @@ static LRESULT CALLBACK NoticeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_CLOSE: {                                     // the title bar's X counts as the last button
         int kind = n ? n->kind : 0;
+        if (kind == NOTICE_KEY) return 0;                // the key setup only closes once a key is connected
         DestroyWindow(h);
         if (gOnNotice && kind) gOnNotice(kind, 2);
         return 0;
@@ -356,12 +380,13 @@ static bool ShowNotice(Notice& n, int kind, const std::string& title, const std:
     ReleaseDC(nullptr, dc);
     int bodyH = (std::max)((int)(tr.bottom - tr.top) + 12, (int)NICON) + 2 * NPAD;
 
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOPMOST | WS_EX_DLGMODALFRAME | WS_EX_NOACTIVATE;
+    // The key setup has no X: it stays until a key is connected
+    DWORD style = WS_POPUP | WS_CAPTION | (kind == NOTICE_KEY ? 0 : WS_SYSMENU), ex = WS_EX_TOPMOST | WS_EX_DLGMODALFRAME | WS_EX_NOACTIVATE;
     RECT rc = { 0, 0, NW, bodyH + NFOOT };
     AdjustWindowRectEx(&rc, style, FALSE, ex);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
-    RECT wa; SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
-    int x = wa.left + ((wa.right - wa.left) - ww) / 2, y = wa.top + ((wa.bottom - wa.top) - wh) / 3;
+    int x, y;
+    Centre(ww, wh, x, y);
     HWND h = CreateWindowExA(ex, kNoticeClass, title.c_str(), style, x, y, ww, wh, nullptr, nullptr, gMod, &n);
     if (!h) { n = Notice(); return false; }
     n.hwnd = h;
@@ -376,13 +401,13 @@ static bool ShowNotice(Notice& n, int kind, const std::string& title, const std:
     return true;
 }
 
-// API key setup: waits while the controller connects on myKWIQ, and closes once the key arrives.
+// API key setup: waits while the controller connects on myKWIQ, and closes only once the key arrives.
 static void ShowKeyPrompt() {
     ShowNotice(gKey, NOTICE_KEY, "KWIQ API Key Setup",
                "Please go to your web browser, sign in to myKWIQ and click Connect EuroScope. This window will close "
                "automatically once your API key has been received. If the page did not open, click Reopen Browser, or paste "
                "the link from the chat into your browser. Need help? discord.kuwait-iraqvacc.net",
-               IDI_INFORMATION, "Reopen Browser", "Cancel");
+               IDI_INFORMATION, "Reopen Browser", nullptr);
 }
 static bool KeyPromptOpen() { return gKey.hwnd != nullptr; }
 static void CloseKeyPrompt() { if (gKey.hwnd) DestroyWindow(gKey.hwnd); }
@@ -792,7 +817,7 @@ public:
         if (c == ".KWIQ KEY" || c.compare(0, 10, ".KWIQ KEY ") == 0) {
             std::string key = kwiq::Trim(std::string(sCommandLine).substr(9));
             if (key.empty()) Msg(apiKey_.empty() ? "No API key has been entered. Generate one on myKWIQ, then use: .kwiq key <your key>"
-                                                 : "API key " + kwiq::ApiKeyId(apiKey_) + " is in use.", false);
+                                                 : "An API key is connected.", false);
             else if (kwiq::Upper(key) == "CLEAR") SetApiKey("");
             else SetApiKey(key);
             return true;
@@ -814,7 +839,7 @@ public:
             std::lock_guard<std::mutex> g(mu_);
             std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED by Core") +
                 " | EuroScope " + (esVersion_.empty() ? std::string("?") : esVersion_) +
-                " | API key " + (apiKey_.empty() ? std::string("not set") : "ID " + kwiq::ApiKeyId(apiKey_)) + WineNote() +
+                " | API key " + (apiKey_.empty() ? std::string("not set") : std::string("connected")) + WineNote() +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
@@ -942,9 +967,9 @@ private:
     // ---- API key setup through myKWIQ (main thread) -------------------------------------------
     // Whenever there is no key, or Core refuses it as missing, invalid, revoked or expired, the setup
     // opens: as EuroScope starts, whenever the controller connects to the network, or once they log off
-    // if Core refuses the key while they are logged on (they are told in the chat). Otherwise once for
-    // each problem: Cancel leaves it until they next connect, the next start, the KWIQ button's API Key
-    // or .kwiq connect. A key refused because they left the roster or are suspended is only reported.
+    // if Core refuses the key while they are logged on (they are told in the chat). It cannot be
+    // dismissed: it closes only once a key is connected. A key refused because they left the roster
+    // or are suspended is only reported, as a new one wouldn't help.
     void StartKeySetup() {
         if (!keyLink_.Start()) {
             Msg("The API key setup could not start (a firewall may be blocking it). Use Show Key on myKWIQ, under EuroScope "
@@ -972,7 +997,8 @@ private:
             kwiq_ui::ShowInfo("KWIQ API Key", "Your API key has been received and saved. The plugin is now connected.");
             return;
         }
-        if (kwiq_ui::KeyPromptOpen() && !keyLink_.Running()) kwiq_ui::CloseKeyPrompt();   // gave up waiting
+        // The listener gives up after 15 minutes; the setup stays, so start a new one for Reopen Browser
+        if (kwiq_ui::KeyPromptOpen() && !keyLink_.Running()) keyLink_.Start();
         if (now - startedAt_ < 5) return;                    // let EuroScope settle first
 
         std::string reason;
@@ -981,7 +1007,7 @@ private:
         if (!(apiKey_.empty() || (keyRefused_ && fixable))) { justConnected_ = false; return; }
 
         // One setup per problem: a new key, or a different refusal, is a new problem. Connecting to the
-        // network without a working key opens it again, even after Cancel
+        // network without a working key opens it again
         std::string problem = apiKey_.empty() ? std::string("none") : kwiq::ApiKeyId(apiKey_) + ":" + reason;
         bool onConnect = justConnected_;
         justConnected_ = false;
@@ -1047,7 +1073,7 @@ private:
         keyRefused_ = false;
         keyLink_.Stop();
         kwiq_ui::CloseKeyPrompt();
-        Msg(key.empty() ? "API key removed." : "API key " + kwiq::ApiKeyId(key) + " saved.", false);
+        Msg(key.empty() ? "API key removed." : "API key connected.", false);
     }
 
     struct CacheEntry {
@@ -1188,10 +1214,6 @@ private:
 public:
     void OnNotice(int kind, int button) {
         if (kind == kwiq_ui::NOTICE_KEY && button == 1) { OpenConnectPage(); kwiq_ui::ShowKeyPrompt(); }
-        if (kind == kwiq_ui::NOTICE_KEY && button == 2) {
-            keyLink_.Stop();
-            Msg("You can connect your API key later from the KWIQ button, or with .kwiq connect.", false);
-        }
         if (kind == kwiq_ui::NOTICE_ES_VERSION && button == 1) {
             std::string url;
             { std::lock_guard<std::mutex> g(mu_); url = esUrl_; }
