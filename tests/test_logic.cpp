@@ -64,6 +64,37 @@ int main() {
           ParseLevelFt("35000") == 35000 && ParseLevelFt("") == 0 && ParseLevelFt("abc") == 0);
     CHECK(FlStr(35000) == "FL350" && FlStr(5000) == "FL050");
 
+    // FIR exit points (UK Controller Plugin): the first listed point the route leaves the airspace at
+    FirExits exits = ParseFirExits("EXIT|tasmi|090|180|0\r\nEXIT|ROTAP|300|060|0\nEXIT|SIDAD|315|045|1\n"
+                                   "EXIT|BAD|400|10|0\nEXIT|ALSO|x|10|0\nnonsense\n");
+    CHECK(exits.size() == 3 && exits["TASMI"].from == 90 && exits["SIDAD"].internal && !exits["ROTAP"].internal);
+    CHECK(InExitCone(exits["TASMI"], 135) && !InExitCone(exits["TASMI"], 200));
+    CHECK(InExitCone(exits["ROTAP"], 350) && InExitCone(exits["ROTAP"], 30) && !InExitCone(exits["ROTAP"], 120));   // wraps north
+    std::vector<RoutePoint> north = { { "OKBK", 0 }, { "SIDAD", 10 }, { "ABC", 5 }, { "ROTAP", 355 }, { "LTBA", -1 } };
+    AircraftExit nx = FindFirExit(exits, north);
+    CHECK(nx.internal == "SIDAD" && nx.external == "ROTAP");
+    std::vector<RoutePoint> inbound = { { "ROTAP", 170 }, { "OKBK", -1 } };   // through ROTAP the wrong way
+    CHECK(FindFirExit(exits, inbound).external.empty());
+    std::vector<RoutePoint> last = { { "OKBK", 90 }, { "TASMI", -1 } };       // no next point: no track, no exit
+    CHECK(FindFirExit(exits, last).external.empty());
+    CHECK(Domestic("OKBK", "OK,OR") && Domestic("orbi", "OK, OR") && !Domestic("LTBA", "OK,OR"));
+    CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
+    CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "SIDAD", "" }) == "SIDAD" && SrdEnd("LTBA", "OK,OR", {}) == "");
+
+    // FPC for a flight leaving the airspace: checked against ADEP to its FIR exit
+    SrdData srdx = ParseSrd("SRD|OKBK|ROTAP|20000|41000|DCT ABC UL602 ROTAP|\n"
+                            "SRD|OKBK|SIDAD||25000|DCT SIDAD|\n"
+                            "SRD|OKBK|ORBI|||DCT QQQ|\n");
+    CHECK(srdx.toPoint.size() == 2 && srdx.pair.size() == 1);
+    auto toLtba = F("DCT SIDAD ABC UL602 ROTAP DCT LTBA");
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", toLtba, 35000, nx) == FpcResult::Ok);
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", toLtba, 45000, nx) == FpcResult::Max);
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", F("DCT SIDAD XYZ ROTAP"), 35000, nx) == FpcResult::Route);
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", F("DCT SIDAD"), 20000, AircraftExit{ "SIDAD", "" }) == FpcResult::Ok);   // only the internal exit known
+    CHECK(CheckFpc(srdx, "OKBK", "ORBI", F("QQQ"), 30000, nx) == FpcResult::Ok);                  // a pair row still wins
+    CHECK(ExplainFpc(srdx, "OKBK", "LTBA", "DCT SIDAD ABC UL602 ROTAP", 35000, nx).find("FIR exit ROTAP") != std::string::npos);
+    CHECK(ExplainFpc(srdx, "OKBK", "LTBA", "DCT SIDAD XYZ ROTAP", 35000, nx).find("does not match") != std::string::npos);
+
     // SRD search
     CHECK(SrdSearch(srd, "okbk", "orbi", 0).size() == 2);
     CHECK(SrdSearch(srd, "OKBK", "ORBI", 35000).size() == 1);   // only the 45000-max row
