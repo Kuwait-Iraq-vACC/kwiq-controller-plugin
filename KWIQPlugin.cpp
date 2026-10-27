@@ -547,7 +547,7 @@ static bool Save(const std::string& key) {
 }
 } // namespace apikey
 
-// The running EuroScope's version from its .exe, e.g. "3.2.9.0"; empty if it cannot be read
+// The running EuroScope's version from its .exe, e.g. "3.2.3.2"; empty if it cannot be read
 static std::string EuroScopeVersion() {
     char exe[MAX_PATH];
     DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);

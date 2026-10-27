@@ -373,7 +373,7 @@ inline int CompareVersions(const std::string& a, const std::string& b) {
 }
 
 // ---- EuroScope version ------------------------------------------------------
-// Core's euroscope.versions, e.g. "3.2.9, 3.2.3.2": the EuroScope versions the vACC accepts
+// Core's euroscope.versions, e.g. "3.2.3.2" (3.2c r2): the EuroScope versions the vACC accepts
 inline std::vector<std::string> EuroScopeVersions(const std::string& accepted) {
     std::vector<std::string> out;
     for (const std::string& v : SplitChar(accepted, ',')) { std::string t = Trim(v); if (!t.empty()) out.push_back(t); }
