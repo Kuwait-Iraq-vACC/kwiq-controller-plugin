@@ -15,12 +15,13 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - The upstream version check (which compares against DrFreas/VCH releases) is disabled.
 
 ## Changes made to the UK Controller Plugin's squawk code
-- Ported from UKCP's classes (SquawkAssignment, SquawkEventHandler, SquawkGenerator, SquawkAssignmentMenu, SquawkValidator) to plain functions in `squawk_logic.hpp` and the EuroScope events in `KWIQPlugin.cpp`.
+- Ported from UKCP's classes (SquawkAssignment, SquawkEventHandler, SquawkGenerator, SquawkAssignmentMenu, SquawkValidator, Login) to plain functions in `squawk_logic.hpp` and the EuroScope events in `KWIQPlugin.cpp`.
 - Codes come from Core (`/api/plugin/squawk-assignment/<callsign>`) instead of the UKCP API. Requests are form fields and answers are plain text (`SQUAWK|<code>`), like the rest of Core's plugin API.
+- UKCP's general and local code types are one request: Core picks the range (domestic, VFR or international) from the departure, destination and flight rules. The UK's circuit code (7010) and local codes are gone.
+- UKCP's conspicuity option is Non-discrete, with the codes (2000, 7000 for VFR) set in Core. No code is held while Core is asked; an aircraft Core could not give a code is not asked for again for a minute.
 - Who gives departures their squawk comes from Core's top-down order (`/api/plugin/squawk/topdown`) instead of UKCP's airfield ownership.
-- The conspicuity and circuit codes (UKCP: 7000 and 7010) are set in Core; with no circuit code there are no circuit squawks.
-- A reconnecting aircraft only gets its old code back if its departure and destination are unchanged.
-- No assignments on sweatbox.
+- A reconnecting aircraft only gets its old code back if its departure and destination are unchanged; a code set by hand is left alone until they change.
+- Requests say whether they are from the live network or sweatbox.
 
 ## Slot detection: permission
 The plugin information string in the VATCAN source (`SituPlugin.cpp`) declares CC BY-NC 4.0, and the repository has no licence file.

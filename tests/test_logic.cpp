@@ -173,45 +173,44 @@ int main() {
         CHECK(!DeliveryByMe(td, "ORBI", "OKAC_CTR", {}));          // no order from Core: only its own positions
         CHECK(DeliveryByMe(td, "ORBI", "ORBI_TWR", { "ORBI_APP" }));
 
-        User twr{ true, "OKBK_TWR" }, ctr{ true, "OKAC_CTR" }, app{ true, "OKBK_APP" }, obs{ false, "" };
-        Aircraft gnd;                                               // on the ground at OKBK, IFR with a SID
-        gnd.callsign = "KAC123"; gnd.origin = "OKBK"; gnd.destination = "OMDB"; gnd.hasSid = true; gnd.cruise = 35000;
+        User twr{ true, "OKBK_TWR" }, ctr{ true, "OKAC_CTR" }, obs{ false, "" };
+        Aircraft gnd;                                               // on the ground at OKBK
+        gnd.callsign = "KAC123"; gnd.origin = "OKBK"; gnd.destination = "OMDB";
         gnd.fromOrigin = 0.5; gnd.altitude = 200; gnd.groundSpeed = 0; gnd.deliveryByMe = true;
-        CHECK(Decide(twr, gnd, nullptr, false) == Action::General);
+        CHECK(Decide(twr, gnd, nullptr) == Action::Assign);
         Aircraft a = gnd; a.deliveryByMe = false;
-        CHECK(Decide(twr, a, nullptr, false) == Action::None);
+        CHECK(Decide(twr, a, nullptr) == Action::None);
         a = gnd; a.groundSpeed = 140;                               // untracked and rolling
-        CHECK(Decide(twr, a, nullptr, false) == Action::None);
+        CHECK(Decide(twr, a, nullptr) == Action::None);
         a = gnd; a.squawk = "4521";
-        CHECK(Decide(twr, a, nullptr, false) == Action::None);
+        CHECK(Decide(twr, a, nullptr) == Action::None);
+        a = gnd; a.squawk = "2000";                                 // 2000 is no code
+        CHECK(Decide(twr, a, nullptr) == Action::Assign);
         a = gnd; a.altitude = 0;                                    // no position yet
-        CHECK(Decide(twr, a, nullptr, false) == Action::None);
-        CHECK(Decide(obs, gnd, nullptr, false) == Action::None);
-        a = gnd; a.vfr = true; a.route = "VFR CIRCUITS";
-        CHECK(Decide(twr, a, nullptr, true) == Action::Circuit);
-        CHECK(Decide(twr, a, nullptr, false) == Action::Local);     // no circuit code from Core: VFR gets a local one
-        a = gnd; a.hasSid = false; a.cruise = 4000;
-        CHECK(Decide(twr, a, nullptr, false) == Action::Local);
-        Stored same{ "OKBK", "OMDB", "4521", 0 }, moved{ "OKBK", "OTHH", "4521", 0 };
-        CHECK(Decide(twr, gnd, &same, false) == Action::Previous);  // reconnected: same code back
-        CHECK(ForceNeeded(&moved, gnd) && Decide(twr, gnd, &moved, false) == Action::General);
+        CHECK(Decide(twr, a, nullptr) == Action::None);
+        CHECK(Decide(obs, gnd, nullptr) == Action::None);
+        a = gnd; a.vfr = true; a.destination = "OKBK";              // VFR circuits: an ordinary code, Core picks the range
+        CHECK(Decide(twr, a, nullptr) == Action::Assign);
+        Stored same{ "OKBK", "OMDB", "4521", false, 0 }, moved{ "OKBK", "OTHH", "4521", false, 0 };
+        CHECK(Decide(twr, gnd, &same) == Action::Previous);         // reconnected: same code back
+        CHECK(ForceNeeded(&moved, gnd) && Decide(twr, gnd, &moved) == Action::Assign);
+        Stored byHand{ "OKBK", "OMDB", "2000", true, 0 };           // set to 2000 by hand: left alone
+        a = gnd; a.squawk = "2000";
+        CHECK(Decide(twr, a, &byHand) == Action::None);
+        byHand.destination = "OTHH";                                // until the plan changes
+        CHECK(Decide(twr, a, &byHand) == Action::Assign);
 
-        Aircraft trk = gnd;                                         // tracked by the user, airborne
+        Aircraft trk = gnd;                                         // tracked by the user, airborne, far away
         trk.tracked = trk.trackedByMe = true; trk.deliveryByMe = false;
-        trk.groundSpeed = 450; trk.fromOrigin = 120; trk.altitude = 30000; trk.fromMe = 100;
-        CHECK(Decide(ctr, trk, nullptr, false) == Action::General);
-        trk.cruise = 5000;
-        CHECK(Decide(ctr, trk, nullptr, false) == Action::Local);
-        CHECK(Decide(app, trk, nullptr, false) == Action::General); // APP/TWR: local only when low and near
-        trk.altitude = 3000; trk.fromMe = 20;
-        CHECK(Decide(app, trk, nullptr, false) == Action::Local);
+        trk.groundSpeed = 450; trk.fromOrigin = 120; trk.altitude = 30000;
+        CHECK(Decide(ctr, trk, nullptr) == Action::Assign);
 
         Aircraft other = gnd; other.tracked = true;
         CHECK(ChangeAllowed(twr, gnd) && !ChangeAllowed(twr, other) && !ChangeAllowed(obs, gnd));
         CHECK(ParseSquawk("SQUAWK|4521\r\n") == "4521" && ParseSquawk("SQUAWK|7700") == "" && ParseSquawk("nope") == "");
         CHECK(ParseError("ERROR|No codes left\n") == "No codes left" && ParseError("SQUAWK|4521") == "");
         CHECK(UrlSafeCallsign("KAC123") && !UrlSafeCallsign("KAC/12") && !UrlSafeCallsign(""));
-        CHECK(FormEncode({ { "type", "general" }, { "origin", "OK BK" } }) == "type=general&origin=OK%20BK");
+        CHECK(FormEncode({ { "origin", "OKBK" }, { "rules", "V I" } }) == "origin=OKBK&rules=V%20I");
     }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);

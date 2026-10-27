@@ -1,12 +1,13 @@
-// squawk_logic.hpp - when to assign which squawk, adapted from the UK Controller Plugin
+// squawk_logic.hpp - when to give an aircraft a squawk, adapted from the UK Controller Plugin
 // (https://github.com/VATSIM-UK/uk-controller-plugin, src/plugin/squawk: SquawkAssignment, SquawkEventHandler,
-// SquawkGenerator, SquawkValidator; GPL-3.0). Core allocates the codes; this only decides when to ask.
+// SquawkGenerator, SquawkValidator; GPL-3.0). Core allocates the codes (domestic, VFR or international, from the
+// route and flight rules); this only decides when to ask.
 // Pure logic (no Windows / EuroScope dependencies), unit-tested in tests/test_logic.cpp.
 // License: GPL-3.0-or-later
 #pragma once
 
 #include "kwiq_logic.hpp"
-#include <regex>
+#include <utility>
 
 namespace kwiq::squawk {
 
@@ -21,13 +22,13 @@ inline bool AllowedSquawk(const std::string& s) {
     return ValidSquawk(s) && s != "7500" && s != "7600" && s != "7700" && s != "1200" && s != "2200" &&
            s != "0200" && s != "0000" && s != "1234";
 }
-// A controller has given the aircraft a real code (EuroScope's default and "none" codes do not count)
+// A controller has given the aircraft a code (EuroScope's default and "none" codes, 2000 among them, do not count)
 inline bool HasAssignedSquawk(const std::string& s) {
     return ValidSquawk(s) && s != "0200" && s != "2200" && s != "1200" && s != "2000" && s != "0000" && s != "1234";
 }
 
 // ---- callsigns ---------------------------------------------------------------------------------
-// OKBK_N_TWR -> OKBK (UKCP's "unit", which local squawk ranges belong to) and TWR
+// OKBK_N_TWR -> OKBK and TWR
 inline std::string CallsignPrefix(const std::string& cs) { return Upper(cs.substr(0, cs.find('_'))); }
 inline std::string CallsignSuffix(const std::string& cs) {
     size_t i = cs.rfind('_');
@@ -81,26 +82,25 @@ inline bool DeliveryByMe(const TopDown& td, const std::string& airport, const st
 
 // ---- the rules (UKCP SquawkAssignment) ---------------------------------------------------------
 struct User {
-    bool controller = false;          // logged on to the network as a controller, not an observer
+    bool controller = false;          // logged on as a controller (not an observer), live or sweatbox
     std::string callsign;             // e.g. OKBK_TWR
 };
 struct Aircraft {
-    std::string callsign, origin, destination, route, squawk;   // squawk: the one controllers assigned
-    bool vfr = false, hasSid = false, tracked = false, trackedByMe = false;
+    std::string callsign, origin, destination, squawk;          // squawk: the one controllers assigned
+    bool vfr = false, tracked = false, trackedByMe = false;
     bool deliveryByMe = false;        // DeliveryByMe(origin)
-    double fromOrigin = 0, fromMe = 0;                          // nm: from the departure airport, from the user's visibility centre
-    int groundSpeed = 0, altitude = 0, cruise = 0;              // kt, ft, ft
+    double fromOrigin = 0;            // nm from the departure airport
+    int groundSpeed = 0, altitude = 0;                          // kt, ft
 };
 // What the plugin remembers about a flight plan, so a pilot who reconnects gets the same code back
 struct Stored {
     std::string origin, destination, squawk;
+    bool byHand = false;              // a controller set the code by hand: leave it alone
     std::time_t expires = 0;          // 0 while connected; disconnected plans are forgotten after STORED_SECONDS
 };
 
 constexpr int UNTRACKED_MAX_SPEED = 30;               // kt: untracked aircraft only get a code on the ground
 constexpr double UNTRACKED_MAX_FROM_ORIGIN = 7.0;     // nm
-constexpr double TRACKED_LOCAL_RADIUS = 40.0;         // nm from an APP/TWR's visibility centre
-constexpr int LOCAL_MAX_ALTITUDE = 6000;              // ft
 constexpr int LOGIN_DELAY_SECONDS = 15;               // nothing automatic straight after logging on
 constexpr int STORED_SECONDS = 600;
 
@@ -108,29 +108,12 @@ inline bool Possible(const User& u, const Aircraft& a) {
     // All zeros: EuroScope sends flight plan events for aircraft it has no position for yet
     return u.controller && a.fromOrigin != 0.0 && a.altitude != 0;
 }
-inline bool EnRoute(const User& u) {
-    std::string s = CallsignSuffix(u.callsign);
-    return s == "CTR" || s == "FSS";
-}
-inline bool GeneralNeeded(const User& u, const Aircraft& a) {
-    if (!Possible(u, a)) return false;
-    if (!a.trackedByMe)
-        return a.groundSpeed <= UNTRACKED_MAX_SPEED && a.fromOrigin <= UNTRACKED_MAX_FROM_ORIGIN &&
-               !HasAssignedSquawk(a.squawk) && a.deliveryByMe;
-    return !HasAssignedSquawk(a.squawk);
-}
-inline bool CircuitNeeded(const User& u, const Aircraft& a) {
-    static const std::regex circuits("^(?:VFR )?CIRCUIT(?:S)?", std::regex::icase);
-    return a.vfr && !HasAssignedSquawk(a.squawk) && std::regex_search(a.route, circuits) && GeneralNeeded(u, a);
-}
-inline bool LocalNeeded(const User& u, const Aircraft& a) {
+// UKCP GeneralAssignmentNeeded: no code yet, and either tracked by the user or waiting on the ground at an
+// airport the user gives departures their squawk
+inline bool AssignmentNeeded(const User& u, const Aircraft& a) {
     if (!Possible(u, a) || HasAssignedSquawk(a.squawk)) return false;
-    if (a.trackedByMe) {
-        if (EnRoute(u)) return a.cruise <= LOCAL_MAX_ALTITUDE;
-        return a.altitude <= LOCAL_MAX_ALTITUDE && a.fromMe <= TRACKED_LOCAL_RADIUS;   // APP/TWR: centred on the airport
-    }
-    return (a.origin == a.destination || a.vfr || (!a.hasSid && a.cruise <= LOCAL_MAX_ALTITUDE)) &&
-           a.groundSpeed <= UNTRACKED_MAX_SPEED && a.fromOrigin <= UNTRACKED_MAX_FROM_ORIGIN && a.deliveryByMe;
+    if (a.trackedByMe) return true;
+    return a.groundSpeed <= UNTRACKED_MAX_SPEED && a.fromOrigin <= UNTRACKED_MAX_FROM_ORIGIN && a.deliveryByMe;
 }
 // The departure or destination changed since the plan was stored: a code Core holds for it may be for the old one
 inline bool ForceNeeded(const Stored* s, const Aircraft& a) {
@@ -138,20 +121,19 @@ inline bool ForceNeeded(const Stored* s, const Aircraft& a) {
 }
 // Reconnected with the same plan: give it back the code it had (UKCP also needs no change of plan here)
 inline bool PreviousNeeded(const User& u, const Aircraft& a, const Stored* s) {
-    return GeneralNeeded(u, a) && s && HasAssignedSquawk(s->squawk) && !ForceNeeded(s, a);
+    return AssignmentNeeded(u, a) && s && HasAssignedSquawk(s->squawk) && !ForceNeeded(s, a);
 }
 // Forcing a new code, or setting one by hand: a controller, on an aircraft nobody else tracks
 inline bool ChangeAllowed(const User& u, const Aircraft& a) {
     return u.controller && (a.trackedByMe || !a.tracked);
 }
 
-enum class Action { None, Circuit, Previous, Local, General };
-// UKCP SquawkEventHandler::AttemptAssignment, in its order. No circuit code configured = no circuit squawks.
-inline Action Decide(const User& u, const Aircraft& a, const Stored* s, bool circuitCode) {
-    if (circuitCode && CircuitNeeded(u, a)) return Action::Circuit;
+enum class Action { None, Previous, Assign };
+// UKCP SquawkEventHandler::AttemptAssignment, without the UK's circuit and local codes
+inline Action Decide(const User& u, const Aircraft& a, const Stored* s) {
     if (PreviousNeeded(u, a, s)) return Action::Previous;
-    if (LocalNeeded(u, a)) return Action::Local;
-    if (GeneralNeeded(u, a)) return Action::General;
+    if (s && s->byHand && !ForceNeeded(s, a)) return Action::None;
+    if (AssignmentNeeded(u, a)) return Action::Assign;
     return Action::None;
 }
 

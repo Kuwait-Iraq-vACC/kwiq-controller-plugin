@@ -20,7 +20,7 @@ Plugins > Load > pick `KWIQPlugin.dll` (from myKWIQ, or the build). That is the 
 | ... / FPC | `OK`, `RTE`, `MIN` or `MAX` against the SRD |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
 
-Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** (left button on FPC), **Open SRD search window** (any item), **Open squawk assignment menu**, **Force squawk recycle (general)** and **Force squawk recycle (local)** (on the Assigned Squawk item, see Squawk assignment).
+Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** (left button on FPC), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
@@ -42,29 +42,27 @@ As EuroScope starts, the plugin reads the version of the running EuroScope from 
 OKAC and ORBB are released separately, so Core holds a current AIRAC for each (`sectorfile.airac.okac` and `sectorfile.airac.orbb`, e.g. `2610/02`), filled by `php artisan sectorfile:sync` from `AIRAC_VERSION.txt` in each package's repository, falling back to the tag of its latest release. The plugin compares the loaded sector file with its own package's version: the package is taken from the sector file's path (the OKAC or ORBB folder or file nearest it), otherwise from the controller's callsign (OR... is ORBB, OK... is OKAC). The plugin reads the local version only from `AIRAC_VERSION.txt`, which the packages keep in `OKAC\Plugins` and `ORBB\Plugins`: it looks in the folder given with `.kwiq sectorfile` (or that file's folder), otherwise in the plugin's folder and its three parents, each with its `Plugins` folder. Without that file the version is not checked and no alert is shown. "2610/2" and "2610/02" are treated as equal.
 
 ## Squawk assignment
-Squawks are allocated by Core, so two controllers never hand out the same code; when to ask for one follows the UK Controller Plugin (`squawk_logic.hpp`, see `NOTICE.md`). It is off until `squawk.enabled` is set to 1 in Core, and only works when logged on to the live network as a controller (not sweatbox).
+Squawks are allocated by Core, so two controllers never hand out the same code. Core picks the range (domestic, VFR or international) from the departure, destination and flight rules; when to ask for a code follows the UK Controller Plugin (`squawk_logic.hpp`, see `NOTICE.md`). It is off until `squawk.enabled` is set to 1 in Core. As in UKCP it works on the live network and on sweatbox (Core keeps the two apart); through a proxy only what the controller asks for is done, nothing automatic.
 
 **Automatic**: checked on every flight plan update and every 5 seconds, not in the first 15 seconds after logging on, for aircraft with no code (EuroScope's 2000, 2200, 1200, 0000 and so on count as none) that nobody else tracks:
-- **Untracked, on the ground** (30 kt or less, within 7 nm of the departure airport): only from the controller who gives that airport's departures their squawk, the lowest position online in Core's top-down order for the airport (`TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR`). An airport with no top-down order in Core is covered only by its own DEL, GND, TWR and APP. A **local** code is asked for when the flight returns to its departure airport, is VFR, or has no SID and a cruise level of 6000 ft or less; otherwise a **general** one.
-- **Tracked by the user**: a **local** code below 6000 ft (CTR/FSS: a cruise level of 6000 ft or less; APP/TWR: also within 40 nm of their visibility centre), otherwise a **general** one.
-- **VFR circuits** (route starting `CIRCUITS` or `VFR CIRCUITS`) get `squawk.circuit`, if Core sets one.
+- **Untracked, on the ground** (30 kt or less, within 7 nm of the departure airport): only from the controller who gives that airport's departures their squawk, the lowest position online in Core's top-down order for the airport (`TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR`). An airport with no top-down order in Core is covered only by its own DEL, GND, TWR and APP.
+- **Tracked by the user**: any aircraft with no code.
 - **Reconnects**: a pilot who reconnects within 10 minutes with the same departure and destination gets their previous code back.
 
-While Core is asked, the aircraft shows the conspicuity code (`squawk.conspicuity`, default 7000). If Core cannot give a code, it stays on that code and the error is shown once; force a new one with the menu.
+If Core cannot give a code, the error is shown once and that aircraft is not asked for again for a minute.
 
-**By hand**: **Open squawk assignment menu** offers General, Local (both a new code from Core), Conspicuity, Circuit (when Core sets one) and Manual (type a code). Setting a code by hand releases the one Core held. Only for aircraft the user tracks or nobody tracks.
+**By hand**: **Open squawk assignment menu** offers Assign (a new code from Core, also **Force squawk recycle**), Non-discrete (`squawk.non_discrete`, default 2000, or `squawk.non_discrete_vfr`, default 7000, for VFR) and Manual (type a code). Setting a code by hand releases the one Core held, and the plugin leaves that aircraft alone until its departure or destination changes. Only for aircraft the user tracks or nobody tracks.
 
-**Core API**, all under `/api/plugin`, with the same `X-KWIQ-Key` and `X-KWIQ-Version` headers as the rest:
+**Core API**, all under `/api/plugin`, with the same `X-KWIQ-Key` and `X-KWIQ-Version` headers as the rest. Every request carries `?network=live` or `?network=sweatbox`, and Core keeps the two apart.
 
 | Request | Answer |
 |---|---|
 | `GET /squawk-assignment/<callsign>` | `SQUAWK\|<code>` if Core holds a code for it, else 404 |
-| `PUT /squawk-assignment/<callsign>`, form `type=general&origin=OKBK&destination=OMDB` | `SQUAWK\|<code>`: a new general code (replaces any it held) |
-| `PUT /squawk-assignment/<callsign>`, form `type=local&unit=OKBK&rules=I` (or `V`) `&origin=OKBK&destination=OMDB` | `SQUAWK\|<code>`: a new code from the unit's local range (the callsign's prefix). A unit with no local range should get a general code. |
+| `PUT /squawk-assignment/<callsign>`, form `origin=OKBK&destination=OMDB&rules=I` (or `V`) | `SQUAWK\|<code>`: a new code from the range for that flight (replaces any it held) |
 | `DELETE /squawk-assignment/<callsign>` | 2xx, or 404 if it held none |
 | `GET /squawk/topdown` | one `TOPDOWN\|<airport>\|<position>,<position>,...` line per airport, lowest position first (refreshed with the SRD) |
 
-Errors may carry `ERROR|<message>` in the body, which the plugin shows. Core must never answer 7500, 7600, 7700, 1200, 2200, 0200, 0000 or 1234; the plugin ignores them. Config keys: `squawk.enabled` (default 0), `squawk.conspicuity` (default 7000), `squawk.circuit` (default none).
+Errors may carry `ERROR|<message>` in the body, which the plugin shows. Core must never answer 7500, 7600, 7700, 1200, 2200, 0200, 0000 or 1234; the plugin ignores them. Config keys: `squawk.enabled` (default 0), `squawk.non_discrete` (default 2000), `squawk.non_discrete_vfr` (default 7000).
 
 ## Tests
 `g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic && ./test_logic`
