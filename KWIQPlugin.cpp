@@ -16,6 +16,7 @@
 #include <cstring>
 #include <mmsystem.h>       // PlaySound (link winmm)
 #include <shellapi.h>       // ShellExecute
+#include <winver.h>         // GetFileVersionInfo (link version)
 #include "requestMenu.hpp"      // CVCHPlugin (VCH)
 #include "kwiq_logic.hpp"
 #include "VatsimAPI.h"
@@ -37,6 +38,8 @@ static const char* CORE_SRD_VERSION_URL = CORE_BASE "/srd/version";
 static const char* CORE_SECTORS_URL     = CORE_BASE "/sectors";
 // myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
 static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
+// EuroScope setup guide, opened from the incorrect EuroScope version popup until Core sends euroscope.setup_url
+static const char* ES_SETUP_URL         = "https://docs.kuwait-iraqvacc.net/Controller%20Guidance/Software/EuroScope%20Setup/";
 // ---------------------------------------------------------------------------
 
 // Tag item / function ids. VCH uses 100, 340-346, 440-447, 540-556, 640-650: keep clear of those.
@@ -252,7 +255,7 @@ static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows, size_t total)
 // Windows-style message boxes (title bar, icon, message, buttons on a grey strip), but not modal:
 // EuroScope keeps running behind them and they never take keyboard focus. They are only shown when
 // EuroScope starts, never in the middle of a session.
-enum { NOTICE_KEY = 2, NOTICE_INFO = 3 };
+enum { NOTICE_KEY = 2, NOTICE_INFO = 3, NOTICE_ES_VERSION = 4 };
 static void (*gOnNotice)(int kind, int button) = nullptr;       // button 1 = first, 2 = second (or closed)
 static const char* const kNoticeClass = "KWIQNoticeWnd";
 static bool gNoticeReg = false;
@@ -263,7 +266,7 @@ struct Notice {
     LPCSTR icon = nullptr;
     std::string body;
 };
-static Notice gKey, gInfo;
+static Notice gKey, gInfo, gEsVersion;
 static HFONT gFontBody = nullptr;
 
 static void PaintNotice(HWND h, const Notice& n) {
@@ -386,10 +389,15 @@ static void CloseKeyPrompt() { if (gKey.hwnd) DestroyWindow(gKey.hwnd); }
 static void ShowInfo(const std::string& title, const std::string& body) {
     ShowNotice(gInfo, NOTICE_INFO, title, body, IDI_INFORMATION, "OK", nullptr);
 }
+// Incorrect EuroScope version: OK opens the setup guide
+static void ShowEsVersion(const std::string& body) {
+    ShowNotice(gEsVersion, NOTICE_ES_VERSION, "Incorrect EuroScope Version", body, IDI_WARNING, "OK", nullptr);
+}
 
 static void Shutdown() {
     if (gKey.hwnd) DestroyWindow(gKey.hwnd);
     if (gInfo.hwnd) DestroyWindow(gInfo.hwnd);
+    if (gEsVersion.hwnd) DestroyWindow(gEsVersion.hwnd);
     if (gFontBody) { DeleteObject(gFontBody); gFontBody = nullptr; }
     if (gNoticeReg && gMod) { UnregisterClassA(kNoticeClass, gMod); gNoticeReg = false; }
     if (gEvt.hwnd) DestroyWindow(gEvt.hwnd);
@@ -540,6 +548,22 @@ static bool Save(const std::string& key) {
 }
 } // namespace apikey
 
+// The running EuroScope's version from its .exe, e.g. "3.2.3.2"; empty if it cannot be read
+static std::string EuroScopeVersion() {
+    char exe[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return "";
+    DWORD unused = 0, size = GetFileVersionInfoSizeA(exe, &unused);
+    if (!size) return "";
+    std::vector<char> buf(size);
+    VS_FIXEDFILEINFO* fi = nullptr;
+    UINT len = 0;
+    if (!GetFileVersionInfoA(exe, 0, size, buf.data()) || !VerQueryValueA(buf.data(), "\\", (void**)&fi, &len) ||
+        !fi || len < sizeof(*fi)) return "";
+    return std::to_string(HIWORD(fi->dwFileVersionMS)) + "." + std::to_string(LOWORD(fi->dwFileVersionMS)) + "." +
+           std::to_string(HIWORD(fi->dwFileVersionLS)) + "." + std::to_string(LOWORD(fi->dwFileVersionLS));
+}
+
 // Values Core controls (defaults apply until the first config arrives or if Core is unreachable).
 struct UiCfg {
     std::string ok = "OK", chk = "CHK", ev = "EV";
@@ -582,6 +606,7 @@ public:
         apiKey_ = apikey::Load();
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
         startedAt_ = std::time(nullptr);
+        esVersion_ = EuroScopeVersion();
         if (duplicate_) {
             Msg("The KWIQ plugin is loaded twice, so this copy (" + sf::DllPath() + ") will do nothing. "
                 "Remove one of them in Other Set > Plug-ins.", true);
@@ -628,6 +653,7 @@ public:
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
         TickConnection(now);
         TickKeySetup(now);
+        TickEuroScopeVersion(now);
         CDataHandler::refreshInterval = slotsEvery_;
         std::string code;
         { std::lock_guard<std::mutex> g(mu_); code = ev_.active ? ev_.vatcanCode : ""; }
@@ -779,6 +805,7 @@ public:
         if (c == ".KWIQ STATUS") {
             std::lock_guard<std::mutex> g(mu_);
             std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED by Core") +
+                " | EuroScope " + (esVersion_.empty() ? std::string("?") : esVersion_) +
                 " | API key " + (apiKey_.empty() ? std::string("not set") : "ID " + kwiq::ApiKeyId(apiKey_)) +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
@@ -933,6 +960,26 @@ private:
             keyPrompted_ = true;
             StartKeySetup();
         }
+    }
+
+    // ---- EuroScope version (main thread) ---------------------------------------------------------
+    // Checked once, as soon as Core's config has arrived: a popup as EuroScope starts, the chat after that.
+    void TickEuroScopeVersion(std::time_t now) {
+        if (esChecked_ || esVersion_.empty()) return;
+        std::string accepted, url;
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            if (!esConfigured_) return;
+            accepted = esAccepted_; url = esUrl_;
+        }
+        esChecked_ = true;
+        if (kwiq::EuroScopeVersionAccepted(esVersion_, accepted)) return;
+        std::string list;
+        for (const std::string& v : kwiq::EuroScopeVersions(accepted)) list += (list.empty() ? "" : " or ") + v;
+        if (now - startedAt_ <= STARTUP_SECONDS)
+            kwiq_ui::ShowEsVersion("You are on an incorrect EuroScope version: " + esVersion_ + ". The Kuwait & Iraq vACC uses " +
+                                   list + ".\n\nPress OK to open the EuroScope setup guide.");
+        Msg("Incorrect EuroScope version " + esVersion_ + " (the vACC uses " + list + "). Setup guide: " + url, true);
     }
 
     void SetApiKey(const std::string& key) {
@@ -1092,6 +1139,11 @@ public:
             keyLink_.Stop();
             Msg("You can connect your API key later from the KWIQ button, or with .kwiq connect.", false);
         }
+        if (kind == kwiq_ui::NOTICE_ES_VERSION && button == 1) {
+            std::string url;
+            { std::lock_guard<std::mutex> g(mu_); url = esUrl_; }
+            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
     }
 private:
     void Msg(const std::string& m, bool err) {
@@ -1165,6 +1217,10 @@ private:
             sectorUrl_ = { { "OKAC", c.Get("sectorfile.url.okac") }, { "ORBB", c.Get("sectorfile.url.orbb") } };
             if (!motd.empty() && motd != motd_) pending_.emplace_back(motd, false);
             motd_ = motd;
+            esAccepted_ = c.Get("euroscope.versions");
+            esUrl_ = Trim(c.Get("euroscope.setup_url", ES_SETUP_URL));
+            if (esUrl_.empty()) esUrl_ = ES_SETUP_URL;
+            esConfigured_ = true;
         }
         CheckSectorFile(false);
     }
@@ -1313,6 +1369,8 @@ private:
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     bool keyPrompted_ = false;                                      // main thread only
+    std::string esVersion_;                                         // the running EuroScope's, read once at start
+    bool esChecked_ = false;                                        // main thread only
     std::time_t startedAt_ = 0, lastNameRead_ = 0;
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
@@ -1338,6 +1396,8 @@ private:
     std::string latest_, latestSha_;
     std::map<std::string, std::string> upstreamAirac_, sectorUrl_;   // per package: OKAC, ORBB
     std::string sectorPath_, motd_, lastSfKey_, myCallsign_, sectorName_;
+    std::string esAccepted_, esUrl_ = ES_SETUP_URL;                 // Core's euroscope.versions and euroscope.setup_url
+    bool esConfigured_ = false;                                     // Core's config has arrived at least once
     std::map<std::string, std::string> lastErr_;
 };
 
