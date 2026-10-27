@@ -12,6 +12,7 @@
 #include <thread>
 #include <atomic>
 #include <map>
+#include <array>
 #include <cstring>
 #include <mmsystem.h>       // PlaySound (link winmm)
 #include <shellapi.h>       // ShellExecute
@@ -508,17 +509,48 @@ static kwiq::Airac Local(const std::string& userPath, std::string& src) {
     }
     return {};
 }
-// The tag colours of the TopSky that EuroScope has loaded, from the settings files next to TopSky.dll;
-// empty if TopSky is not loaded.
-static kwiq::TagColours TopSkyColours() {
-    kwiq::TagColours c;
-    HMODULE m = GetModuleHandleA("TopSky.dll");
-    char b[MAX_PATH] = {};
-    if (!m || !GetModuleFileNameA(m, b, MAX_PATH)) return c;
-    std::string dir = ParentOf(b);
-    kwiq::ParseTopSkyColours(ReadHead(dir + "\\TopSkySettings.txt", 1 << 20), c);
-    kwiq::ParseTopSkyColours(ReadHead(dir + "\\TopSkySettingsLocal.txt", 1 << 20), c);
-    return c;
+// The ESE of the loaded sector file: the one given with ".kwiq sectorfile", else in that folder or the
+// plugin's folder and their parents, else in any package under %APPDATA%\EuroScope. The one named like the
+// loaded sector file wins, else (only near the plugin or the folder given) the newest.
+static std::vector<std::string> EseIn(const std::string& dir) {
+    std::vector<std::string> out;
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((dir + "\\*.ese").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) out.push_back(dir + "\\" + fd.cFileName);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return out;
+}
+static bool IsEse(const std::string& p) {
+    return p.size() > 4 && kwiq::Upper(p.substr(p.size() - 4)) == ".ESE";
+}
+static bool NamedLike(const std::string& ese, const std::string& sectorName) {
+    std::string f = ese.substr(ese.find_last_of("\\/") + 1);
+    f = kwiq::Upper(f.substr(0, f.size() - 4));                       // without .ese
+    return !f.empty() && kwiq::Upper(sectorName).find(f) != std::string::npos;
+}
+static std::string FindEse(const std::string& userPath, const std::string& sectorName) {
+    if (IsEse(userPath) && FileExists(userPath)) return userPath;
+    std::vector<std::string> starts, found;
+    if (!userPath.empty()) starts.push_back(IsDir(userPath) ? userPath : ParentOf(userPath));
+    starts.push_back(DllDir());
+    for (const auto& s : starts) {
+        std::string d = s;
+        for (int up = 0; up < 4 && !d.empty(); up++, d = ParentOf(d))
+            for (const auto& e : EseIn(d)) found.push_back(e);
+    }
+    std::string best;
+    for (const auto& e : found) if (NamedLike(e, sectorName)) return e;
+    for (const auto& e : found) if (best.empty() || NewerThan(e, best)) best = e;
+    if (!best.empty()) return best;
+    char app[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("APPDATA", app, MAX_PATH))
+        for (const auto& pkg : SubDirs(std::string(app) + "\\EuroScope"))
+            for (const auto& e : EseIn(pkg))
+                if (NamedLike(e, sectorName) && (best.empty() || NewerThan(e, best))) best = e;
+    return best;
 }
 } // namespace sf
 
@@ -555,6 +587,7 @@ static bool Save(const std::string& key) {
 struct UiCfg {
     std::string ok = "OK", chk = "CHK", ev = "EV";
     COLORREF cOk = RGB(0, 190, 0), cBad = RGB(230, 30, 30), cEv = RGB(0, 170, 255), cSector = RGB(255, 255, 255);
+    std::map<std::string, COLORREF> cStates;                         // sector indicator per tag state (SectorColourName)
     // outdated sector file alert
     bool alertOn = true;
     int flashSec = 10;
@@ -636,7 +669,7 @@ public:
             DeleteFileA((sf::DllPath() + ".old").c_str());   // left over from a previous self-update (fails while still loaded)
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
-        if (now - lastTagColours_ >= 60) { lastTagColours_ = now; tagColours_ = sf::TopSkyColours(); }
+        if (now - lastEseRead_ >= 60) { lastEseRead_ = now; ReadEse(); }
         TickConnection(now);
         TickKeySetup(now);
         CDataHandler::refreshInterval = slotsEvery_;
@@ -794,7 +827,7 @@ public:
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
-                std::to_string(sectors_.size()) + " | ";
+                std::to_string(sectors_.size()) + " | ESE positions " + std::to_string(esePositions_.size()) + " | ";
             s += ev_.active
                 ? ev_.name + " | event routes " + std::to_string(ev_.routes.size()) +
                   " | VATCAN code " + ev_.vatcanCode + " | slots " + std::to_string(CDataHandler::SlotCount()) +
@@ -806,11 +839,27 @@ public:
         return CVCHPlugin::OnCompileCommand(sCommandLine);
     }
 
-    // Sector indicator of the position tracking an aircraft; empty if none or it has no alias in Core.
+    // main thread: sector indicator of the position tracking an aircraft. Core's alias for that callsign,
+    // else the ESE position EuroScope identified the controller as (ORBB__CTR is ORBB_CTR): Core's alias
+    // for that position, else its ESE ID. Empty if nobody tracks it or the position is not identified.
     std::string SectorFor(const char* trackerCallsign) {
-        std::lock_guard<std::mutex> g(mu_);
-        auto it = sectors_.find(trackerCallsign);
-        return it == sectors_.end() ? std::string() : it->second;
+        std::string cs = kwiq::Upper(trackerCallsign);
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            auto it = sectors_.find(cs);
+            if (it != sectors_.end()) return it->second;
+        }
+        EuroScopePlugIn::CController me = ControllerMyself();
+        EuroScopePlugIn::CController c = me.IsValid() && kwiq::Upper(me.GetCallsign()) == cs ? me : ControllerSelect(trackerCallsign);
+        if (!c.IsValid() || !c.GetPositionIdentified() || !c.GetPositionId() || !*c.GetPositionId()) return "";
+        std::string id = kwiq::Upper(c.GetPositionId());
+        auto pos = esePositions_.find(id);
+        if (pos != esePositions_.end()) {
+            std::lock_guard<std::mutex> g(mu_);
+            auto it = sectors_.find(pos->second);
+            if (it != sectors_.end()) return it->second;
+        }
+        return id.substr(0, 4);
     }
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_; }
     bool Duplicate() const { return duplicate_; }
@@ -878,9 +927,17 @@ public:
         case KWIQ_MENU_HIDE:         ShowButton(false); return;
         }
     }
-    COLORREF SectorColour() { std::lock_guard<std::mutex> g(mu_); return ui_.cSector; }
-    // main thread: the colour of the aircraft's tag for that flight plan state, else Core's sector colour
-    COLORREF SectorColour(int state, COLORREF def) const { return (COLORREF)kwiq::TagColour(tagColours_, state, def); }
+    // Sector indicator colour per flight plan state (FLIGHT_PLAN_STATE_*): Core's colour for that state,
+    // else Core's sector colour
+    std::array<COLORREF, 8> SectorColours() {
+        std::lock_guard<std::mutex> g(mu_);
+        std::array<COLORREF, 8> a;
+        for (int i = 0; i < 8; i++) {
+            auto it = ui_.cStates.find(kwiq::SectorColourName(i));
+            a[i] = it == ui_.cStates.end() ? ui_.cSector : it->second;
+        }
+        return a;
+    }
 
     virtual EuroScopePlugIn::CRadarScreen* OnRadarScreenCreated(const char* sDisplayName, bool NeedRadarContent,
                                                                 bool GeoReferenced, bool CanBeSaved, bool CanBeCreated) override;
@@ -1124,6 +1181,11 @@ private:
         u.cBad = (COLORREF)ParseColour(c.Get("ui.colour_bad"), u.cBad);
         u.cEv = (COLORREF)ParseColour(c.Get("ui.colour_event"), u.cEv);
         u.cSector = (COLORREF)ParseColour(c.Get("ui.colour_sector"), u.cSector);
+        for (int i = 0; i < 8; i++) {
+            std::string n = SectorColourName(i);
+            unsigned long v = ParseColour(c.Get("ui.colour_sector_" + n), 0xFFFFFFFFul);
+            if (v != 0xFFFFFFFFul) u.cStates[n] = (COLORREF)v;
+        }
         coreEvery_  = c.GetInt("refresh.core_s", 60, 30, 3600);
         srdEvery_   = c.GetInt("refresh.srd_s", 300, 60, 86400);
         slotsEvery_ = c.GetInt("refresh.slots_s", 60, 15, 3600);
@@ -1163,6 +1225,18 @@ private:
     // Messages once per distinct (package, local, upstream); force = user asked (.kwiq version / .kwiq sectorfile).
     // main thread: the loaded sector file's name ([INFO] line and the name EuroScope reports), e.g.
     // "ORBB-2610_02", which names the package even when its folders don't
+    // main thread: (re)reads the ESE's positions when another ESE is found or it has changed
+    void ReadEse() {
+        std::string path, name;
+        { std::lock_guard<std::mutex> g(mu_); path = sectorPath_; name = sectorName_; }
+        std::string ese = sf::FindEse(path, name);
+        WIN32_FILE_ATTRIBUTE_DATA a = {};
+        if (ese.empty() || !GetFileAttributesExA(ese.c_str(), GetFileExInfoStandard, &a)) return;
+        if (ese == esePath_ && CompareFileTime(&a.ftLastWriteTime, &eseTime_) == 0) return;
+        esePath_ = ese;
+        eseTime_ = a.ftLastWriteTime;
+        esePositions_ = kwiq::ParseEsePositions(sf::ReadHead(ese, 8u << 20));
+    }
     void ReadSectorName() {
         std::string n;
         EuroScopePlugIn::CSectorElement info = SectorFileElementSelectFirst(EuroScopePlugIn::SECTOR_ELEMENT_INFO);
@@ -1303,8 +1377,10 @@ private:
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     bool keyPrompted_ = false;                                      // main thread only
-    std::time_t startedAt_ = 0, lastNameRead_ = 0, lastTagColours_ = 0;
-    kwiq::TagColours tagColours_;                                   // main thread only: TopSky's, refreshed every minute
+    std::time_t startedAt_ = 0, lastNameRead_ = 0, lastEseRead_ = 0;
+    kwiq::EsePositions esePositions_;                               // main thread only: of the loaded sector file
+    std::string esePath_;                                           // main thread only
+    FILETIME eseTime_ = {};                                         // main thread only
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
     std::atomic<bool> keyRefused_{ false };
@@ -1361,7 +1437,7 @@ public:
         RECT area = GetRadarArea();
         int saved = SaveDC(hDC);
         SetBkMode(hDC, TRANSPARENT);
-        COLORREF fallback = gPlugin->SectorColour();
+        std::array<COLORREF, 8> colours = gPlugin->SectorColours();
         SetTextAlign(hDC, TA_CENTER | TA_BOTTOM);
         if (font_) SelectObject(hDC, font_);
         EuroScopePlugIn::CPlugIn* plugin = GetPlugIn();
@@ -1376,7 +1452,8 @@ public:
             if (alias.empty()) continue;                                    // no alias for that position
             POINT p = ConvertCoordFromPositionToPixel(rt.GetPosition().GetPosition());
             if (p.x < area.left || p.x > area.right || p.y < area.top || p.y > area.bottom) continue;
-            SetTextColor(hDC, gPlugin->SectorColour(fp.GetState(), fallback));   // same colour as its tag
+            int state = fp.GetState();
+            SetTextColor(hDC, colours[state >= 0 && state < 8 ? state : 0]);   // the colour of its tag
             TextOutA(hDC, p.x, p.y - 9, alias.c_str(), (int)alias.size());
         }
         RestoreDC(hDC, saved);

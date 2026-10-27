@@ -320,43 +320,41 @@ inline SectorMap ParseSectors(const std::string& body) {
     return m;
 }
 
-// The indicator is drawn in the colour of the aircraft's tag. Both packages draw their tags with
-// TopSky, which colours them from Color_<state>=R,G,B in TopSkySettings.txt (TopSkySettingsLocal.txt
-// overrides it), so those colours are read and picked by the EuroScope flight plan state.
-using TagColours = std::unordered_map<std::string, unsigned long>;   // TopSky colour name -> 0x00BBGGRR
-
-// Adds the Color_ lines of one TopSky settings file to c, replacing what an earlier file set.
-inline void ParseTopSkyColours(const std::string& text, TagColours& c) {
-    for (const auto& line : SplitChar(text, '\n')) {
+// Positions Core does not list (ORBB__CTR, a relief callsign ...) get their indicator from the ESE:
+// EuroScope identifies the controller as one of its [POSITIONS] (by prefix, suffix and frequency) and gives
+// the plugin that position's ID; the ESE line with that ID names the position, which may have a Core alias.
+// [POSITIONS] lines:  NAME:RADIO CALLSIGN:FREQUENCY:ID:MIDDLE LETTER:PREFIX:SUFFIX:...
+using EsePositions = std::unordered_map<std::string, std::string>;   // position ID -> position name
+inline EsePositions ParseEsePositions(const std::string& text) {
+    EsePositions m;
+    bool in = false;
+    for (const auto& line : SplitChar(text, '
+')) {
         std::string t = Trim(line);
-        size_t eq = t.find('=');
-        if (t.compare(0, 6, "Color_") != 0 || eq == std::string::npos) continue;
-        auto rgb = SplitChar(Trim(t.substr(eq + 1)), ',');
-        if (rgb.size() != 3) continue;
-        unsigned long v[3];
-        bool ok = true;
-        for (int i = 0; i < 3 && ok; i++) {
-            std::string n = Trim(rgb[i]);
-            ok = !n.empty() && n.size() <= 3 && AllDigits(n, 0, n.size()) && std::atoi(n.c_str()) <= 255;
-            if (ok) v[i] = (unsigned long)std::atoi(n.c_str());
-        }
-        if (ok) c[Trim(t.substr(6, eq - 6))] = v[0] | (v[1] << 8) | (v[2] << 16);
+        if (t.empty() || t[0] == ';') continue;
+        if (t[0] == '[') { in = Upper(t).compare(0, 11, "[POSITIONS]") == 0; continue; }
+        if (!in) continue;
+        auto f = SplitChar(t, ':');
+        if (f.size() < 7) continue;
+        std::string name = Upper(Trim(f[0])), id = Upper(Trim(f[3]));
+        if (!name.empty() && !id.empty()) m.emplace(id, name);          // the first line with an ID wins
     }
+    return m;
 }
-// TopSky colour name for a EuroScope flight plan state (FLIGHT_PLAN_STATE_*: 0 non concerned, 1 notified,
-// 2 coordinated, 3 transfer to me initiated, 4 transfer from me initiated, 5 assumed, 7 redundant).
-inline const char* TopSkyStateColour(int state) {
+
+// The indicator is drawn in the colour of the aircraft's tag, which Core sets per EuroScope flight plan
+// state as ui.colour_sector_<name>, named as in EuroScope's Symbology (Datablock: ...).
+// FLIGHT_PLAN_STATE_*: 0 non concerned, 1 notified, 2 coordinated, 3 transfer to me initiated,
+// 4 transfer from me initiated, 5 assumed, 7 redundant.
+inline const char* SectorColourName(int state) {
     switch (state) {
-    case 1: case 2: return "Concerned";
-    case 3:         return "Coordination";
-    case 4: case 5: return "Assumed";
-    case 7:         return "Redundant";
-    default:        return "Unconcerned";
+    case 1:         return "notified";
+    case 2:         return "information";
+    case 3:         return "transfer_to_me_initiated";
+    case 4: case 5: return "assumed";
+    case 7:         return "redundant";
+    default:        return "non_concerned";
     }
-}
-inline unsigned long TagColour(const TagColours& c, int state, unsigned long def) {
-    auto it = c.find(TopSkyStateColour(state));
-    return it == c.end() ? def : it->second;
 }
 
 // ---- Core-managed configuration ---------------------------------------------
