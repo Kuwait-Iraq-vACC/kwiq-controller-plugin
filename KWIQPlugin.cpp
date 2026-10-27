@@ -941,10 +941,10 @@ public:
 private:
     // ---- API key setup through myKWIQ (main thread) -------------------------------------------
     // Whenever there is no key, or Core refuses it as missing, invalid, revoked or expired, the setup
-    // opens: as EuroScope starts, or later in a session once the controller is not logged on (a
-    // logged-on controller is told in the chat, and it opens when they log off). It opens once for each
-    // problem; Cancel leaves it until the next start, the KWIQ button's API Key or .kwiq connect. A key
-    // refused because they left the roster or are suspended is only reported, as a new one wouldn't help.
+    // opens: as EuroScope starts, whenever the controller connects to the network, or once they log off
+    // if Core refuses the key while they are logged on (they are told in the chat). Otherwise once for
+    // each problem: Cancel leaves it until they next connect, the next start, the KWIQ button's API Key
+    // or .kwiq connect. A key refused because they left the roster or are suspended is only reported.
     void StartKeySetup() {
         if (!keyLink_.Start()) {
             Msg("The API key setup could not start (a firewall may be blocking it). Use Show Key on myKWIQ, under EuroScope "
@@ -978,12 +978,15 @@ private:
         std::string reason;
         { std::lock_guard<std::mutex> g(mu_); reason = keyReason_; }
         bool fixable = reason == "missing" || reason == "invalid" || reason == "revoked" || reason == "expired";
-        if (!(apiKey_.empty() || (keyRefused_ && fixable))) return;
+        if (!(apiKey_.empty() || (keyRefused_ && fixable))) { justConnected_ = false; return; }
 
-        // One setup per problem: a new key, or a different refusal, is a new problem
+        // One setup per problem: a new key, or a different refusal, is a new problem. Connecting to the
+        // network without a working key opens it again, even after Cancel
         std::string problem = apiKey_.empty() ? std::string("none") : kwiq::ApiKeyId(apiKey_) + ":" + reason;
-        if (problem == keyPromptedFor_ || keyLink_.Running()) return;
-        if (connected_) {
+        bool onConnect = justConnected_;
+        justConnected_ = false;
+        if (keyLink_.Running() || (problem == keyPromptedFor_ && !onConnect)) return;
+        if (connected_ && !onConnect) {
             if (problem != keyToldFor_) {
                 keyToldFor_ = problem;
                 Msg("Your API key needs connecting again. The setup will open when you log off, or use the KWIQ button and API Key.", true);
@@ -1130,6 +1133,7 @@ private:
         if (net && !connected_) {
             connected_ = true;
             connectedAt_ = now;
+            justConnected_ = true;                           // a missing key's setup opens as they connect
             // Our position can tell OKAC from ORBB; the check runs on the next refresh, brought forward
             { std::lock_guard<std::mutex> g(mu_); myCallsign_ = ControllerMyself().GetCallsign(); }
             lastCore_ = 0;
@@ -1422,6 +1426,7 @@ private:
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     std::string keyPromptedFor_, keyToldFor_;                      // main thread only: the key problem last offered / told about
+    bool justConnected_ = false;                                    // main thread only: logged on since the last key check
     std::string esVersion_;                                         // the running EuroScope's, read once at start
     bool esChecked_ = false;                                        // main thread only
     std::time_t startedAt_ = 0, lastNameRead_ = 0;
