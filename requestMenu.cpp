@@ -208,7 +208,7 @@ CVCHPlugin::CVCHPlugin(const char* name, const char* version, const char* develo
 			DTEN = atof(settingLoad);
 	}
 	// KWIQ: the upstream VCH version check is disabled (it compares against DrFreas/VCH releases).
-	DisplayUserMessage("Message", "VCH", string("VCH " + MY_PLUGIN_VERSION + " loaded (built into KWIQ plugin)").c_str(), false, false, false, false, false);
+	DisplayUserMessage("KWIQ Controller Plugin", "VCH", string("VCH " + MY_PLUGIN_VERSION + " loaded (built into KWIQ plugin)").c_str(), false, false, false, false, false);
 
 }
 
@@ -1458,12 +1458,12 @@ void CVCHPlugin::antiAmendSpam(CFlightPlan* flightPlan) {
 }
 
 void CVCHPlugin::displayMessage(string message) {
-	DisplayUserMessage("Message", "VCH", message.c_str(), false, false, false, false, false);
+	DisplayUserMessage("KWIQ Controller Plugin", "VCH", message.c_str(), false, false, false, false, false);
 }
 
 void CVCHPlugin::displayError(string message) {
 	if (message != lastError) {
-		DisplayUserMessage("VCH", "Error", message.c_str(), true, true, false, true, false);
+		DisplayUserMessage("KWIQ Controller Plugin", "VCH Error", message.c_str(), true, true, false, true, false);
 		lastError = message;
 	}
 }
@@ -1471,11 +1471,11 @@ void CVCHPlugin::displayError(string message) {
 void CVCHPlugin::displayDebug(string message) {
 	if (DEBUG) {
 		if (message != lastDebug) {
-			DisplayUserMessage("VCH_DEBUG", "DATA", message.c_str(), true, true, false, true, false);
+			DisplayUserMessage("KWIQ Controller Plugin", "VCH Debug", message.c_str(), true, true, false, true, false);
 			lastDebug2 = lastDebug;
 			lastDebug = message;
 			if (lastDebug2 == lastDebug) {
-				DisplayUserMessage("VCH_DEBUG", "ERROR", "Duplicate Debug Message!", true, true, false, true, false);
+				DisplayUserMessage("KWIQ Controller Plugin", "VCH Debug Error", "Duplicate Debug Message!", true, true, false, true, false);
 			}
 		}
 
