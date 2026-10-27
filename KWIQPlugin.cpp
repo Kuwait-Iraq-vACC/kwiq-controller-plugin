@@ -380,7 +380,8 @@ static bool ShowNotice(Notice& n, int kind, const std::string& title, const std:
 static void ShowKeyPrompt() {
     ShowNotice(gKey, NOTICE_KEY, "KWIQ API Key Setup",
                "Please go to your web browser, sign in to myKWIQ and click Connect EuroScope. This window will close "
-               "automatically once your API key has been received. If the page did not open, click Reopen Browser.",
+               "automatically once your API key has been received. If the page did not open, click Reopen Browser, or paste "
+               "the link from the chat into your browser. Need help? discord.kuwait-iraqvacc.net",
                IDI_INFORMATION, "Reopen Browser", "Cancel");
 }
 static bool KeyPromptOpen() { return gKey.hwnd != nullptr; }
@@ -813,7 +814,7 @@ public:
             std::lock_guard<std::mutex> g(mu_);
             std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED by Core") +
                 " | EuroScope " + (esVersion_.empty() ? std::string("?") : esVersion_) +
-                " | API key " + (apiKey_.empty() ? std::string("not set") : "ID " + kwiq::ApiKeyId(apiKey_)) +
+                " | API key " + (apiKey_.empty() ? std::string("not set") : "ID " + kwiq::ApiKeyId(apiKey_)) + WineNote() +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
@@ -946,7 +947,8 @@ private:
     // refused because they left the roster or are suspended is only reported, as a new one wouldn't help.
     void StartKeySetup() {
         if (!keyLink_.Start()) {
-            Msg("The API key setup could not start. Copy your key from myKWIQ and use: .kwiq key <your key>", true);
+            Msg("The API key setup could not start (a firewall may be blocking it). Use Show Key on myKWIQ, under EuroScope "
+                "Plugin, then: .kwiq key <your key>. Need help? discord.kuwait-iraqvacc.net", true);
             return;
         }
         OpenConnectPage();
@@ -956,7 +958,12 @@ private:
         if (!keyLink_.Running()) return;
         // v=2: myKWIQ hands over a one-off code that is swapped for the key with Core (KeyLink::Claim)
         std::string url = std::string(MYKWIQ_CONNECT_URL) + "?port=" + std::to_string(keyLink_.Port()) + "&state=" + keyLink_.State() + "&v=2";
-        ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        // Wine (EuroScope on a Mac or Linux) hands the link to the system browser; if no browser opens,
+        // there or on Windows, the link is in the chat and on the clipboard to paste in by hand
+        bool opened = (INT_PTR)ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
+        kwiq_ui::CopyToClipboard(nullptr, url);
+        Msg(std::string(opened ? "If your browser did not open, paste" : "Your browser could not be opened. Paste") +
+            " this link into it (it is on your clipboard): " + url, !opened);
     }
     void TickKeySetup(std::time_t now) {
         std::string key = keyLink_.Take();
@@ -1005,6 +1012,14 @@ private:
             kwiq_ui::ShowEsVersion("You are on an incorrect EuroScope version: " + esVersion_ + ". The Kuwait & Iraq vACC uses " +
                                    list + ".\n\nPress OK to open the EuroScope setup guide.");
         Msg("Incorrect EuroScope version " + esVersion_ + " (the vACC uses " + list + "). Setup guide: " + url, true);
+    }
+
+    // " | Wine 9.0" when EuroScope runs through Wine or CrossOver (a Mac or Linux), for support
+    static std::string WineNote() {
+        typedef const char* (*WineVersionFn)();
+        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+        WineVersionFn v = ntdll ? (WineVersionFn)GetProcAddress(ntdll, "wine_get_version") : nullptr;
+        return v ? std::string(" | Wine ") + v() : std::string();
     }
 
     static std::string KeyRefusedMessage(const std::string& reason) {

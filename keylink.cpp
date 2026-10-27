@@ -93,7 +93,8 @@ void KeyLink::Loop() {
         if (fromCode && Claim) key = Claim(code);
         bool ok = kwiq::IsApiKey(key) && state == state_;
         if (fromCode && !ok) {
-            Reply(c, 502, "Your API key could not be collected from Core. Please try again from EuroScope, with the KWIQ button and API Key.");
+            Reply(c, 502, "Your API key could not be collected from Core. Please try again from EuroScope, with the KWIQ button and API Key. "
+                          "Need help? Ask in our <a style=\"color:#f87171\" href=\"https://discord.kuwait-iraqvacc.net\">Discord server</a>.");
         } else if (ok) {
             Reply(c, 200, "Your API key has been received. You can close this window and return to EuroScope.");
             { std::lock_guard<std::mutex> g(mu_); received_ = key; }
