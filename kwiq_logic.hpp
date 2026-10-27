@@ -372,6 +372,20 @@ inline int CompareVersions(const std::string& a, const std::string& b) {
     return 0;
 }
 
+// ---- EuroScope version ------------------------------------------------------
+// Core's euroscope.versions, e.g. "3.2.9, 3.2.3.2": the EuroScope versions the vACC accepts
+inline std::vector<std::string> EuroScopeVersions(const std::string& accepted) {
+    std::vector<std::string> out;
+    for (const std::string& v : SplitChar(accepted, ',')) { std::string t = Trim(v); if (!t.empty()) out.push_back(t); }
+    return out;
+}
+// One of them ("3.2.9" and "3.2.9.0" are the same), or anything when Core lists none
+inline bool EuroScopeVersionAccepted(const std::string& running, const std::string& accepted) {
+    std::vector<std::string> vs = EuroScopeVersions(accepted);
+    for (const std::string& v : vs) if (CompareVersions(running, v) == 0) return true;
+    return vs.empty();
+}
+
 // ---- Sector file version (AIRAC) --------------------------------------------
 // "2610/02", "2610/2" and the ESE header text "AIRAC 2610/1  ++ ..." all mean cycle 2610, revision 2 / 1.
 struct Airac {

@@ -30,6 +30,7 @@ target_link_libraries(KWIQPluginCore PRIVATE
     wininet                                       # VCH
     winmm                                         # PlaySound (sector file alert)
     ws2_32                                        # API key from myKWIQ (keylink.cpp)
+    version                                       # GetFileVersionInfo (EuroScope version check)
 )
 set_target_properties(KWIQPluginCore PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginCore")
 
