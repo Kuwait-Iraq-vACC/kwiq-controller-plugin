@@ -1,5 +1,5 @@
 // kwiq_logic.hpp - pure logic for the KWIQ plugin (no Windows / EuroScope dependencies).
-// Route matching, event routes, SRD (shared by FPC and SRD search). Unit-tested in tests/test_logic.cpp.
+// Route matching, event routes, SRD (shared by the SRD check and SRD search). Unit-tested in tests/test_logic.cpp.
 // License: GPL-3.0-or-later
 #pragma once
 
@@ -161,7 +161,7 @@ inline EventData ParseCoreEvent(const std::string& body) {
     return ev;
 }
 
-// ---- SRD (shared by FPC and SRD search) ------------------------------------
+// ---- SRD (shared by the SRD check and SRD search) ------------------------------------
 // Core /api/plugin/srd (plain text):
 //   VERSION|<hash>
 //   SRD|<ADEP>|<ADES>|<min ft or empty>|<max ft or empty>|<route>|<notes>
@@ -327,26 +327,26 @@ inline void Candidates(const SrdData& d, const std::string& adep, const std::str
     for (size_t i : d.wp) if (on(d.rows[i].adep, adep) && on(d.rows[i].ades, ades)) out.push_back(i);
 }
 
-enum class FpcResult { None, Ok, Route, Min, Max };
+enum class SrdResult { None, Ok, Route, Min, Max };
 
-inline FpcResult CheckFpc(const SrdData& d, const std::string& adep, const std::string& ades,
+inline SrdResult CheckSrd(const SrdData& d, const std::string& adep, const std::string& ades,
                           const std::vector<std::string>& filed, int rflFt, const AircraftExit& exit = {}) {
     std::vector<size_t> c;
     Candidates(d, adep, ades, filed, c, exit);
-    if (c.empty()) return FpcResult::None;
+    if (c.empty()) return SrdResult::None;
     bool routeOk = false;
-    FpcResult lvl = FpcResult::None;
+    SrdResult lvl = SrdResult::None;
     for (size_t i : c) {
         const auto& r = d.rows[i];
         if (!MatchTokens(r.tokens, filed)) continue;
         routeOk = true;
-        if (rflFt > 0 && r.minLvl && rflFt < r.minLvl) { if (lvl == FpcResult::None) lvl = FpcResult::Min; }
-        else if (rflFt > 0 && r.maxLvl && rflFt > r.maxLvl) { if (lvl == FpcResult::None) lvl = FpcResult::Max; }
-        else return FpcResult::Ok;
+        if (rflFt > 0 && r.minLvl && rflFt < r.minLvl) { if (lvl == SrdResult::None) lvl = SrdResult::Min; }
+        else if (rflFt > 0 && r.maxLvl && rflFt > r.maxLvl) { if (lvl == SrdResult::None) lvl = SrdResult::Max; }
+        else return SrdResult::Ok;
     }
-    return routeOk ? lvl : FpcResult::Route;
+    return routeOk ? lvl : SrdResult::Route;
 }
-inline std::string ExplainFpc(const SrdData& d, const std::string& adep, const std::string& ades,
+inline std::string ExplainSrd(const SrdData& d, const std::string& adep, const std::string& ades,
                               const std::string& filedRte, int rflFt, const AircraftExit& exit = {}) {
     auto filed = NormaliseRoute(filedRte);
     std::vector<size_t> c;
@@ -356,13 +356,13 @@ inline std::string ExplainFpc(const SrdData& d, const std::string& adep, const s
     if (!c.empty() && IsAirportCode(d.rows[c[0]].adep) && !IsAirportCode(d.rows[c[0]].ades)) via = " (FIR exit " + d.rows[c[0]].ades + ")";
     else if (c.empty() && !exit.external.empty()) via = " (FIR exit " + exit.external + ")";
     std::string head = adep + " -> " + ades + via + " " + (rflFt > 0 ? FlStr(rflFt) : "FL---") + ": ";
-    switch (CheckFpc(d, adep, ades, filed, rflFt, exit)) {
-    case FpcResult::None:  return head + (exit.external.empty() && exit.internal.empty()
+    switch (CheckSrd(d, adep, ades, filed, rflFt, exit)) {
+    case SrdResult::None:  return head + (exit.external.empty() && exit.internal.empty()
                                               ? "no SRD route defined for this pair."
                                               : "no SRD route defined for this pair or its FIR exit.");
-    case FpcResult::Ok:    return head + "route and level conform to the SRD.";
-    case FpcResult::Min:
-    case FpcResult::Max: {
+    case SrdResult::Ok:    return head + "route and level conform to the SRD.";
+    case SrdResult::Min:
+    case SrdResult::Max: {
         std::string s = head + "route is valid but the level is outside the SRD limits. Allowed:";
         for (size_t i : c) {
             const auto& r = d.rows[i];
@@ -372,7 +372,7 @@ inline std::string ExplainFpc(const SrdData& d, const std::string& adep, const s
         }
         return s;
     }
-    case FpcResult::Route: break;
+    case SrdResult::Route: break;
     }
     std::string s = head + "filed route does not match the SRD. Expected one of:";
     size_t shown = 0;
