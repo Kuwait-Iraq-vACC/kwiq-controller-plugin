@@ -175,6 +175,7 @@ struct SrdRoute {
 struct SrdData {
     std::vector<SrdRoute> rows;
     std::unordered_map<std::string, std::vector<size_t>> pair; // "ADEP|ADES" for airport-airport rows
+    std::unordered_map<std::string, std::vector<size_t>> toPoint; // "ADEP|POINT" for airport-to-waypoint rows (FIR exits)
     std::vector<size_t> wp;                                    // rows with a waypoint end
     std::string version;
 };
@@ -184,11 +185,12 @@ inline bool IsAirportCode(const std::string& s) {
     return true;
 }
 inline void BuildSrd(SrdData& d) {
-    d.pair.clear(); d.wp.clear();
+    d.pair.clear(); d.toPoint.clear(); d.wp.clear();
     for (size_t i = 0; i < d.rows.size(); i++) {
         const auto& r = d.rows[i];
-        if (IsAirportCode(r.adep) && IsAirportCode(r.ades)) d.pair[r.adep + "|" + r.ades].push_back(i);
-        else d.wp.push_back(i);
+        if (IsAirportCode(r.adep) && IsAirportCode(r.ades)) { d.pair[r.adep + "|" + r.ades].push_back(i); continue; }
+        if (IsAirportCode(r.adep)) d.toPoint[r.adep + "|" + r.ades].push_back(i);
+        d.wp.push_back(i);
     }
 }
 inline SrdData ParseSrd(const std::string& body) {
@@ -224,13 +226,82 @@ inline int ParseLevelFt(const std::string& in) {
     return v < 1000 ? v * 100 : v;
 }
 
-// SRD rows that apply to a flight. Airport-pair rows (ADEP|ADES) take precedence; only when
-// there are none do enroute rows apply (waypoint ends that are both on the filed route).
+// ---- FIR exit points (UK Controller Plugin: intention/FirExitPoint, ExitCone, CachedAircraftFirExitGenerator) ----
+// Core /api/plugin/fir-exits (plain text):  EXIT|<point>|<from heading>|<to heading>|<internal 0/1>
+// An aircraft leaves the airspace at a listed point when its track from that point to the next one on its
+// route lies in the point's exit cone (from..to, clockwise, degrees). Internal points are on the OKAC/ORBB
+// boundary; the others are where the vACC's airspace ends.
+struct FirExit { std::string point; int from = 0, to = 360; bool internal = false; };
+using FirExits = std::unordered_map<std::string, FirExit>;
+
+inline FirExits ParseFirExits(const std::string& body) {
+    FirExits m;
+    auto heading = [](const std::string& s, int& out) {
+        std::string t = Trim(s);
+        if (t.empty() || t.size() > 3 || !AllDigits(t, 0, t.size())) return false;
+        out = std::atoi(t.c_str());
+        return out <= 360;
+    };
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(Trim(line), '|');
+        if (f.size() < 4 || f[0] != "EXIT") continue;
+        FirExit e;
+        e.point = Upper(Trim(f[1]));
+        if (e.point.empty() || !heading(f[2], e.from) || !heading(f[3], e.to)) continue;
+        e.internal = f.size() > 4 && Trim(f[4]) == "1";
+        m[e.point] = e;
+    }
+    return m;
+}
+// UKCP ExitCone::AircraftIsExiting; a cone that wraps through north has to <= from
+inline bool InExitCone(const FirExit& e, int heading) {
+    return e.to <= e.from ? heading >= e.from || heading <= e.to : heading >= e.from && heading <= e.to;
+}
+// A point on the route, with the track to the next one (-1 for the last point)
+struct RoutePoint { std::string name; int track = -1; };
+struct AircraftExit { std::string internal, external; };     // empty when it does not leave there
+// UKCP CachedAircraftFirExitGenerator::Generate: the first exit along the route; an internal one only counts
+// before the aircraft leaves the vACC's airspace
+inline AircraftExit FindFirExit(const FirExits& exits, const std::vector<RoutePoint>& route) {
+    AircraftExit out;
+    for (const auto& p : route) {
+        auto it = exits.find(Upper(p.name));
+        if (it == exits.end() || p.track < 0 || !InExitCone(it->second, p.track)) continue;
+        if (it->second.internal) { if (out.internal.empty()) out.internal = it->first; continue; }
+        out.external = it->first;
+        break;
+    }
+    return out;
+}
+// Airports in the vACC's airspace: ICAO prefixes, "OK,OR" by default (srd.domestic_prefixes in Core)
+inline bool Domestic(const std::string& airport, const std::string& prefixes) {
+    for (const auto& p : SplitChar(prefixes, ',')) {
+        std::string t = Upper(Trim(p));
+        if (!t.empty() && Upper(airport).compare(0, t.size(), t) == 0) return true;
+    }
+    return false;
+}
+// What SRD destination to use for a flight: its destination when it stays in the vACC's airspace, else where
+// it leaves it (UKCP SrdSearchDialog::PrepopulateSearch); empty when that is not known
+inline std::string SrdEnd(const std::string& ades, const std::string& prefixes, const AircraftExit& exit) {
+    if (Domestic(ades, prefixes)) return ades;
+    return !exit.external.empty() ? exit.external : exit.internal;
+}
+
+// SRD rows that apply to a flight. Airport-pair rows (ADEP|ADES) take precedence. Then, for a flight
+// leaving the vACC's airspace, rows from ADEP to its FIR exit point (failing that, its exit between OKAC
+// and ORBB). Only when there are none do enroute rows apply (waypoint ends that are both on the filed route).
 inline void Candidates(const SrdData& d, const std::string& adep, const std::string& ades,
-                       const std::vector<std::string>& filed, std::vector<size_t>& out) {
+                       const std::vector<std::string>& filed, std::vector<size_t>& out,
+                       const AircraftExit& exit = {}) {
     out.clear();
     auto it = d.pair.find(adep + "|" + ades);
     if (it != d.pair.end()) { out = it->second; return; }
+    for (const std::string* point : { &exit.external, &exit.internal }) {
+        if (point->empty()) continue;
+        auto e = d.toPoint.find(adep + "|" + *point);
+        if (e != d.toPoint.end()) { out = e->second; return; }
+    }
     auto on = [&](const std::string& end, const std::string& airport) {
         return IsAirportCode(end) ? end == airport : std::find(filed.begin(), filed.end(), end) != filed.end();
     };
@@ -240,9 +311,9 @@ inline void Candidates(const SrdData& d, const std::string& adep, const std::str
 enum class FpcResult { None, Ok, Route, Min, Max };
 
 inline FpcResult CheckFpc(const SrdData& d, const std::string& adep, const std::string& ades,
-                          const std::vector<std::string>& filed, int rflFt) {
+                          const std::vector<std::string>& filed, int rflFt, const AircraftExit& exit = {}) {
     std::vector<size_t> c;
-    Candidates(d, adep, ades, filed, c);
+    Candidates(d, adep, ades, filed, c, exit);
     if (c.empty()) return FpcResult::None;
     bool routeOk = false;
     FpcResult lvl = FpcResult::None;
@@ -257,13 +328,19 @@ inline FpcResult CheckFpc(const SrdData& d, const std::string& adep, const std::
     return routeOk ? lvl : FpcResult::Route;
 }
 inline std::string ExplainFpc(const SrdData& d, const std::string& adep, const std::string& ades,
-                              const std::string& filedRte, int rflFt) {
+                              const std::string& filedRte, int rflFt, const AircraftExit& exit = {}) {
     auto filed = NormaliseRoute(filedRte);
     std::vector<size_t> c;
-    Candidates(d, adep, ades, filed, c);
-    std::string head = adep + " -> " + ades + " " + (rflFt > 0 ? FlStr(rflFt) : "FL---") + ": ";
-    switch (CheckFpc(d, adep, ades, filed, rflFt)) {
-    case FpcResult::None:  return head + "no SRD route defined for this pair.";
+    Candidates(d, adep, ades, filed, c, exit);
+    // Say which exit the rows are for, when it was one
+    std::string via;
+    if (!c.empty() && IsAirportCode(d.rows[c[0]].adep) && !IsAirportCode(d.rows[c[0]].ades)) via = " (FIR exit " + d.rows[c[0]].ades + ")";
+    else if (c.empty() && !exit.external.empty()) via = " (FIR exit " + exit.external + ")";
+    std::string head = adep + " -> " + ades + via + " " + (rflFt > 0 ? FlStr(rflFt) : "FL---") + ": ";
+    switch (CheckFpc(d, adep, ades, filed, rflFt, exit)) {
+    case FpcResult::None:  return head + (exit.external.empty() && exit.internal.empty()
+                                              ? "no SRD route defined for this pair."
+                                              : "no SRD route defined for this pair or its FIR exit.");
     case FpcResult::Ok:    return head + "route and level conform to the SRD.";
     case FpcResult::Min:
     case FpcResult::Max: {

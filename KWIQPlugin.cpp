@@ -3,7 +3,8 @@
 //   * VCH (Virtual Controller Helper, GPL-3.0, Jan Fries) is built in: CKWIQPlugin extends CVCHPlugin
 //   * Event routes (OK / CHK) + "Open event routes window"
 //   * Event Flag (EV) / Event Slot from VATCAN bookings (see VatsimAPI.cpp)
-//   * FPC against the SRD, "Explain FPC result", "Open SRD search window"
+//   * FPC against the SRD, "Explain FPC result", "Open SRD search window"; flights leaving the vACC's airspace
+//     are checked up to their FIR exit point (as in the UK Controller Plugin)
 //
 // All route data comes from Core (Laravel). License: GPL-3.0-or-later, see LICENSE and NOTICE.md.
 
@@ -36,6 +37,7 @@ static const char* CORE_EVENT_URL       = CORE_BASE "/event";
 static const char* CORE_SRD_URL         = CORE_BASE "/srd";
 static const char* CORE_SRD_VERSION_URL = CORE_BASE "/srd/version";
 static const char* CORE_SECTORS_URL     = CORE_BASE "/sectors";
+static const char* CORE_FIR_EXITS_URL   = CORE_BASE "/fir-exits";
 // myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
 static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
 // EuroScope setup guide, opened from the incorrect EuroScope version popup until Core sends euroscope.setup_url
@@ -849,7 +851,7 @@ public:
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
-                std::to_string(sectors_.size()) + " | ";
+                std::to_string(sectors_.size()) + " | FIR exits " + std::to_string(firExits_.size()) + " | ";
             s += ev_.active
                 ? ev_.name + " | event routes " + std::to_string(ev_.routes.size()) +
                   " | VATCAN code " + ev_.vatcanCode + " | slots " + std::to_string(CDataHandler::SlotCount()) +
@@ -1083,7 +1085,7 @@ private:
 
     struct CacheEntry {
         bool valid = false;
-        unsigned evGen = 0, srdGen = 0;
+        unsigned evGen = 0, srdGen = 0, exitGen = 0;
         int rfl = 0;
         std::string adep, ades, rte, today;
         kwiq::RouteResult ev = kwiq::RouteResult::None;
@@ -1101,15 +1103,31 @@ private:
         std::lock_guard<std::mutex> g(mu_);
         if (cache_.size() > 5000) cache_.clear();
         CacheEntry& e = cache_[cs];
-        if (!(e.valid && e.evGen == evGen_ && e.srdGen == srdGen_ && e.rfl == rfl && e.today == today &&
-              e.adep == o && e.ades == a && e.rte == r)) {
+        if (!(e.valid && e.evGen == evGen_ && e.srdGen == srdGen_ && e.exitGen == exitGen_ && e.rfl == rfl &&
+              e.today == today && e.adep == o && e.ades == a && e.rte == r)) {
             auto toks = kwiq::NormaliseRoute(r);
             e.ev  = kwiq::CheckEventRoute(ev_, o, a, toks, today);
-            e.fpc = kwiq::CheckFpc(srd_, o, a, toks, rfl);
-            e.evGen = evGen_; e.srdGen = srdGen_; e.rfl = rfl; e.today = today;
+            e.fpc = kwiq::CheckFpc(srd_, o, a, toks, rfl, FirExitLocked(fp, a));
+            e.evGen = evGen_; e.srdGen = srdGen_; e.exitGen = exitGen_; e.rfl = rfl; e.today = today;
             e.adep = o; e.ades = a; e.rte = r; e.valid = true;
         }
         ev = e.ev; fpc = e.fpc;
+    }
+    // ---- FIR exit (UK Controller Plugin: CachedAircraftFirExitGenerator) ----------------------
+    // Where a flight leaves the vACC's airspace, from EuroScope's extracted route and Core's exit points.
+    // Only looked for when the destination is outside it; callers hold mu_.
+    kwiq::AircraftExit FirExitLocked(EuroScopePlugIn::CFlightPlan& fp, const std::string& ades) {
+        if (firExits_.empty() || kwiq::Domestic(ades, domesticPrefixes_)) return {};
+        std::vector<kwiq::RoutePoint> pts;
+        EuroScopePlugIn::CFlightPlanExtractedRoute er = fp.GetExtractedRoute();
+        int n = er.GetPointsNumber();
+        for (int i = 0; i < n; i++) {
+            kwiq::RoutePoint p;
+            p.name = er.GetPointName(i);
+            if (i + 1 < n) p.track = ((int)er.GetPointPosition(i).DirectionTo(er.GetPointPosition(i + 1)) % 360 + 360) % 360;
+            pts.push_back(std::move(p));
+        }
+        return kwiq::FindFirExit(firExits_, pts);
     }
     const std::string& TodayCached() {
         long day = (long)(std::time(nullptr) / 86400);
@@ -1133,6 +1151,11 @@ private:
         if (fp.IsValid()) {
             adep = kwiq::Upper(fp.GetFlightPlanData().GetOrigin());
             ades = kwiq::Upper(fp.GetFlightPlanData().GetDestination());
+            {   // leaving the vACC's airspace: search to the FIR exit point (UKCP SrdSearchDialog)
+                std::lock_guard<std::mutex> g(mu_);
+                std::string end = kwiq::SrdEnd(ades, domesticPrefixes_, FirExitLocked(fp, ades));
+                if (!end.empty()) ades = end;
+            }
             int rfl = fp.GetFinalAltitude();
             if (rfl > 0) lvl = std::to_string(rfl / 100);
         }
@@ -1146,8 +1169,9 @@ private:
         std::string msg;
         {
             std::lock_guard<std::mutex> g(mu_);
-            msg = kwiq::ExplainFpc(srd_, kwiq::Upper(d.GetOrigin()), kwiq::Upper(d.GetDestination()),
-                                   d.GetRoute(), fp.GetFinalAltitude());
+            std::string ades = kwiq::Upper(d.GetDestination());
+            msg = kwiq::ExplainFpc(srd_, kwiq::Upper(d.GetOrigin()), ades, d.GetRoute(), fp.GetFinalAltitude(),
+                                   FirExitLocked(fp, ades));
         }
         DisplayUserMessage("KWIQ Controller Plugin", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
     }
@@ -1287,6 +1311,8 @@ private:
         else if (on && !wasOn) Notify("Enabled again.", false);
 
         std::string motd = c.Get("plugin.message");
+        std::string domestic = Trim(c.Get("srd.domestic_prefixes", "OK,OR"));
+        if (domestic.empty()) domestic = "OK,OR";
         {
             std::lock_guard<std::mutex> g(mu_);
             ui_ = u;
@@ -1301,6 +1327,7 @@ private:
             esUrl_ = Trim(c.Get("euroscope.setup_url", ES_SETUP_URL));
             if (esUrl_.empty()) esUrl_ = ES_SETUP_URL;
             esConfigured_ = true;
+            if (domestic != domesticPrefixes_) { domesticPrefixes_ = domestic; exitGen_++; }
         }
         CheckSectorFile(false);
     }
@@ -1437,6 +1464,16 @@ private:
                     sectors_ = std::move(m);
                 } else fail("Sectors", err);
             }
+            if (doSrd) {                               // FIR exit points, refreshed with the SRD
+                std::string exitErr;
+                bool ok = kwiq_net::HttpGet(CORE_FIR_EXITS_URL, body, exitErr);
+                if (ok || exitErr == "HTTP 404") {     // 404: Core has none yet, so no exits
+                    ClearError("FIR exits");
+                    FirExits m = ok ? ParseFirExits(body) : FirExits{};
+                    std::lock_guard<std::mutex> g(mu_);
+                    firExits_ = std::move(m); exitGen_++;
+                } else fail("FIR exits", exitErr);
+            }
         } catch (...) {}
         busy_ = false;
     }
@@ -1474,7 +1511,9 @@ private:
     kwiq::EventData ev_;
     kwiq::SrdData srd_;
     kwiq::SectorMap sectors_;
-    unsigned evGen_ = 1, srdGen_ = 1;
+    kwiq::FirExits firExits_;
+    std::string domesticPrefixes_ = "OK,OR";                        // Core's srd.domestic_prefixes
+    unsigned evGen_ = 1, srdGen_ = 1, exitGen_ = 1;
     std::unordered_map<std::string, CacheEntry> cache_;
     std::vector<std::pair<std::string, bool>> pending_;
     UiCfg ui_;
