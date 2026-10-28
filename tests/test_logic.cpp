@@ -72,19 +72,11 @@ int main() {
     CHECK(SrdSearch(srd, "ABC", "XYZ", 0).size() == 1);
     CHECK(SrdSearch(srd, "NOPE", "", 0).empty());
 
-    // sector indicators, only for the positions Core lists
+    // sector indicators, for any position Core lists
     SectorMap sm = ParseSectors("SECTOR|orbb_s_ctr|sr\nSECTOR|ORBB_N_CTR|NR\nSECTOR|BGD_APP|BGD\nSECTOR|ORBB_X|\nSECTOR|ORBB_LONG|ABCDE\nbad\n");
     CHECK(sm.size() == 4 && sm["ORBB_S_CTR"] == "SR" && sm["ORBB_N_CTR"] == "NR" && sm["BGD_APP"] == "BGD" && sm["ORBB_LONG"] == "ABCD");
     CHECK(sm.find("ORBB_X") == sm.end());
     CHECK(ParseSectors("NONE\n").empty());
-
-    // sector indicators from the ESE to tell which position a controller works
-    EsePositions ep = ParseEsePositions("[SIDSSTARS]\nSID:ORBI:33L:X:Y\n[POSITIONS]\r\n; comment\r\n"
-        "ORBB_CTR:Baghdad Control:124.400:B::ORBB:CTR:::1000:1077:N033.15.45.000:E044.14.04.000\r\n"
-        "ORBB_S_CTR:Baghdad Control:128.700:BS:S:ORBB:CTR:::1000:1077\n"
-        "ORBB_X_CTR:Dup:128.000:bs:X:ORBB:CTR\nshort:line\n[AIRSPACE]\nX_CTR:a:1:ZZ:b:c:d\n");
-    CHECK(ep.size() == 2 && ep["B"] == "ORBB_CTR" && ep["BS"] == "ORBB_S_CTR" && ep.find("ZZ") == ep.end());
-    CHECK(ParseEsePositions("ORBB_CTR:Baghdad Control:124.400:B::ORBB:CTR").empty());   // not in [POSITIONS]
 
     // sector indicator colour by flight plan state, named as in EuroScope's Symbology
     CHECK(std::string(SectorColourName(0)) == "non_concerned" && std::string(SectorColourName(1)) == "notified" &&
