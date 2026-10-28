@@ -304,7 +304,7 @@ inline std::vector<size_t> SrdSearch(const SrdData& d, const std::string& adep, 
 // ---- Sector indicators -------------------------------------------------------
 // Core /api/plugin/sectors (plain text):  SECTOR|<position callsign>|<alias, max 4 chars>
 // The alias is what controllers see on the radar (e.g. ORBB_S_CTR -> SR, BGD_APP -> BGD); it is
-// independent of the id used in the ESE file. Any position Core lists gets one.
+// independent of the id used in the ESE file. Only the positions Core lists get one.
 using SectorMap = std::unordered_map<std::string, std::string>;   // callsign -> alias
 
 inline SectorMap ParseSectors(const std::string& body) {
@@ -316,6 +316,27 @@ inline SectorMap ParseSectors(const std::string& body) {
         if (alias.size() > 4) alias.resize(4);
         if (cs.empty() || alias.empty()) continue;
         m[cs] = alias;
+    }
+    return m;
+}
+
+// A relief callsign or a controller covering another position (ORBB__CTR, ORBB_S1_CTR ...) counts as the
+// position EuroScope identifies it as in the ESE's [POSITIONS] (by prefix, suffix and frequency): the plugin
+// gets that position's ID, and the ESE line with that ID names the position, which Core may list.
+// [POSITIONS] lines:  NAME:RADIO CALLSIGN:FREQUENCY:ID:MIDDLE LETTER:PREFIX:SUFFIX:...
+using EsePositions = std::unordered_map<std::string, std::string>;   // position ID -> position name
+inline EsePositions ParseEsePositions(const std::string& text) {
+    EsePositions m;
+    bool in = false;
+    for (const auto& line : SplitChar(text, '\n')) {
+        std::string t = Trim(line);
+        if (t.empty() || t[0] == ';') continue;
+        if (t[0] == '[') { in = Upper(t).compare(0, 11, "[POSITIONS]") == 0; continue; }
+        if (!in) continue;
+        auto f = SplitChar(t, ':');
+        if (f.size() < 7) continue;
+        std::string name = Upper(Trim(f[0])), id = Upper(Trim(f[3]));
+        if (!name.empty() && !id.empty()) m.emplace(id, name);          // the first line with an ID wins
     }
     return m;
 }
