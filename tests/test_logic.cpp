@@ -72,10 +72,10 @@ int main() {
     CHECK(SrdSearch(srd, "ABC", "XYZ", 0).size() == 1);
     CHECK(SrdSearch(srd, "NOPE", "", 0).empty());
 
-    // sector indicators, for any position Core lists
-    SectorMap sm = ParseSectors("SECTOR|orbb_s_ctr|sr\nSECTOR|ORBB_N_CTR|NR\nSECTOR|BGD_APP|BGD\nSECTOR|ORBB_X|\nSECTOR|ORBB_LONG|ABCDE\nbad\n");
-    CHECK(sm.size() == 4 && sm["ORBB_S_CTR"] == "SR" && sm["ORBB_N_CTR"] == "NR" && sm["BGD_APP"] == "BGD" && sm["ORBB_LONG"] == "ABCD");
-    CHECK(sm.find("ORBB_X") == sm.end());
+    // sector indicators, only for the ESE position IDs Core lists, shown as their alias
+    SectorMap sm = ParseSectors("SECTOR|bs|sr\nSECTOR|BN|NR\nSECTOR|BGA|BGD\nSECTOR|BX|\nSECTOR|BL|ABCDE\nbad\n");
+    CHECK(sm.size() == 4 && sm["BS"] == "SR" && sm["BN"] == "NR" && sm["BGA"] == "BGD" && sm["BL"] == "ABCD");
+    CHECK(sm.find("BX") == sm.end());
     CHECK(ParseSectors("NONE\n").empty());
 
     // sector indicator colour by flight plan state, named as in EuroScope's Symbology
