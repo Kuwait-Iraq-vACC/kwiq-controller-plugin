@@ -102,6 +102,13 @@ int main() {
     CHECK(SrdSearch(srd, "", "", 0).size() == 3);
     CHECK(SrdSearch(srd, "ABC", "XYZ", 0).size() == 1);
     CHECK(SrdSearch(srd, "NOPE", "", 0).empty());
+    // SRD search window columns and notes
+    CHECK(SrdMinText(srd.rows[0]) == "100" && SrdMaxText(srd.rows[0]) == "300");
+    CHECK(SrdMinText(srd.rows[1]) == "MC" && SrdMaxText(srd.rows[2]) == "-");
+    CHECK(SrdNotesText(srd.rows[0]) == "Jets only" && SrdNotesText(srd.rows[1]) == "No notes.");
+    SrdRoute fra; fra.rte = "ABC <FRA> XYZ";
+    CHECK(HasFreeRoute(fra.rte) && !HasFreeRoute(srd.rows[0].rte));
+    CHECK(SrdNotesText(fra).find("Free Route Airspace") != std::string::npos);
 
     // sector indicators, for any position Core lists
     SectorMap sm = ParseSectors("SECTOR|orbb_s_ctr|sr\nSECTOR|ORBB_N_CTR|NR\nSECTOR|BGD_APP|BGD\nSECTOR|ORBB_X|\nSECTOR|ORBB_LONG|ABCDE\nbad\n");
