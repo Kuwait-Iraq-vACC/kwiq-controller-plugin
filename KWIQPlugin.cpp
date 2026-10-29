@@ -861,18 +861,17 @@ public:
         return CVCHPlugin::OnCompileCommand(sCommandLine);
     }
 
-    // main thread: sector indicator of the position tracking an aircraft. The ID of the ESE position
-    // EuroScope identifies that controller as right now (by prefix, suffix and frequency, so a relief callsign
-    // or a controller covering another position gets the position actually worked), else Core's alias for
-    // the callsign. Empty if nobody tracks it or neither is known.
+    // main thread: sector indicator of the position tracking an aircraft: Core's alias for the ID of the ESE
+    // position EuroScope identifies that controller as right now (by prefix, suffix and frequency, so a relief
+    // callsign or a controller covering another position gets the position actually worked). Empty if nobody
+    // tracks it, EuroScope does not identify the controller, or Core does not list that position.
     std::string SectorFor(const char* trackerCallsign) {
         std::string cs = kwiq::Upper(trackerCallsign);
         EuroScopePlugIn::CController me = ControllerMyself();
         EuroScopePlugIn::CController c = me.IsValid() && kwiq::Upper(me.GetCallsign()) == cs ? me : ControllerSelect(trackerCallsign);
-        if (c.IsValid() && c.GetPositionIdentified() && c.GetPositionId() && *c.GetPositionId())
-            return kwiq::Upper(c.GetPositionId()).substr(0, 4);
+        if (!c.IsValid() || !c.GetPositionIdentified() || !c.GetPositionId() || !*c.GetPositionId()) return "";
         std::lock_guard<std::mutex> g(mu_);
-        auto it = sectors_.find(cs);
+        auto it = sectors_.find(kwiq::Upper(c.GetPositionId()));
         return it == sectors_.end() ? std::string() : it->second;
     }
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_; }

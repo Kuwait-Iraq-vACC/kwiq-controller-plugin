@@ -302,20 +302,20 @@ inline std::vector<size_t> SrdSearch(const SrdData& d, const std::string& adep, 
 
 
 // ---- Sector indicators -------------------------------------------------------
-// Core /api/plugin/sectors (plain text):  SECTOR|<position callsign>|<alias, max 4 chars>
-// The alias is what controllers see on the radar (e.g. ORBB_S_CTR -> SR, BGD_APP -> BGD); it is
-// independent of the id used in the ESE file. Any position Core lists gets one.
-using SectorMap = std::unordered_map<std::string, std::string>;   // callsign -> alias
+// Core /api/plugin/sectors (plain text):  SECTOR|<ESE position ID>|<alias, max 4 chars>
+// Only the positions Core lists get an indicator, and the alias is what controllers see on the radar
+// (e.g. BS -> SR for ORBB_S_CTR). The ID is the one in the ESE's [POSITIONS], as EuroScope gives it.
+using SectorMap = std::unordered_map<std::string, std::string>;   // ESE position ID -> alias
 
 inline SectorMap ParseSectors(const std::string& body) {
     SectorMap m;
     for (const auto& line : SplitChar(body, '\n')) {
         auto f = SplitChar(Trim(line), '|');
         if (f[0] != "SECTOR" || f.size() < 3) continue;
-        std::string cs = Upper(Trim(f[1])), alias = Upper(Trim(f[2]));
+        std::string id = Upper(Trim(f[1])), alias = Upper(Trim(f[2]));
         if (alias.size() > 4) alias.resize(4);
-        if (cs.empty() || alias.empty()) continue;
-        m[cs] = alias;
+        if (id.empty() || alias.empty()) continue;
+        m[id] = alias;
     }
     return m;
 }
