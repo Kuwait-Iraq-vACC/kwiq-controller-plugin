@@ -5,6 +5,9 @@ name: build
 #                the pull request is closed. Each one is linked in a comment on the pull request.
 #                Core never offers pre-releases.
 # manual run on another branch: a test pre-release named after the branch.
+# A push or pull request is only released when it changes what goes into the DLL (sources, CMakeLists.txt,
+# vcpkg.json, libs/). Anything else (tests, docs, workflows) is still tested and built, but not released.
+# A manual run always releases.
 on:
   push:
     branches: [main]
@@ -22,6 +25,32 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.diff.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check whether the DLL's inputs changed
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then echo "release=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # a pull request is compared as a whole, so it keeps its test build after a later test-only push
+          if ! changed=$(git diff --name-only "$BASE" HEAD); then
+            echo "Could not compare with $BASE, releasing anyway"; echo "release=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "$changed"
+          if echo "$changed" | grep -qE '^(libs/.*|[^/]+\.(cpp|c|h|hpp)|CMakeLists\.txt|vcpkg\.json)$'; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changes to the DLL's inputs, so no release"; echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
@@ -99,9 +128,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [changes, build]
     # pull requests from forks get a read-only token, so they only get the artifact
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >
+      needs.changes.outputs.release == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
