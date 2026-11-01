@@ -2,7 +2,8 @@ name: build
 
 # main:          every build is published as a release (v0.5.0.<run>), which Core offers to controllers
 # pull requests: each one gets a test pre-release (pr-<number>), replaced on every push and removed when
-#                the pull request is closed. Core never offers pre-releases.
+#                the pull request is closed. Each one is linked in a comment on the pull request.
+#                Core never offers pre-releases.
 # manual run on another branch: a test pre-release named after the branch.
 on:
   push:
@@ -12,7 +13,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # to create releases
+  contents: write        # to create releases
+  pull-requests: write   # to comment on a pull request when its test build is published
 
 concurrency:
   group: build-${{ github.event.pull_request.number || github.ref }}
@@ -127,6 +129,10 @@ jobs:
           gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$tag" KWIQPlugin.dll --prerelease --target "$SHA" --title "$title" \
             --notes "For testing only. Core does not offer pre-releases to controllers. Built from ${SHA:0:7}."
+          if [ -n "$PR" ]; then
+            url=$(gh release view "$tag" --json url -q .url)
+            gh pr comment "$PR" --body "Test build $VERSION has been published as a pre-release: [$tag]($url) (built from ${SHA:0:7})."
+          fi
 
   cleanup:
     # a closed pull request no longer needs its test build
