@@ -5,6 +5,63 @@ static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 
 int main() {
+    // ---- edge cases (#52): every pure function, with empty input, CRLF, short and malformed lines ----
+    CHECK(Upper("okbk_twr") == "OKBK_TWR" && Lower("OKBK") == "okbk" && Upper("").empty());
+    CHECK(Trim(" \t a b \r\n") == "a b" && Trim("").empty() && Trim(" \r\n ").empty());
+    CHECK(SplitWs("  a \t b\r\nc ") == std::vector<std::string>({ "a", "b", "c" }) && SplitWs(" \r\n").empty());
+    CHECK(SplitChar("", '|').size() == 1 && SplitChar("a||b|", '|').size() == 4 && SplitChar("a||b|", '|')[1].empty());
+    CHECK(SanitiseCode("ab-c_1 /?&") == "ab-c_1" && SanitiseCode("").empty());
+    CHECK(AllDigits("ab123", 2, 3) && !AllDigits("ab123", 2, 4) && !AllDigits("12a", 0, 3) && AllDigits("", 0, 0));
+    CHECK(ToInt("42") == 42 && ToInt(" -7x") == -7 && ToInt("") == 0 && ToInt("abc", 5) == 5);
+    CHECK(ToInt("99999999999999999999") == INT_MAX && ToInt("-99999999999") == INT_MIN);     // clamped, not undefined
+    // only web pages are ever opened (#44)
+    CHECK(IsWebLink("https://docs.kuwait-iraqvacc.net/x?y=1") && IsWebLink("HTTP://example.net") && IsWebLink("http://127.0.0.1:8080/"));
+    CHECK(!IsWebLink("") && !IsWebLink("https://") && !IsWebLink("https:///etc") && !IsWebLink("file:///C:/Windows/notepad.exe"));
+    CHECK(!IsWebLink("C:\\Windows\\System32\\cmd.exe") && !IsWebLink("https://a b") && !IsWebLink("https://x\"y") && !IsWebLink("ms-settings:"));
+    CHECK(!IsWebLink("https://x\r\n") && !IsWebLink("javascript:alert(1)"));
+    CHECK(!IsSpeedLevel("") && !IsSpeedLevel("N0450") && !IsSpeedLevel("N0450F35") && !IsSpeedLevel("N0450X350") && IsSpeedLevel("N0450M0840"));
+    CHECK(NormaliseRoute("").empty() && NormaliseRoute(" DCT \r\n N0450F350 ").empty() &&
+          NormaliseRoute("abc/n0450f350\r\n") == std::vector<std::string>({ "ABC" }));
+    CHECK(MatchTokens({}, {}) && MatchTokens({}, { "A" }) && !MatchTokens({ "A" }, {}) && MatchTokens({ "A", "B" }, { "A", "X", "B" }));
+    CHECK(!IsDate("") && !IsDate("2026-11-0x") && !IsDate("2026/11/07"));
+    CHECK(!ParseCoreEvent("").active && ParseCoreEvent("").routes.empty() && RoutesForDate(EventData{}, "2026-11-07").empty());
+    {
+        EventData e = ParseCoreEvent("ROUTE|2026-11-07|OKBK|ORBI|DCT\r\nEVENT\r\nEVENT|Short\r\nROUTE|2026-11-07|OKBK\r\n");
+        CHECK(e.active && e.name == "Short" && e.vatcanCode.empty() && e.routes.size() == 1 && e.routes[0].ades == "ORBI");
+        CHECK(ParseCoreEvent("ROUTE|2026-11-07|OKBK|ORBI|DCT\n").routes.empty());              // routes without an event
+    }
+    {
+        SrdData s = ParseSrd("VERSION|v2\r\nSRD|okbk|orbi|99999999999|x|DCT ABC|\r\nSRD|OKBK|ORBI|1|2\r\nSRD| |ORBI|||ABC|\r\n");
+        CHECK(s.version == "v2" && s.rows.size() == 1 && s.rows[0].minLvl == INT_MAX && s.rows[0].maxLvl == 0 && s.rows[0].notes.empty());
+        CHECK(ParseSrd("").rows.empty() && ParseSrd("").version.empty() && ParseSrd("").pair.empty());
+        SrdData d;
+        d.rows = { SrdRoute{ "OKBK", "ORBI", "A", "", 0, 0, { "A" } }, SrdRoute{ "ABC", "ORBI", "B", "", 0, 0, { "B" } } };
+        BuildSrd(d);
+        CHECK(d.pair.size() == 1 && d.wp.size() == 1 && d.wp[0] == 1);
+        std::vector<size_t> out;
+        Candidates(d, "OKBK", "ORBI", { "A" }, out);
+        CHECK(out.size() == 1 && out[0] == 0);                            // the airport pair wins
+        Candidates(d, "OTHH", "ORBI", { "ABC", "B" }, out);
+        CHECK(out.size() == 1 && out[0] == 1);                            // enroute: ABC filed, ORBI the destination
+        Candidates(d, "OTHH", "ORBI", { "B" }, out);
+        CHECK(out.empty());
+        BuildSrd(d);
+        CHECK(d.pair.size() == 1 && d.wp.size() == 1);                    // built again from scratch
+    }
+    CHECK(ParseLevelFt("1234567") == 0 && ParseLevelFt(" fl350\r\n") == 35000 && ParseLevelFt("999") == 99900);
+    CHECK(ParseSectors("").empty() && ParseSectors("SECTOR|BS|SR\r\n").at("BS") == "SR" && ParseSectors("SECTOR|BS\r\nSECTOR||SR\r\n").empty());
+    {
+        PluginConfig c = ParseConfig("|nokey\r\na|1|2\r\nb| \r\nnobar\r\nn|99999999999\r\n");
+        CHECK(c.kv.size() == 3 && c.Get("a") == "1|2" && c.Get("b", "x").empty() && c.GetBool("b", true) && c.GetBool("a", false));
+        CHECK(c.GetInt("n", 5, 0, 100) == 100 && ParseConfig("").kv.empty() && !PluginConfig{ { { "f", "No" } } }.GetBool("f", true));
+    }
+    CHECK(ParseColour("#ff8000", 1) == 0x000080FFul && ParseColour("", 7) == 7 && ParseColour("#FF80001", 7) == 7 && ParseColour("FF8000", 7) == 7);
+    CHECK(CompareVersions("", "") == 0 && CompareVersions("0.6.0.42", "0.6.0") > 0 && CompareVersions("1.x", "1.0") == 0 &&
+          CompareVersions("99999999999.0", "1.0") > 0);
+    CHECK(!FindAirac("").valid() && !FindAirac("2610/").valid() && FindAirac("x2610/7y").rev == 7 && !FindAirac("261/02").valid());
+    CHECK(QueryValue("", "key").empty() && QueryValue("GET /?key HTTP/1.1\r\n", "key").empty() && QueryValue("GET /?key= HTTP/1.1", "key").empty());
+    CHECK(QueryValue("GET /?a=1&key=kwiq_x", "key") == "kwiq_x");
+
     // route matching
     CHECK(RouteMatches("DCT ABC UL123 XYZ DCT", "N0450F350 ABC/N0450F350 UL123 XYZ"));
     CHECK(RouteMatches("ABC UL123 XYZ", "kuxx1a abc dct ul123 def xyz star1b"));
