@@ -827,6 +827,16 @@ inline int DiscordPick(const std::vector<DiscordEntry>& entries, const DiscordCo
     }
     return fallback;
 }
+// The longest start of text that fits in maxBytes without ending inside a UTF-8 character (#50). Discord's
+// limits are in bytes (128 for texts, 32 for button labels), and half a character is invalid text to it.
+inline std::string Utf8Truncate(const std::string& text, size_t maxBytes) {
+    if (text.size() <= maxBytes) return text;
+    size_t n = maxBytes;                                      // text[n] is the first byte left out
+    while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80) n--;   // inside a character: cut before it
+    return text.substr(0, n);
+}
+// Discord refuses a button whose URL is longer than this
+constexpr size_t kDiscordUrlMax = 512;
 // DiscordEuroScope's lookup: the ICAO prefix of the callsign and the primary frequency
 inline std::string DiscordRadioCallsign(const DiscordConfig& c, const std::string& callsign, const std::string& freq) {
     std::string icao = Upper(callsign.substr(0, callsign.find('_')));

@@ -134,7 +134,7 @@ void KwiqDiscord::Tick(std::time_t now, const std::string& eventName) {
     auto text = [&](const std::vector<kwiq::DiscordEntry>& list, int pick, size_t i) {
         std::string out;
         if (pick >= 0 && i < list[pick].v.size()) kwiq::DiscordFormat(list[pick].v[i], values, out);
-        return out.substr(0, 127);                      // Discord's limit is 128 bytes
+        return kwiq::Utf8Truncate(out, 127);            // Discord's limit is 128 bytes; never half a character (#50)
     };
     int m = kwiq::DiscordPick(cfg.messages, x, values, d.roll);
     int img = kwiq::DiscordPick(cfg.images, x, values, d.roll);
@@ -156,7 +156,8 @@ void KwiqDiscord::Tick(std::time_t now, const std::string& eventName) {
         if (nb == 2) break;
         std::string l, u;
         if (!kwiq::DiscordFormat(cfg.buttons[o.second].v[0], values, l) || !kwiq::DiscordFormat(cfg.buttons[o.second].v[1], values, u)) continue;
-        labels[nb] = l.substr(0, 31); urls[nb] = u;
+        if (u.size() > kwiq::kDiscordUrlMax || !kwiq::IsWebLink(u)) continue;   // Discord would refuse the presence (#50)
+        labels[nb] = kwiq::Utf8Truncate(l, 31); urls[nb] = u;
         nb++;
     }
     for (int i = 0; i < nb; i++) buttons[i] = { labels[i].c_str(), urls[i].c_str() };
