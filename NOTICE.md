@@ -12,6 +12,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 | JSON for Modern C++ (header only, from vcpkg) | - | https://github.com/nlohmann/json (Niels Lohmann) | MIT |
 | RDF and the TrackAudio bridge | `rdf.hpp`, `rdf.cpp` | Adapted from https://github.com/KingfuChan/RDF (Kingfu Chan), v1.4.3b, commit a4bd0ae | GPL-3.0 |
 | IXWebSocket (linked, from vcpkg) | - | https://github.com/machinezone/IXWebSocket | BSD-3-Clause |
+| zlib (linked, from vcpkg, for IXWebSocket) | - | https://zlib.net (Jean-loup Gailly and Mark Adler) | zlib |
 | EuroScope SDK | `libs/` | EuroScope plugin SDK (copy shipped in the VCH repo) | EuroScope SDK terms |
 
 ## Changes made to VCH
