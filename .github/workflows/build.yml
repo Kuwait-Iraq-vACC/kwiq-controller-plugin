@@ -98,7 +98,21 @@ jobs:
           -DKWIQ_BUILD_NUMBER=${{ github.run_number }}
 
       - name: Build
-        run: cmake --build build --config Release
+        run: |
+          cmake --build build --config Release 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      # Every compiler warning, once each (#41). Vendored code (libs/, vcpkg, VCH, the Slots-Plugin's
+      # VatsimAPI.*) may have some; KWIQ's own files must have none.
+      - name: Compiler warnings
+        run: |
+          $all = @(Select-String -Path build.log -Pattern ': warning C\d+' |
+                   ForEach-Object { ($_.Line -replace '\s*\[[^\]]*\]\s*$', '').Trim() } | Sort-Object -Unique)
+          $vendored = '(?i)\\(libs|vcpkg_installed)\\|\\(requestMenu|internet|usefulStuff|Constant|stdafx|targetver|Config|VatsimAPI)\.(cpp|hpp|h)\('
+          $own = @($all | Where-Object { $_ -notmatch $vendored })
+          "$($all.Count) warning(s), $($own.Count) of them in KWIQ's own files"
+          foreach ($w in $all) { if ($w -match $vendored) { "  vendored: $w" } else { "::warning::$w" } }
+          if ($own.Count) { throw "KWIQ's own files must build without warnings" }
 
       - name: Check the three DLLs exist and export their entry points
         run: |
