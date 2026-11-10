@@ -301,6 +301,19 @@ int main() {
     CHECK(Utf8Truncate("a\xC3\xA9", 2) == "a" && Utf8Truncate("a\xC3\xA9", 3) == "a\xC3\xA9");                 // e acute: 2 bytes
     CHECK(Utf8Truncate("\xF0\x9F\x9B\xAB!", 3).empty() && Utf8Truncate("\xF0\x9F\x9B\xAB!", 4) == "\xF0\x9F\x9B\xAB");   // an emoji: 4
     CHECK(Utf8Truncate("ab\xD8\xA8\xD8\xBA", 5) == "ab\xD8\xA8");                                              // Arabic: 2 a letter
+    // DiscordEuroScope edge cases (#52)
+    {
+        DiscordConfig de = ParseDiscord("");
+        CHECK(de.appId.empty() && de.messages.empty() && de.images.empty() && de.buttons.empty() && !de.sweatboxBypass);
+        de = ParseDiscord("APP\r\nMESSAGE|controller|||\r\nIMAGE|||||k\r\nBUTTON|||||L\r\nRADIO|OR|1\r\nSWEATBOX_BYPASS|1\r\n");
+        CHECK(de.appId.empty() && de.messages.empty() && de.images.size() == 1 && de.images[0].v.size() == 4 && de.images[0].v[0] == "k");
+        CHECK(de.buttons.empty() && de.radios.empty() && de.sweatboxBypass);          // a button needs a label and a URL
+        std::map<std::string, std::string> none;
+        none["event"] = "";
+        CHECK(DiscordFormat("{", none, dout) && dout == "{" && !DiscordFormat("on {event}", none, dout) && dout == "on ");
+        CHECK(DiscordMatch(DiscordFilter(), DiscordContext()) == 0 && DiscordPick(std::vector<DiscordEntry>(), dx, dv, 0) == -1);
+        CHECK(DiscordRadioCallsign(dc, "", "").empty() && DiscordRadioCallsign(dc, "ORBB", "124.400") == "Baghdad Control");
+    }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
