@@ -508,7 +508,7 @@ inline std::string Sha256Hex(const std::string& data) {
     auto rotr = [](unsigned x, int n) { return (x >> n) | (x << (32 - n)); };
     std::string msg = data;
     unsigned long long bits = (unsigned long long)data.size() * 8;
-    msg.push_back((char)0x80);
+    msg.push_back('\x80');                                   // a char literal, so no truncating cast (C4310)
     while (msg.size() % 64 != 56) msg.push_back('\0');
     for (int i = 7; i >= 0; i--) msg.push_back((char)((bits >> (i * 8)) & 0xFF));
     for (size_t off = 0; off < msg.size(); off += 64) {
