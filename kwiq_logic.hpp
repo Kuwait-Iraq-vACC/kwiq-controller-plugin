@@ -537,6 +537,32 @@ inline bool IsApiKey(const std::string& k) {
 }
 inline std::string ApiKeyId(const std::string& k) { return IsApiKey(k) ? k.substr(5, 8) : std::string(); }
 
+// %LOCALAPPDATA%\KWIQ\settings\api-settings.json, as UKCP keeps its key: {"api-key": "kwiq_..."}.
+// A key is only letters, digits and _, so no escaping is needed either way.
+inline std::string ApiSettingsJson(const std::string& key) {
+    return "{\n    \"api-key\": \"" + key + "\"\n}\n";
+}
+inline std::string ApiKeyFromSettingsJson(const std::string& json) {
+    size_t k = json.find("\"api-key\"");
+    if (k == std::string::npos) return "";
+    size_t colon = json.find(':', k + 9);
+    size_t open = colon == std::string::npos ? colon : json.find('"', colon + 1);
+    size_t close = open == std::string::npos ? open : json.find('"', open + 1);
+    if (close == std::string::npos) return "";
+    std::string v = Trim(json.substr(open + 1, close - open - 1));
+    return IsApiKey(v) ? v : "";
+}
+
+// What the updater tells the loader to do with the plugin (KWIQUpdaterRun)
+enum class StartMode { Full = 0, Reduced = 1, DontLoad = 2 };
+// As EuroScope starts: Core's kill switch stops the plugin loading; an update the controller declined
+// starts it reduced; no plugin installed and none to install means nothing to load.
+inline StartMode DecideStart(bool coreAnswered, bool killSwitch, bool installed, bool updateDeclined) {
+    if (coreAnswered && killSwitch) return StartMode::DontLoad;
+    if (!installed) return StartMode::DontLoad;
+    return updateDeclined ? StartMode::Reduced : StartMode::Full;
+}
+
 // One query value from the first line of an HTTP request ("GET /?key=...&state=... HTTP/1.1").
 // Only letters, digits and _ are expected, so no decoding is done; anything else gives "".
 inline std::string QueryValue(const std::string& request, const std::string& name) {

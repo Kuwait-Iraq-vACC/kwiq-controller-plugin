@@ -20,7 +20,7 @@ add_library(KWIQPluginCore SHARED
 )
 
 target_include_directories(KWIQPluginCore PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/libs)
-# Set by GitHub Actions to its run number, so each build has its own version (0.5.0.42)
+# Set by GitHub Actions to its run number, so each build has its own version (0.6.0.42)
 set(KWIQ_BUILD_NUMBER 0 CACHE STRING "Build number added to the plugin version")
 target_compile_definitions(KWIQPluginCore PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
 target_link_libraries(KWIQPluginCore PRIVATE
@@ -34,12 +34,18 @@ target_link_libraries(KWIQPluginCore PRIVATE
 )
 set_target_properties(KWIQPluginCore PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginCore")
 
-# KWIQPlugin.dll: the one file controllers download and load. KWIQPluginCore.dll is built into it,
-# kept up to date in %APPDATA%\KWIQ\plugin and loaded from there (loader.cpp)
-file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/core_$<CONFIG>.rc
-     CONTENT "KWIQCORE RCDATA \"$<TARGET_FILE:KWIQPluginCore>\"\n")
-add_library(KWIQPlugin SHARED loader.cpp ${CMAKE_CURRENT_BINARY_DIR}/core_$<CONFIG>.rc)
-add_dependencies(KWIQPlugin KWIQPluginCore)
+# The UK Controller Plugin's layout: the packages carry only KWIQPlugin.dll (the loader), which runs
+# KWIQPluginUpdater.dll and then loads KWIQPluginCore.dll, both kept in %LOCALAPPDATA%\KWIQ\bin (loader.cpp)
+
+# KWIQPluginUpdater.dll: keeps the plugin and itself up to date
+add_library(KWIQPluginUpdater SHARED updater.cpp)
+target_include_directories(KWIQPluginUpdater PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(KWIQPluginUpdater PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
+target_link_libraries(KWIQPluginUpdater PRIVATE winhttp shell32)
+set_target_properties(KWIQPluginUpdater PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginUpdater")
+
+# KWIQPlugin.dll: the one file in the packages, loaded by EuroScope
+add_library(KWIQPlugin SHARED loader.cpp)
 target_include_directories(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/libs)
 target_compile_definitions(KWIQPlugin PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
 target_link_libraries(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libs/EuroScopePlugInDll.lib winhttp)
