@@ -11,6 +11,9 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 | libcurl (linked, from vcpkg) | - | https://curl.se (Daniel Stenberg and contributors) | curl licence (MIT style) |
 | JSON for Modern C++ (header only, from vcpkg) | - | https://github.com/nlohmann/json (Niels Lohmann) | MIT |
 | RDF and the TrackAudio bridge | `rdf.hpp`, `rdf.cpp` | Adapted from https://github.com/KingfuChan/RDF (Kingfu Chan), v1.4.3b, commit a4bd0ae | GPL-3.0 |
+| DiscordEuroScope | `discord.hpp`, `discord.cpp` | Adapted from https://github.com/Kirollos/DiscordEuroScope (Kirollos Nashaat), 1.3.0-rc1, commit 399a951 | GPL-3.0 |
+| discord-rpc | `libs/discord-rpc/` | https://github.com/multitheftauto/discord-rpc (Discord, Inc.; Multi Theft Auto's fork, commit b9b5699), Windows files only, unchanged | MIT (`libs/discord-rpc/LICENSE`) |
+| RapidJSON (header only, from vcpkg) | - | https://github.com/Tencent/rapidjson, used by discord-rpc | MIT |
 | IXWebSocket (linked, from vcpkg) | - | https://github.com/machinezone/IXWebSocket | BSD-3-Clause |
 | zlib (linked, from vcpkg, for IXWebSocket) | - | https://zlib.net (Jean-loup Gailly and Mark Adler) | zlib |
 | EuroScope SDK | `libs/` | EuroScope plugin SDK (copy shipped in the VCH repo) | EuroScope SDK terms |
@@ -29,6 +32,13 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - plog, MFC and cpp-httplib are removed: TrackAudio's version is read with the plugin's libcurl, and messages go through the plugin's chat output on the main thread.
 - The "RDF state" tag item uses ID 1006, clear of the KWIQ and VCH IDs.
 - It does not start if another RDF or afv-euroscope-bridge is loaded in the same EuroScope.
+
+## Changes made to DiscordEuroScope
+- It is driven by `CKWIQPlugin`'s timer, instead of being a plugin of its own.
+- Everything in `DiscordEuroscope_config.json` comes from Core. Messages, images and buttons are lists with filters (state, FIR, callsign pattern, event); one message is picked at random at each logon, and the elapsed time starts again then. Radio callsigns come from Core instead of the ESE file.
+- New placeholder `{event}`.
+- `Discord_Initialize` does not register a URL handler in the registry.
+- `.discord hotreload` is gone: Core's settings arrive on their own.
 
 ## Slot detection: permission
 The plugin information string in the VATCAN source (`SituPlugin.cpp`) declares CC BY-NC 4.0, and the repository has no licence file.

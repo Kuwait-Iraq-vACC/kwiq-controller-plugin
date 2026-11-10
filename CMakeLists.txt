@@ -9,6 +9,19 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")   # /
 find_package(CURL CONFIG REQUIRED)               # from vcpkg (static, Windows schannel TLS)
 find_package(nlohmann_json CONFIG REQUIRED)      # from vcpkg
 find_package(ixwebsocket CONFIG REQUIRED)        # from vcpkg, without TLS: RDF only talks to TrackAudio on this PC
+find_package(RapidJSON CONFIG REQUIRED)          # from vcpkg, header only: discord-rpc's JSON
+
+# discord-rpc (Multi Theft Auto's fork, MIT), for DiscordEuroScope: built from libs/discord-rpc
+add_library(discord-rpc STATIC
+    libs/discord-rpc/discord_rpc.cpp
+    libs/discord-rpc/rpc_connection.cpp
+    libs/discord-rpc/serialization.cpp
+    libs/discord-rpc/connection_win.cpp
+    libs/discord-rpc/discord_register_win.cpp
+)
+target_include_directories(discord-rpc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/libs/discord-rpc)
+target_compile_definitions(discord-rpc PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(discord-rpc PRIVATE rapidjson advapi32 psapi)
 
 # Warnings (#41): KWIQ's own sources are built at /W4, and CI fails on any warning in them. Vendored code
 # (VCH, the Slots-Plugin's VatsimAPI.cpp) keeps the default level. Headers from libs/ and vcpkg are external
@@ -26,6 +39,7 @@ add_library(KWIQPluginCore SHARED
     VatsimAPI.cpp
     keylink.cpp          # receives the API key from myKWIQ
     rdf.cpp              # RDF and the TrackAudio bridge (KingfuChan/RDF)
+    discord.cpp          # DiscordEuroScope (Kirollos/DiscordEuroScope)
     requestMenu.cpp      # VCH
     internet.cpp         # VCH
     usefulStuff.cpp      # VCH
@@ -39,6 +53,7 @@ target_link_libraries(KWIQPluginCore PRIVATE
     CURL::libcurl
     nlohmann_json::nlohmann_json
     ixwebsocket::ixwebsocket                      # RDF: TrackAudio's WebSocket
+    discord-rpc                                   # DiscordEuroScope
     crypt32 shlwapi                               # ixwebsocket
     wininet                                       # VCH
     winmm                                         # PlaySound (sector file alert)

@@ -26,7 +26,7 @@ Functions: **Open event routes window** (left button on Event Route), **Explain 
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
-`.kwiq connect` (get your API key from myKWIQ), `.kwiq key <key>` (enter it by hand; `.kwiq key` says whether one is connected, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq sector` (sector indicators on the radar on or off), `.kwiq autorefresh` (slot auto refresh on or off), `.kwiq update` (says whether a newer version is waiting), `.kwiq alert` (preview the sector file alert), `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or AIRAC_VERSION.txt>` (tell the plugin where your package is; empty = automatic), `.rdf draw on|off|core` (your own RDF switch; `core` = as Core says), `.rdf refresh` (switch the channels off and sync them again from TrackAudio), `.rdf reload` (reconnect to TrackAudio), plus VCH's own `.vch ...` commands.
+`.kwiq connect` (get your API key from myKWIQ), `.kwiq key <key>` (enter it by hand; `.kwiq key` says whether one is connected, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq sector` (sector indicators on the radar on or off), `.kwiq autorefresh` (slot auto refresh on or off), `.kwiq update` (says whether a newer version is waiting), `.kwiq alert` (preview the sector file alert), `.kwiq discord` (DiscordEuroScope on or off for yourself), `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or AIRAC_VERSION.txt>` (tell the plugin where your package is; empty = automatic), `.rdf draw on|off|core` (your own RDF switch; `core` = as Core says), `.rdf refresh` (switch the channels off and sync them again from TrackAudio), `.rdf reload` (reconnect to TrackAudio), plus VCH's own `.vch ...` commands.
 
 ## What Core controls
 Besides Core's address, only myKWIQ's Connect EuroScope page and the default EuroScope setup guide and changelog links are compiled in. `/api/plugin/latest` supplies the latest version, the checksums of the plugin and the updater, the kill switch and the changelog link. `/api/plugin/config` supplies: minimum plugin version, message of the day, refresh intervals, tag texts and colours, sector indicator colours/default, and the current sector file AIRAC. Sector aliases, RDF settings, the SRD and events have their own endpoints. All of it is edited in Filament (Plugin settings, Sector aliases, SRD routes, Plugin events).
@@ -38,6 +38,20 @@ RDF (Radio Direction Finder, by Kingfu Chan) is built in, as VCH is: do not load
 - **Settings from Core** (`/api/plugin/rdf`, one line per logon callsign pattern, the first match wins): `RDF|ORBB_*_CTR|draw=1|bridge=1|colour=#FFFFFF|colour_concurrent=#FF0000|radius=20|threshold=-1|precision=0|low_altitude=0|high_altitude=0|low_precision=0|high_precision=0|controllers=0|require_tx=0`. Keys left out take RDF's defaults; with no matching line, drawing is off and the bridge on. `rdf.endpoint` in `/config` is TrackAudio's address.
 - **Controller:** RDF Drawing in the KWIQ menu or `.rdf draw on|off` overrides Core for themselves (kept in the profile as `kwiq_rdf_draw`, empty = as Core says; `.rdf draw core` goes back to Core). The menu's TrackAudio row shows the connection, which the plugin makes on its own: Connected, Version too old (before 1.3.0 Beta 5), AFV client (TrackAudio isn't connected but the AFV standalone client is), Not running, or Off (RDF didn't start, or Core has the bridge and drawing off). It isn't a switch: a click syncs the channels again (`.rdf refresh`) while connected, tries to connect now while not (leaving the channels as they are), and does nothing when off.
 - **Messages:** once a session, 15 seconds after logging on, if TrackAudio isn't running (and no AFV client is), or is older than 1.3.0 Beta 5.
+
+## DiscordEuroScope
+DiscordEuroScope (Discord Rich Presence, by Kirollos Nashaat) is built in: do not load `DiscordEuroscope.dll` as well. It is on by default; Core can turn it off for everyone (`discord.enabled = 0`), and each controller can turn it off for themselves with DiscordEuroScope in the KWIQ menu or `.kwiq discord`. That is kept as the `DiscordEuroScope` setting (`KWIQ Controller Plugin:DiscordEuroScope:0` in the package's `Settings\Plugins.txt`), which the Configurator also sets.
+
+Core's `/api/plugin/discord` holds everything `DiscordEuroscope_config.json` did:
+```
+APP|1529517649506074776
+SWEATBOX_BYPASS|0
+MESSAGE|<state>|<fir>|<callsign pattern>|<event>|<details>|<state text>
+IMAGE|<state>|<fir>|<callsign pattern>|<event>|<large image URL>|<large text>|<small image URL>|<small text>
+BUTTON|<state>|<fir>|<callsign pattern>|<event>|<label>|<url>
+RADIO|<ICAO prefix>|<frequency>|<radio callsign>
+```
+The four filters may be empty (any): state is `idle`, `playback`, `sweatbox`, `observer`, `controller` or `supervisor`; FIR is `OKAC` or `ORBB`; the pattern uses `*` and `?`; event is `1` (only while a Core event is on) or `0` (only when none is). At each logon (or position or state change) the plugin takes the matching messages and images with the most filters set and picks one at random, skipping any whose placeholders have no value; the elapsed time starts again then. At most two buttons are shown. Placeholders: `{callsign}`, `{rcallsign}` (from the `RADIO` lines, by the callsign's ICAO prefix and the primary frequency), `{frequency}`, `{current_tracked}`, `{total_tracked}` (aircraft tracked this logon), `{total_inrange}` and `{event}`. Nothing is shown or logged when Discord isn't running.
 
 ## Plugin updates
 Installed and updated the way the UK Controller Plugin is:
