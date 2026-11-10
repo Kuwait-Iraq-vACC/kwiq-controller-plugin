@@ -116,6 +116,8 @@ inline std::string DateOf(std::time_t t) {
 inline std::string TodayUtc() { return DateOf(std::time(nullptr)); }
 
 // Routes valid on the given UTC day (a route without a date applies every day)
+// Event Routes' Airports column, e.g. "OKBK -> ORBI"
+inline std::string EventRouteAirports(const EventRoute& r) { return r.adep + " -> " + r.ades; }
 inline std::vector<EventRoute> RoutesForDate(const EventData& ev, const std::string& today) {
     std::vector<EventRoute> out;
     if (!ev.active) return out;

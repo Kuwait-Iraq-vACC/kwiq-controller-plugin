@@ -14,7 +14,7 @@ add_library(KWIQPluginCore SHARED
     KWIQPlugin.cpp
     VatsimAPI.cpp
     keylink.cpp          # receives the API key from myKWIQ
-    kwiq.rc              # the SRD Search dialog (kwiq_res.h)
+    kwiq.rc              # the SRD Search and Event Routes dialogs (kwiq_res.h)
     requestMenu.cpp      # VCH
     internet.cpp         # VCH
     usefulStuff.cpp      # VCH
@@ -32,7 +32,7 @@ target_link_libraries(KWIQPluginCore PRIVATE
     winmm                                         # PlaySound (sector file alert)
     ws2_32                                        # API key from myKWIQ (keylink.cpp)
     version                                       # GetFileVersionInfo (EuroScope version check)
-    comctl32                                      # the SRD search results list
+    comctl32                                      # the SRD search and event routes lists
 )
 set_target_properties(KWIQPluginCore PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginCore")
 
