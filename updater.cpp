@@ -75,7 +75,7 @@ extern "C" __declspec(dllexport) int KWIQUpdaterRun() {
     std::string coreSha = kwiq::Lower(kwiq::Trim(cfg.Get("plugin.core_sha256")));
     std::string updaterSha = kwiq::Lower(kwiq::Trim(cfg.Get("plugin.updater_sha256")));
     std::string changelog = kwiq::Trim(cfg.Get("plugin.changelog_url", kChangelogUrl));
-    if (changelog.empty()) changelog = kChangelogUrl;
+    if (!kwiq::IsWebLink(changelog)) changelog = kChangelogUrl;     // only a web page is ever opened (#44)
 
     bool declined = false, updated = false;
     if (answered && kwiq::UpdateAvailable(installed.empty() ? "0" : installed, latest, coreSha)) {

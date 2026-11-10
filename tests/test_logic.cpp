@@ -218,6 +218,7 @@ int main() {
     CHECK(ApiKeyFromSettingsJson("{\"api-url\":\"https://x\",\"api-key\" : \" " + K + " \"}") == K);
     CHECK(ApiKeyFromSettingsJson("{\"api-key\": \"not a key\"}") == "");
     CHECK(ApiKeyFromSettingsJson("{}") == "" && ApiKeyFromSettingsJson("") == "" && ApiKeyFromSettingsJson("{\"api-key\": \"kwiq_") == "");
+    CHECK(ApiKeyFromSettingsJson("{\r\n    \"api-key\": \"" + K + "\"\r\n}\r\n") == K);           // CRLF, as Notepad saves it
 
     // starting the plugin
     CHECK(DecideStart(true, false, true, false) == StartMode::Full);
