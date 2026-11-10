@@ -8,7 +8,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")   # /
 
 find_package(CURL CONFIG REQUIRED)               # from vcpkg (static, Windows schannel TLS)
 find_package(nlohmann_json CONFIG REQUIRED)      # from vcpkg
-find_package(ixwebsocket CONFIG REQUIRED)        # from vcpkg, without TLS: RDF only talks to TrackAudio on this PC
+find_package(ixwebsocket CONFIG REQUIRED)        # from vcpkg, with mbedtls: RDF (TrackAudio, ws://) and Core push events (wss://)
 find_package(RapidJSON CONFIG REQUIRED)          # from vcpkg, header only: discord-rpc's JSON
 
 # discord-rpc (Multi Theft Auto's fork, MIT), for DiscordEuroScope: built from libs/discord-rpc
@@ -41,6 +41,7 @@ add_library(KWIQPluginCore SHARED
     keylink.cpp          # receives the API key from myKWIQ
     rdf.cpp              # RDF and the TrackAudio bridge (KingfuChan/RDF)
     discord.cpp          # DiscordEuroScope (Kirollos/DiscordEuroScope)
+    push.cpp             # Core's push events (Laravel Reverb)
     requestMenu.cpp      # VCH
     internet.cpp         # VCH
     usefulStuff.cpp      # VCH
@@ -55,7 +56,7 @@ target_link_libraries(KWIQPluginCore PRIVATE
     nlohmann_json::nlohmann_json
     ixwebsocket::ixwebsocket                      # RDF: TrackAudio's WebSocket
     discord-rpc                                   # DiscordEuroScope
-    crypt32 shlwapi                               # ixwebsocket
+    crypt32 shlwapi bcrypt                        # ixwebsocket, mbedtls
     wininet                                       # VCH
     winmm                                         # PlaySound (sector file alert)
     ws2_32                                        # API key from myKWIQ (keylink.cpp)

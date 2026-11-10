@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <tuple>
+#include <cmath>
+#include <sstream>
 #include <array>
 #include <map>
 #include <functional>
@@ -842,6 +844,148 @@ inline std::string DiscordRadioCallsign(const DiscordConfig& c, const std::strin
     std::string icao = Upper(callsign.substr(0, callsign.find('_')));
     for (const auto& r : c.radios) if (r[0] == icao && r[1] == freq) return r[2];
     return "";
+}
+
+// ---- QNH monitor -----------------------------------------------------------------------------------
+// The QNH in a METAR, in hPa: Q1013, or A2992 (inches of mercury) converted. -1 if there is none.
+inline int QnhFromMetar(const std::string& metar) {
+    std::istringstream in(metar);
+    std::string tok;
+    while (in >> tok) {
+        if (tok == "RMK") break;
+        while (!tok.empty() && tok.back() == '=') tok.pop_back();
+        if (tok.size() == 5 && (tok[0] == 'Q' || tok[0] == 'A') && std::all_of(tok.begin() + 1, tok.end(), ::isdigit)) {
+            int v = std::atoi(tok.c_str() + 1);
+            return tok[0] == 'Q' ? v : (int)std::floor(v / 100.0 * 33.8639);
+        }
+    }
+    return -1;
+}
+// Core /api/plugin/metar: METAR|<ICAO>|<METAR>
+inline std::map<std::string, std::string> ParseMetars(const std::string& body) {
+    std::map<std::string, std::string> out;
+    for (const auto& line : SplitChar(body, '\n')) {
+        size_t a = line.find('|'), b = a == std::string::npos ? a : line.find('|', a + 1);
+        if (b == std::string::npos || Trim(line.substr(0, a)) != "METAR") continue;
+        std::string icao = Upper(Trim(line.substr(a + 1, b - a - 1)));
+        if (IsAirportCode(icao)) out[icao] = Trim(line.substr(b + 1));
+    }
+    return out;
+}
+
+// Transition levels, from Core /api/plugin/trl, the way TopSky's QNHTL lines give them:
+//   TRL|<ICAO or ICAO prefix>|<TA in ft>|<TRL>,<QNH>,<TRL>,<QNH>,<TRL>...
+// e.g. TRL|OR|14000|160,980,170 (FL160 at QNH 980 and above, FL170 below) and TRL|OK|13000|150 (fixed).
+// The longest matching prefix wins.
+struct TrlRule { std::string prefix; int ta = 0; std::vector<int> v; };
+inline std::vector<TrlRule> ParseTrl(const std::string& body) {
+    std::vector<TrlRule> rules;
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(Trim(line), '|');
+        if (f.size() < 4 || f[0] != "TRL") continue;
+        TrlRule r;
+        r.prefix = Upper(Trim(f[1]));
+        r.ta = std::atoi(Trim(f[2]).c_str());
+        for (const auto& t : SplitChar(f[3], ',')) { std::string x = Trim(t); if (!x.empty()) r.v.push_back(std::atoi(x.c_str())); }
+        if (!r.prefix.empty() && r.v.size() % 2 == 1) rules.push_back(r);
+    }
+    return rules;
+}
+// The TRL (flight level, e.g. 160) at that QNH, or 0 if Core has none for the airport
+inline int TrlFor(const std::vector<TrlRule>& rules, const std::string& icao, int qnh) {
+    const TrlRule* best = nullptr;
+    for (const auto& r : rules)
+        if (Upper(icao).compare(0, r.prefix.size(), r.prefix) == 0 && (!best || r.prefix.size() > best->prefix.size())) best = &r;
+    if (!best || qnh <= 0) return 0;
+    for (size_t i = 0; i + 1 < best->v.size(); i += 2) if (qnh >= best->v[i + 1]) return best->v[i];
+    return best->v.back();
+}
+// As in #4: "ORBI QNH 979 (was 981) TRL FL170 - CHANGED from FL160"
+inline std::string QnhMessage(const std::string& icao, int qnh, int prevQnh, int trl, int prevTrl) {
+    std::string m = icao + " QNH " + std::to_string(qnh);
+    if (prevQnh > 0 && prevQnh != qnh) m += " (was " + std::to_string(prevQnh) + ")";
+    if (trl > 0) {
+        m += " TRL FL" + std::to_string(trl);
+        if (prevTrl > 0 && prevTrl != trl) m += " - CHANGED from FL" + std::to_string(prevTrl);
+    }
+    return m;
+}
+
+// ---- top-down (shared by the QNH monitor and procedure notifications) --------------------------------
+// Core /api/plugin/topdown: TOPDOWN|<airport>|<position>,<position>,...  lowest first,
+// e.g. TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR
+// A position (OKBK_TWR) is worked by OKBK_TWR, OKBK_1_TWR, OKBK_N_TWR: same prefix and suffix.
+using TopDownOrders = std::map<std::string, std::vector<std::string>>;
+inline bool TopDownPositionMatches(const std::string& position, const std::string& callsign) {
+    size_t a = position.find('_'), b = callsign.find('_');
+    if (a == std::string::npos || b == std::string::npos) return false;
+    return Upper(position.substr(0, a)) == Upper(callsign.substr(0, b)) &&
+           Upper(position.substr(position.rfind('_') + 1)) == Upper(callsign.substr(callsign.rfind('_') + 1));
+}
+inline TopDownOrders ParseTopDownOrders(const std::string& body) {
+    TopDownOrders td;
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(Trim(line), '|');
+        if (f.size() < 3 || f[0] != "TOPDOWN" || !IsAirportCode(Upper(Trim(f[1])))) continue;
+        std::vector<std::string> order;
+        for (const auto& p : SplitChar(f[2], ',')) { std::string x = Upper(Trim(p)); if (x.find('_') != std::string::npos) order.push_back(x); }
+        if (!order.empty()) td[Upper(Trim(f[1]))] = order;
+    }
+    return td;
+}
+// The airport is the user's: the lowest position in its top-down order that anyone is on is one the user
+// is on (online = the other controllers' callsigns). An airport with no order: its own positions only.
+inline bool CoveredByMe(const TopDownOrders& td, const std::string& airport, const std::string& me,
+                        const std::vector<std::string>& online) {
+    if (airport.empty() || me.empty()) return false;
+    auto it = td.find(airport);
+    std::vector<std::string> order = it != td.end() ? it->second
+        : std::vector<std::string>{ airport + "_DEL", airport + "_GND", airport + "_TWR", airport + "_APP" };
+    for (const auto& pos : order) {
+        if (TopDownPositionMatches(pos, me)) return true;
+        for (const auto& cs : online) if (TopDownPositionMatches(pos, cs)) return false;
+    }
+    return false;
+}
+// Every airport Core has an order for (and the user's own) that the user covers now
+inline std::vector<std::string> AirportsCovered(const TopDownOrders& td, const std::string& me, const std::vector<std::string>& online) {
+    std::vector<std::string> out;
+    for (const auto& kv : td) if (CoveredByMe(td, kv.first, me, online)) out.push_back(kv.first);
+    std::string own = Upper(me.substr(0, me.find('_')));
+    if (IsAirportCode(own) && !td.count(own) && CoveredByMe(td, own, me, online)) out.push_back(own);
+    return out;
+}
+
+// ---- procedure notifications ---------------------------------------------------------------------
+// Core /api/plugin/notifications (for the controller's API key):
+//   NOTICE|<id>|<airports, comma separated>|<published, YYYY-MM-DD>|<read 0/1>|<title>|<link>|<text, \n for new lines>
+// Staff post them in Filament for a group of airports (an FIR, a TMA, the military airports...).
+struct ProcedureNotice { std::string id, published, title, link, text; std::vector<std::string> airports; bool read = false; };
+inline std::vector<ProcedureNotice> ParseNotices(const std::string& body) {
+    std::vector<ProcedureNotice> out;
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(line, '|');
+        if (f.size() < 8 || Trim(f[0]) != "NOTICE" || Trim(f[1]).empty()) continue;
+        ProcedureNotice n;
+        n.id = Trim(f[1]);
+        for (const auto& a : SplitChar(f[2], ',')) { std::string x = Upper(Trim(a)); if (!x.empty()) n.airports.push_back(x); }
+        n.published = Trim(f[3]);
+        n.read = Trim(f[4]) == "1";
+        n.title = Trim(f[5]);
+        n.link = Trim(f[6]);
+        std::string t;
+        for (size_t i = 7; i < f.size(); i++) t += (i > 7 ? "|" : "") + f[i];
+        for (size_t i = 0; i < t.size(); i++) {
+            if (t[i] == '\\' && i + 1 < t.size() && t[i + 1] == 'n') { n.text += "\r\n"; i++; }
+            else if (t[i] != '\r') n.text += t[i];
+        }
+        out.push_back(n);
+    }
+    return out;
+}
+inline bool NoticeRelevant(const ProcedureNotice& n, const std::vector<std::string>& covered) {
+    for (const auto& a : n.airports) if (std::find(covered.begin(), covered.end(), a) != covered.end()) return true;
+    return false;
 }
 
 } // namespace kwiq

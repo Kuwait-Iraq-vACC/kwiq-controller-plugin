@@ -92,6 +92,28 @@ bool HttpGet(const string& url, string& body, string& err) {
     return true;
 }
 
+long HttpSend(const string& method, const string& url, const string& form, string& body, string& err) {
+    body.clear();
+    err.clear();
+    CURL* curl = curl_easy_init();
+    if (!curl) { err = curl_easy_strerror(CURLE_FAILED_INIT); return 0; }
+    setup_curl_modern(curl, url.c_str(), &body);
+    if (method != "GET") curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+    if (!form.empty()) curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, form.c_str());
+    curl_slist* headers = core_headers(url);
+    headers = curl_slist_append(headers, "Accept: text/plain");
+    if (!form.empty()) headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    CURLcode res = curl_easy_perform(curl);
+    long code = 0;
+    if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    else err = curl_easy_strerror(res);
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(headers);
+    if (code && (code < 200 || code > 299)) err = "HTTP " + std::to_string(code);
+    return code;
+}
+
 // Binary download with a size cap, a longer timeout and a cancel flag (plugin self-update).
 namespace {
 struct BinSink { string* out; size_t max; bool tooBig = false; };

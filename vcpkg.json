@@ -6,7 +6,10 @@
     "nlohmann-json",
     {
       "name": "ixwebsocket",
-      "default-features": false
+      "default-features": false,
+      "features": [
+        "mbedtls"
+      ]
     },
     "rapidjson"
   ]

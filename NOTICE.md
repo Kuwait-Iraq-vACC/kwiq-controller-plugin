@@ -14,6 +14,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 | DiscordEuroScope | `discord.hpp`, `discord.cpp` | Adapted from https://github.com/Kirollos/DiscordEuroScope (Kirollos Nashaat), 1.3.0-rc1, commit 399a951 | GPL-3.0 |
 | discord-rpc | `libs/discord-rpc/` | https://github.com/multitheftauto/discord-rpc (Discord, Inc.; Multi Theft Auto's fork, commit b9b5699), Windows files only, unchanged | MIT (`libs/discord-rpc/LICENSE`) |
 | RapidJSON (header only, from vcpkg) | - | https://github.com/Tencent/rapidjson, used by discord-rpc | MIT |
+| Mbed TLS (linked, from vcpkg, for IXWebSocket) | - | https://github.com/Mbed-TLS/mbedtls | Apache-2.0 |
 | IXWebSocket (linked, from vcpkg) | - | https://github.com/machinezone/IXWebSocket | BSD-3-Clause |
 | zlib (linked, from vcpkg, for IXWebSocket) | - | https://zlib.net (Jean-loup Gailly and Mark Adler) | zlib |
 | EuroScope SDK | `libs/` | EuroScope plugin SDK (copy shipped in the VCH repo) | EuroScope SDK terms |
