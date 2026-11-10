@@ -7,7 +7,9 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 | VCH, built in | `requestMenu.*`, `internet.*`, `usefulStuff.*`, `Constant.hpp`, `stdafx.h`, `targetver.h`, `Config.h` | https://github.com/DrFreas/VCH (Jan Fries), v0.8.6 | GPL-3.0 |
 | Slot detection | `VatsimAPI.h`, `VatsimAPI.cpp` | Adapted from the VATCAN Slots-Plugin, via https://github.com/frazerxyz/Slots-Plugin | See below |
 | Squawk assignment rules | `squawk_logic.hpp`, and the squawk section of `KWIQPlugin.cpp` | Adapted from the UK Controller Plugin, https://github.com/VATSIM-UK/uk-controller-plugin (`src/plugin/squawk`) | GPL-3.0 |
-| KWIQ code | `KWIQPlugin.cpp`, `kwiq_logic.hpp`, `tests/` | Kuwait & Iraq vACC | GPL-3.0-or-later |
+| KWIQ code | `KWIQPlugin.cpp`, `kwiq_logic.hpp`, `keylink.*`, `loader.cpp`, `version.h`, `tests/` | Kuwait & Iraq vACC | GPL-3.0-or-later |
+| libcurl (linked, from vcpkg) | - | https://curl.se (Daniel Stenberg and contributors) | curl licence (MIT style) |
+| JSON for Modern C++ (header only, from vcpkg) | - | https://github.com/nlohmann/json (Niels Lohmann) | MIT |
 | EuroScope SDK | `libs/` | EuroScope plugin SDK (copy shipped in the VCH repo) | EuroScope SDK terms |
 
 ## Changes made to VCH
@@ -20,9 +22,14 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - UKCP's general and local code types are one request: Core picks the range from the requesting controller's FIR, the departure, the destination and the flight rules. The UK's circuit code and local codes are gone.
 - No code is built in: the codes never assigned, and which of them count as a code the aircraft has (UKCP's `HasAssignedSquawk`), come from Core's `/squawk/non-assignable`.
 - UKCP's conspicuity option is Non-discrete, with the codes (2000, 7000 for VFR) set in Core. No code is held while Core is asked; an aircraft Core could not give a code is not asked for again for a minute.
-- Who gives departures their squawk comes from Core's top-down order (`/api/plugin/squawk/topdown`) instead of UKCP's airfield ownership.
+- Who gives departures their squawk comes from Core's top-down order (`/api/plugin/topdown`) instead of UKCP's airfield ownership.
 - A reconnecting aircraft only gets its old code back if its departure and destination are unchanged; a code set by hand is left alone until they change.
 - Requests say whether they are from the live network or sweatbox.
+
+## Changes made to the Slots-Plugin code
+- As `VatsimAPI.h` describes: the event code comes from Core, the NAT track and flight plan amend parts are removed, and the data is kept in a store of its own instead of the radar screen class. `kwiq_net` (the plugin's HTTP helper) lives in the same files.
+- Every request stops at 32 MiB (#43).
+- `CDataHandler::FetchWorker` catches every exception and always clears `fetchInProgress`, so a failed fetch can neither end EuroScope nor stop later fetches (#45).
 
 ## Slot detection: permission
 The plugin information string in the VATCAN source (`SituPlugin.cpp`) declares CC BY-NC 4.0, and the repository has no licence file.

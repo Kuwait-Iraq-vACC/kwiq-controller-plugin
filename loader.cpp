@@ -192,7 +192,12 @@ static std::string Install(const std::string& core, const std::string& sha) {
 
 static void CheckForUpdate(const std::string& core) {
     std::string installed = InstalledVersion(core), body;
-    if (CoreGet(CORE_PATH L"/config", installed.empty() ? "0" : installed, body, 1024 * 1024, 5000) != 200) return;
+    // /latest needs no key, so a controller whose key is missing or refused is still offered updates;
+    // a Core from before it has only /config
+    std::string ver = installed.empty() ? "0" : installed;
+    int status = CoreGet(CORE_PATH L"/latest", ver, body, 64 * 1024, 5000);
+    if (status == 404) status = CoreGet(CORE_PATH L"/config", ver, body, 1024 * 1024, 5000);
+    if (status != 200) return;
     kwiq::PluginConfig cfg = kwiq::ParseConfig(body);
     std::string latest = kwiq::Trim(cfg.Get("plugin.latest_version")), sha = kwiq::Lower(kwiq::Trim(cfg.Get("plugin.loader_sha256")));
 

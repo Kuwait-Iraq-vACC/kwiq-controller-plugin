@@ -145,6 +145,33 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcA(h, m, w, l);
 }
 
+// The work area of the screen EuroScope is on (its largest visible window), so windows open in the
+// middle of that screen rather than the main one
+static BOOL CALLBACK LargestOwnWindow(HWND h, LPARAM l) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    RECT r;
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(h) || !GetWindowRect(h, &r)) return TRUE;
+    auto* best = (std::pair<HWND, long long>*)l;
+    long long area = (long long)(r.right - r.left) * (r.bottom - r.top);
+    if (area > best->second) *best = { h, area };
+    return TRUE;
+}
+static RECT EuroScopeScreen() {
+    std::pair<HWND, long long> best = { nullptr, 0 };
+    EnumWindows(LargestOwnWindow, (LPARAM)&best);
+    MONITORINFO mi; mi.cbSize = sizeof(mi);
+    HMONITOR mon = best.first ? MonitorFromWindow(best.first, MONITOR_DEFAULTTONEAREST) : MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    if (GetMonitorInfoA(mon, &mi)) return mi.rcWork;
+    RECT wa; SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
+    return wa;
+}
+static void Centre(int ww, int wh, int& x, int& y) {
+    RECT wa = EuroScopeScreen();
+    x = wa.left + ((wa.right - wa.left) - ww) / 2;
+    y = wa.top + ((wa.bottom - wa.top) - wh) / 2;
+}
+
 static HWND Child(const char* cls, const char* text, DWORD style, int x, int y, int w, int h,
                   HWND parent, int id = 0) {
     HWND c = CreateWindowExA(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
@@ -154,7 +181,7 @@ static HWND Child(const char* cls, const char* text, DWORD style, int x, int y, 
 }
 
 // Creates the popup, stores it in `win`, destroying any previous one of the same kind.
-static bool Make(Win& win, POINT pt, const std::string& title, int ch) {
+static bool Make(Win& win, POINT, const std::string& title, int ch) {
     if (!gMod)
         GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            (LPCSTR)&WndProc, &gMod);
@@ -175,12 +202,8 @@ static bool Make(Win& win, POINT pt, const std::string& title, int ch) {
     RECT rc = { 0, 0, CW, ch };
     AdjustWindowRectEx(&rc, style, FALSE, ex);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
-    RECT wa; SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
-    int x = (int)pt.x, y = (int)pt.y;
-    if (x + ww > wa.right)  x = wa.right - ww;
-    if (y + wh > wa.bottom) y = wa.bottom - wh;
-    if (x < wa.left) x = wa.left;
-    if (y < wa.top)  y = wa.top;
+    int x, y;
+    Centre(ww, wh, x, y);                    // in the middle of EuroScope's screen
 
     HWND h = CreateWindowExA(ex, kClass, title.c_str(), style, x, y, ww, wh, nullptr, nullptr, gMod, nullptr);
     if (!h) return false;
@@ -311,6 +334,13 @@ static LRESULT CALLBACK NoticeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_ERASEBKGND: return 1;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_NCHITTEST: {                                 // the key setup cannot be dragged by its title bar
+        LRESULT hit = DefWindowProcA(h, m, w, l);
+        return (n && n->kind == NOTICE_KEY && hit == HTCAPTION) ? HTCLIENT : hit;
+    }
+    case WM_SYSCOMMAND:
+        if (n && n->kind == NOTICE_KEY && (w & 0xFFF0) == SC_MOVE) return 0;
+        break;
     case WM_PAINT:
         if (n) { PaintNotice(h, *n); return 0; }
         break;
@@ -325,6 +355,7 @@ static LRESULT CALLBACK NoticeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_CLOSE: {                                     // the title bar's X counts as the last button
         int kind = n ? n->kind : 0;
+        if (kind == NOTICE_KEY) return 0;                // the key setup only closes once a key is connected
         DestroyWindow(h);
         if (gOnNotice && kind) gOnNotice(kind, 2);
         return 0;
@@ -371,12 +402,13 @@ static bool ShowNotice(Notice& n, int kind, const std::string& title, const std:
     ReleaseDC(nullptr, dc);
     int bodyH = (std::max)((int)(tr.bottom - tr.top) + 12, (int)NICON) + 2 * NPAD;
 
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOPMOST | WS_EX_DLGMODALFRAME | WS_EX_NOACTIVATE;
+    // The key setup has no X: it stays until a key is connected
+    DWORD style = WS_POPUP | WS_CAPTION | (kind == NOTICE_KEY ? 0 : WS_SYSMENU), ex = WS_EX_TOPMOST | WS_EX_DLGMODALFRAME | WS_EX_NOACTIVATE;
     RECT rc = { 0, 0, NW, bodyH + NFOOT };
     AdjustWindowRectEx(&rc, style, FALSE, ex);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
-    RECT wa; SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
-    int x = wa.left + ((wa.right - wa.left) - ww) / 2, y = wa.top + ((wa.bottom - wa.top) - wh) / 3;
+    int x, y;
+    Centre(ww, wh, x, y);
     HWND h = CreateWindowExA(ex, kNoticeClass, title.c_str(), style, x, y, ww, wh, nullptr, nullptr, gMod, &n);
     if (!h) { n = Notice(); return false; }
     n.hwnd = h;
@@ -391,12 +423,12 @@ static bool ShowNotice(Notice& n, int kind, const std::string& title, const std:
     return true;
 }
 
-// API key setup: waits while the controller connects on myKWIQ, and closes once the key arrives.
+// API key setup: waits while the controller connects on myKWIQ, and closes only once the key arrives.
 static void ShowKeyPrompt() {
     ShowNotice(gKey, NOTICE_KEY, "KWIQ API Key Setup",
-               "Please go to your web browser, sign in to myKWIQ and click Connect EuroScope. This window will close "
-               "automatically once your API key has been received. If the page did not open, click Reopen Browser.",
-               IDI_INFORMATION, "Reopen Browser", "Cancel");
+               "Sign in to myKWIQ in your browser and click Connect EuroScope. This window closes once your API key "
+               "is connected. The link is also on your clipboard. Help: discord.kuwait-iraqvacc.net",
+               IDI_INFORMATION, "Reopen Browser", nullptr);
 }
 static bool KeyPromptOpen() { return gKey.hwnd != nullptr; }
 static void CloseKeyPrompt() { if (gKey.hwnd) DestroyWindow(gKey.hwnd); }
@@ -622,6 +654,13 @@ public:
         kwiq_ui::gOnNotice = &NoticeThunk;
         apiKey_ = apikey::Load();
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
+        // myKWIQ's one-off code, swapped for the key with Core on the listener's thread
+        keyLink_.Claim = [](const std::string& code) {
+            std::string body, err;
+            if (!kwiq_net::HttpGet(std::string(CORE_BASE "/claim/") + code, body, err)) return std::string();
+            std::string t = kwiq::Trim(body);
+            return t.compare(0, 4, "KEY|") == 0 ? kwiq::Trim(t.substr(4)) : std::string();
+        };
         startedAt_ = std::time(nullptr);
         esVersion_ = EuroScopeVersion();
         if (duplicate_) {
@@ -653,7 +692,8 @@ public:
         if (instanceLock_) CloseHandle(instanceLock_);
     }
 
-    virtual void OnTimer(int Counter) override {
+    // Every EuroScope callback is a function-try-block: an exception must never reach EuroScope (#45)
+    virtual void OnTimer(int Counter) override try {
         if (duplicate_) return;
         CVCHPlugin::OnTimer(Counter);                       // VCH housekeeping
         CDataHandler::ApplyPending(this);                   // slot/feed results, main thread
@@ -697,9 +737,9 @@ public:
         if (srd)  lastSrd_  = now;
         busy_ = true;
         worker_ = std::thread(&CKWIQPlugin::Refresh, this, core, srd);
-    }
+    } catch (...) {}
 
-    virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override {
+    virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override try {
         if (FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_LAST) { MenuAction(FunctionId, sItemString, Pt, Area); return; }
         switch (FunctionId) {
         case KWIQ_FUNC_EVENT_ROUTES: OpenRoutesWindow(Pt); return;
@@ -711,11 +751,11 @@ public:
         case KWIQ_FUNC_SQUAWK_MANUAL:  SquawkManual(sItemString ? kwiq::Trim(sItemString) : ""); return;
         }
         CVCHPlugin::OnFunctionCall(FunctionId, sItemString, Pt, Area);
-    }
+    } catch (...) {}
 
     virtual void OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, EuroScopePlugIn::CRadarTarget RadarTarget,
                               int ItemCode, int TagData, char sItemString[16],
-                              int* pColorCode, COLORREF* pRGB, double* pFontSize) override {
+                              int* pColorCode, COLORREF* pRGB, double* pFontSize) override try {
         using namespace kwiq;
         bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_SECTOR;
         if (ours && !enabled_) return;                       // Core kill switch / plugin too old
@@ -766,11 +806,13 @@ public:
         else {
             CVCHPlugin::OnGetTagItem(FlightPlan, RadarTarget, ItemCode, TagData, sItemString, pColorCode, pRGB, pFontSize);
         }
-    }
+    } catch (...) {}
 
-    virtual bool OnCompileCommand(const char* sCommandLine) override {
-        if (duplicate_) return false;                        // the copy that is in use answers
-        std::string c = kwiq::Upper(kwiq::Trim(sCommandLine));
+    virtual bool OnCompileCommand(const char* sCommandLine) override try {
+        if (duplicate_ || !sCommandLine) return false;       // the copy that is in use answers
+        // Arguments come from the trimmed line, so a leading space doesn't shift them (#46)
+        const std::string line = kwiq::Trim(sCommandLine);
+        std::string c = kwiq::Upper(line);
         if (c == ".KWIQ REFRESH") {
             lastCore_ = lastSrd_ = lastSlotFetch_ = 0;
             { std::lock_guard<std::mutex> g(mu_); srd_.version.clear(); }   // force SRD re-download
@@ -796,7 +838,7 @@ public:
             return true;
         }
         if (c.compare(0, 16, ".KWIQ SECTORFILE") == 0) {
-            std::string path = kwiq::Trim(std::string(sCommandLine).substr(16));
+            std::string path = kwiq::Trim(line.substr(16));
             { std::lock_guard<std::mutex> g(mu_); sectorPath_ = path; }
             SaveDataToSettings("kwiq_sectorfile_path", "KWIQ sector file folder or file", path.c_str());
             Msg(path.empty() ? "Sector file location: automatic" : "Sector file location: " + path, false);
@@ -810,9 +852,9 @@ public:
             return true;
         }
         if (c == ".KWIQ KEY" || c.compare(0, 10, ".KWIQ KEY ") == 0) {
-            std::string key = kwiq::Trim(std::string(sCommandLine).substr(9));
+            std::string key = kwiq::Trim(line.substr(9));
             if (key.empty()) Msg(apiKey_.empty() ? "No API key has been entered. Generate one on myKWIQ, then use: .kwiq key <your key>"
-                                                 : "API key " + kwiq::ApiKeyId(apiKey_) + " is in use.", false);
+                                                 : "An API key is connected.", false);
             else if (kwiq::Upper(key) == "CLEAR") SetApiKey("");
             else SetApiKey(key);
             return true;
@@ -841,7 +883,7 @@ public:
             std::lock_guard<std::mutex> g(mu_);
             std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED by Core") +
                 " | EuroScope " + (esVersion_.empty() ? std::string("?") : esVersion_) +
-                " | API key " + (apiKey_.empty() ? std::string("not set") : "ID " + kwiq::ApiKeyId(apiKey_)) +
+                " | API key " + (apiKey_.empty() ? std::string("not set") : std::string("connected")) + WineNote() +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
@@ -856,20 +898,19 @@ public:
             return true;
         }
         return CVCHPlugin::OnCompileCommand(sCommandLine);
-    }
+    } catch (...) { return false; }
 
-    // main thread: sector indicator of the position tracking an aircraft. The ID of the ESE position
-    // EuroScope identifies that controller as right now (by prefix, suffix and frequency, so a relief callsign
-    // or a controller covering another position gets the position actually worked), else Core's alias for
-    // the callsign. Empty if nobody tracks it or neither is known.
+    // main thread: sector indicator of the position tracking an aircraft: Core's alias for the ID of the ESE
+    // position EuroScope identifies that controller as right now (by prefix, suffix and frequency, so a relief
+    // callsign or a controller covering another position gets the position actually worked). Empty if nobody
+    // tracks it, EuroScope does not identify the controller, or Core does not list that position.
     std::string SectorFor(const char* trackerCallsign) {
         std::string cs = kwiq::Upper(trackerCallsign);
         EuroScopePlugIn::CController me = ControllerMyself();
         EuroScopePlugIn::CController c = me.IsValid() && kwiq::Upper(me.GetCallsign()) == cs ? me : ControllerSelect(trackerCallsign);
-        if (c.IsValid() && c.GetPositionIdentified() && c.GetPositionId() && *c.GetPositionId())
-            return kwiq::Upper(c.GetPositionId()).substr(0, 4);
+        if (!c.IsValid() || !c.GetPositionIdentified() || !c.GetPositionId() || !*c.GetPositionId()) return "";
         std::lock_guard<std::mutex> g(mu_);
-        auto it = sectors_.find(cs);
+        auto it = sectors_.find(kwiq::Upper(c.GetPositionId()));
         return it == sectors_.end() ? std::string() : it->second;
     }
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_; }
@@ -970,11 +1011,15 @@ public:
 
 private:
     // ---- API key setup through myKWIQ (main thread) -------------------------------------------
-    // Without a key (or when Core refuses it) the setup opens once per session, as soon as EuroScope
-    // has settled; the KWIQ button's API Key and .kwiq connect open it at any time.
+    // Whenever there is no key, or Core refuses it as missing, invalid, revoked or expired, the setup
+    // opens: as EuroScope starts, whenever the controller connects to the network, or once they log off
+    // if Core refuses the key while they are logged on (they are told in the chat). It cannot be
+    // dismissed: it closes only once a key is connected. A key refused because they left the roster
+    // or are suspended is only reported, as a new one wouldn't help.
     void StartKeySetup() {
         if (!keyLink_.Start()) {
-            Msg("The API key setup could not start. Copy your key from myKWIQ and use: .kwiq key <your key>", true);
+            Msg("The API key setup could not start (a firewall may be blocking it). Use Show Key on myKWIQ, under EuroScope "
+                "Plugin, then: .kwiq key <your key>. Need help? discord.kuwait-iraqvacc.net", true);
             return;
         }
         OpenConnectPage();
@@ -982,8 +1027,13 @@ private:
     }
     void OpenConnectPage() {
         if (!keyLink_.Running()) return;
-        std::string url = std::string(MYKWIQ_CONNECT_URL) + "?port=" + std::to_string(keyLink_.Port()) + "&state=" + keyLink_.State();
-        ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        // v=2: myKWIQ hands over a one-off code that is swapped for the key with Core (KeyLink::Claim)
+        std::string url = std::string(MYKWIQ_CONNECT_URL) + "?port=" + std::to_string(keyLink_.Port()) + "&state=" + keyLink_.State() + "&v=2";
+        // Wine (EuroScope on a Mac or Linux) hands the link to the system browser; if no browser opens,
+        // there or on Windows, the link is on the clipboard to paste in by hand (never in the chat)
+        bool opened = (INT_PTR)ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
+        kwiq_ui::CopyToClipboard(nullptr, url);
+        if (!opened) Msg("Your browser could not be opened. The link is on your clipboard: paste it into your browser.", true);
     }
     void TickKeySetup(std::time_t now) {
         std::string key = keyLink_.Take();
@@ -992,12 +1042,30 @@ private:
             kwiq_ui::ShowInfo("KWIQ API Key", "Your API key has been received and saved. The plugin is now connected.");
             return;
         }
-        if (kwiq_ui::KeyPromptOpen() && !keyLink_.Running()) kwiq_ui::CloseKeyPrompt();   // gave up waiting
-        // Only as EuroScope starts: a refused key later in a session is reported in the chat instead
-        if (!keyPrompted_ && now - startedAt_ >= 5 && now - startedAt_ <= STARTUP_SECONDS && (apiKey_.empty() || keyRefused_)) {
-            keyPrompted_ = true;
-            StartKeySetup();
+        // The listener gives up after 15 minutes; the setup stays, so start a new one for Reopen Browser
+        if (kwiq_ui::KeyPromptOpen() && !keyLink_.Running()) keyLink_.Start();
+        if (now - startedAt_ < 5) return;                    // let EuroScope settle first
+
+        std::string reason;
+        { std::lock_guard<std::mutex> g(mu_); reason = keyReason_; }
+        bool fixable = reason == "missing" || reason == "invalid" || reason == "revoked" || reason == "expired";
+        if (!(apiKey_.empty() || (keyRefused_ && fixable))) { justConnected_ = false; return; }
+
+        // One setup per problem: a new key, or a different refusal, is a new problem. Connecting to the
+        // network without a working key opens it again
+        std::string problem = apiKey_.empty() ? std::string("none") : kwiq::ApiKeyId(apiKey_) + ":" + reason;
+        bool onConnect = justConnected_;
+        justConnected_ = false;
+        if (keyLink_.Running() || (problem == keyPromptedFor_ && !onConnect)) return;
+        if (connected_ && !onConnect) {
+            if (problem != keyToldFor_) {
+                keyToldFor_ = problem;
+                Msg("Your API key needs connecting again. The setup will open when you log off, or use the KWIQ button and API Key.", true);
+            }
+            return;
         }
+        keyPromptedFor_ = problem;
+        StartKeySetup();
     }
 
     // ---- EuroScope version (main thread) ---------------------------------------------------------
@@ -1020,6 +1088,23 @@ private:
         Msg("Incorrect EuroScope version " + esVersion_ + " (the vACC uses " + list + "). Setup guide: " + url, true);
     }
 
+    // " | Wine 9.0" when EuroScope runs through Wine or CrossOver (a Mac or Linux), for support
+    static std::string WineNote() {
+        typedef const char* (*WineVersionFn)();
+        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+        WineVersionFn v = ntdll ? (WineVersionFn)GetProcAddress(ntdll, "wine_get_version") : nullptr;
+        return v ? std::string(" | Wine ") + v() : std::string();
+    }
+
+    static std::string KeyRefusedMessage(const std::string& reason) {
+        if (reason == "missing") return "Core needs your personal API key. Connect it with the KWIQ button and API Key, or .kwiq connect";
+        if (reason == "revoked") return "Your API key has been invalidated. Connect a new one with the KWIQ button and API Key, or .kwiq connect";
+        if (reason == "expired") return "Your API key has expired. Connect a new one with the KWIQ button and API Key, or .kwiq connect";
+        if (reason == "unlinked") return "Your API key no longer works, as you are no longer on the Kuwait & Iraq vACC roster.";
+        if (reason == "suspended") return "Your API key is paused while your VATSIM account is suspended.";
+        return "Core did not recognise your API key. Connect it again with the KWIQ button and API Key, or .kwiq connect";
+    }
+
     void SetApiKey(const std::string& key) {
         if (!key.empty() && !kwiq::IsApiKey(key)) {
             Msg("That is not a KWIQ API key. Copy it from myKWIQ, under EuroScope Plugin; it starts with kwiq_", true);
@@ -1033,7 +1118,7 @@ private:
         keyRefused_ = false;
         keyLink_.Stop();
         kwiq_ui::CloseKeyPrompt();
-        Msg(key.empty() ? "API key removed." : "API key " + kwiq::ApiKeyId(key) + " saved.", false);
+        Msg(key.empty() ? "API key removed." : "API key connected.", false);
     }
 
     struct CacheEntry {
@@ -1460,6 +1545,7 @@ private:
         if (net && !connected_) {
             connected_ = true;
             connectedAt_ = now;
+            justConnected_ = true;                           // a missing key's setup opens as they connect
             // Our position can tell OKAC from ORBB; the check runs on the next refresh, brought forward
             { std::lock_guard<std::mutex> g(mu_); myCallsign_ = ControllerMyself().GetCallsign(); }
             lastCore_ = 0;
@@ -1514,14 +1600,10 @@ private:
 public:
     void OnNotice(int kind, int button) {
         if (kind == kwiq_ui::NOTICE_KEY && button == 1) { OpenConnectPage(); kwiq_ui::ShowKeyPrompt(); }
-        if (kind == kwiq_ui::NOTICE_KEY && button == 2) {
-            keyLink_.Stop();
-            Msg("You can connect your API key later from the KWIQ button, or with .kwiq connect.", false);
-        }
         if (kind == kwiq_ui::NOTICE_ES_VERSION && button == 1) {
             std::string url;
             { std::lock_guard<std::mutex> g(mu_); url = esUrl_; }
-            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            if (kwiq::IsWebLink(url)) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
     }
 private:
@@ -1600,7 +1682,7 @@ private:
             motd_ = motd;
             esAccepted_ = c.Get("euroscope.versions");
             esUrl_ = Trim(c.Get("euroscope.setup_url", ES_SETUP_URL));
-            if (esUrl_.empty()) esUrl_ = ES_SETUP_URL;
+            if (!IsWebLink(esUrl_)) esUrl_ = ES_SETUP_URL;   // only a web page is ever opened (#44)
             esConfigured_ = true;
             sqNonDiscrete_ = squawk::ValidSquawk(nonDiscrete) ? nonDiscrete : "2000";
             sqNonDiscreteVfr_ = squawk::ValidSquawk(nonDiscreteVfr) ? nonDiscreteVfr : "7000";
@@ -1690,10 +1772,13 @@ private:
             using namespace kwiq;
             std::string body, err;
             // Core refuses requests without a valid personal key once it requires them: say so once, not per request
-            auto fail = [this](const std::string& src, const std::string& e) {
+            // Only a 401 means the key itself: anything else (Core down, a timeout) never sends anyone to myKWIQ
+            auto fail = [this, &body](const std::string& src, const std::string& e) {
                 if (e == "HTTP 401") {
+                    std::string reason = kwiq::Trim(body).compare(0, 4, "KEY|") == 0 ? kwiq::Trim(kwiq::Trim(body).substr(4)) : "invalid";
+                    { std::lock_guard<std::mutex> g(mu_); keyReason_ = reason; }
                     keyRefused_ = true;
-                    SetError("API key", "Core did not accept your API key. Connect it again from the KWIQ button, or with .kwiq connect");
+                    SetError("API key", KeyRefusedMessage(reason));
                 }
                 else SetError(src, e);
             };
@@ -1702,6 +1787,7 @@ private:
                 if (kwiq_net::HttpGet(CORE_CONFIG_URL, body, err)) {
                     ClearError("Config");
                     ClearError("API key");
+                    keyRefused_ = false;
                     ApplyConfig(ParseConfig(body));
                 } else fail("Config", err);
                 if (kwiq_net::HttpGet(CORE_EVENT_URL, body, err)) {
@@ -1772,13 +1858,15 @@ private:
     int buttonX_ = -1, buttonY_ = -1;                               // main thread only: from the radar's top left; -1 = top centre
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
-    bool keyPrompted_ = false;                                      // main thread only
+    std::string keyPromptedFor_, keyToldFor_;                      // main thread only: the key problem last offered / told about
+    bool justConnected_ = false;                                    // main thread only: logged on since the last key check
     std::string esVersion_;                                         // the running EuroScope's, read once at start
     bool esChecked_ = false;                                        // main thread only
     std::time_t startedAt_ = 0, lastNameRead_ = 0;
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
     std::atomic<bool> keyRefused_{ false };
+    std::string keyReason_;                                          // guarded by mu_: why Core last refused the key
     bool connected_ = false, soundPlayed_ = false, soundLooping_ = false, bannerWas_ = false;   // main thread only
     std::time_t connectedAt_ = 0, previewUntil_ = 0;                // main thread only
     static constexpr std::time_t PREVIEW_SECONDS = 15;
@@ -1842,7 +1930,8 @@ public:
 
     virtual void OnAsrContentToBeClosed(void) override { delete this; }
 
-    virtual void OnRefresh(HDC hDC, int Phase) override {
+    // As in CKWIQPlugin, every callback catches everything (#45)
+    virtual void OnRefresh(HDC hDC, int Phase) override try {
         if (!gPlugin) return;
         if (Phase == EuroScopePlugIn::REFRESH_PHASE_AFTER_LISTS) {
             std::time_t now = std::time(nullptr);
@@ -1873,20 +1962,20 @@ public:
             TextOutA(hDC, p.x, p.y - 9, alias.c_str(), (int)alias.size());
         }
         RestoreDC(hDC, saved);
-    }
+    } catch (...) {}
 
-    virtual void OnClickScreenObject(int ObjectType, const char*, POINT, RECT Area, int) override {
+    virtual void OnClickScreenObject(int ObjectType, const char*, POINT, RECT Area, int) override try {
         if (ObjectType == KWIQ_OBJ_BUTTON && gPlugin) gPlugin->OpenMenu(Area);
-    }
-    virtual void OnMoveScreenObject(int ObjectType, const char*, POINT Pt, RECT, bool Released) override {
+    } catch (...) {}
+    virtual void OnMoveScreenObject(int ObjectType, const char*, POINT Pt, RECT, bool Released) override try {
         if (ObjectType != KWIQ_OBJ_BUTTON || !gPlugin) return;
         gPlugin->MoveButton(GetRadarArea(), Pt, Released);
         RequestRefresh();
-    }
+    } catch (...) {}
     // the menu and the key box opened from the button report back here
-    virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override {
+    virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override try {
         if (gPlugin && FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_LAST) gPlugin->MenuAction(FunctionId, sItemString, Pt, Area);
-    }
+    } catch (...) {}
 
 private:
     // Red box with white OUTDATED SCT FILE, in the middle of the radar screen
@@ -1937,15 +2026,16 @@ private:
                                CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
 };
 
-EuroScopePlugIn::CRadarScreen* CKWIQPlugin::OnRadarScreenCreated(const char*, bool, bool, bool, bool) {
+EuroScopePlugIn::CRadarScreen* CKWIQPlugin::OnRadarScreenCreated(const char*, bool, bool, bool, bool) try {
     return new CKWIQRadar();
-}
+} catch (...) { return nullptr; }
 
+// Called from the windows' WndProcs, so nothing may escape into Windows either
 static void SrdSearchThunk(const std::string& adep, const std::string& ades, const std::string& lvl) {
-    if (gPlugin) gPlugin->RunSrdSearch(adep, ades, lvl);
+    try { if (gPlugin) gPlugin->RunSrdSearch(adep, ades, lvl); } catch (...) {}
 }
 static void NoticeThunk(int kind, int button) {
-    if (gPlugin) gPlugin->OnNotice(kind, button);
+    try { if (gPlugin) gPlugin->OnNotice(kind, button); } catch (...) {}
 }
 
 // Entry points: declared (with dllexport) in EuroScopePlugIn.h, so no extern "C" here. The loader

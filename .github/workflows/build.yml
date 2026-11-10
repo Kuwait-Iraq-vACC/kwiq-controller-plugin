@@ -2,8 +2,12 @@ name: build
 
 # main:          every build is published as a release (v0.5.0.<run>), which Core offers to controllers
 # pull requests: each one gets a test pre-release (pr-<number>), replaced on every push and removed when
-#                the pull request is closed. Core never offers pre-releases.
+#                the pull request is closed. Each one is linked in a comment on the pull request.
+#                Core never offers pre-releases.
 # manual run on another branch: a test pre-release named after the branch.
+# A push or pull request is only released when it changes what goes into the DLL (sources, CMakeLists.txt,
+# vcpkg.json, libs/). Anything else (tests, docs, workflows) is still tested and built, but not released.
+# A manual run always releases.
 on:
   push:
     branches: [main]
@@ -12,7 +16,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # to create releases
+  contents: write        # to create releases
+  pull-requests: write   # to comment on a pull request when its test build is published
 
 concurrency:
   group: build-${{ github.event.pull_request.number || github.ref }}
@@ -20,6 +25,32 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.diff.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check whether the DLL's inputs changed
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then echo "release=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # a pull request is compared as a whole, so it keeps its test build after a later test-only push
+          if ! changed=$(git diff --name-only "$BASE" HEAD); then
+            echo "Could not compare with $BASE, releasing anyway"; echo "release=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "$changed"
+          if echo "$changed" | grep -qE '^(libs/.*|[^/]+\.(cpp|c|h|hpp)|CMakeLists\.txt|vcpkg\.json)$'; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changes to the DLL's inputs, so no release"; echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
@@ -65,7 +96,21 @@ jobs:
           -DKWIQ_BUILD_NUMBER=${{ github.run_number }}
 
       - name: Build
-        run: cmake --build build --config Release
+        run: |
+          cmake --build build --config Release 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      # Every compiler warning, once each (#41). Vendored code (libs/, vcpkg, VCH, the Slots-Plugin's
+      # VatsimAPI.*) may have some; KWIQ's own files must have none.
+      - name: Compiler warnings
+        run: |
+          $all = @(Select-String -Path build.log -Pattern ': warning C\d+' |
+                   ForEach-Object { ($_.Line -replace '\s*\[[^\]]*\]\s*$', '').Trim() } | Sort-Object -Unique)
+          $vendored = '(?i)\\(libs|vcpkg_installed)\\|\\(requestMenu|internet|usefulStuff|Constant|stdafx|targetver|Config|VatsimAPI)\.(cpp|hpp|h)\('
+          $own = @($all | Where-Object { $_ -notmatch $vendored })
+          "$($all.Count) warning(s), $($own.Count) of them in KWIQ's own files"
+          foreach ($w in $all) { if ($w -match $vendored) { "  vendored: $w" } else { "::warning::$w" } }
+          if ($own.Count) { throw "KWIQ's own files must build without warnings" }
 
       - name: Check both DLLs exist and export their entry points
         run: |
@@ -97,9 +142,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [changes, build]
     # pull requests from forks get a read-only token, so they only get the artifact
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >
+      needs.changes.outputs.release == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -127,6 +174,74 @@ jobs:
           gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$tag" KWIQPlugin.dll --prerelease --target "$SHA" --title "$title" \
             --notes "For testing only. Core does not offer pre-releases to controllers. Built from ${SHA:0:7}."
+          if [ -n "$PR" ]; then
+            url=$(gh release view "$tag" --json url -q .url)
+            gh pr comment "$PR" --body "Test build $VERSION has been published as a pre-release: [$tag]($url) (built from ${SHA:0:7})."
+          fi
+
+  changelog:
+    # Every release from main rebuilds the changelog on docs.kuwait-iraqvacc.net from the release notes of
+    # every published release (pre-releases are never listed), and commits it to kwiq-documentation-site,
+    # which deploys on every push. Needs DOCS_REPO_TOKEN: Contents read and write on that repository only.
+    needs: release
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DOCS_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
+      PAGE: docs/Controller Guidance/KWIQ Controller Plugin/Changelog.md
+    steps:
+      - name: Check for the token
+        id: token
+        run: |
+          if [ -z "$DOCS_TOKEN" ]; then echo "::warning::DOCS_REPO_TOKEN is not set, so the changelog was not updated"; echo "ok=false" >> "$GITHUB_OUTPUT"
+          else echo "ok=true" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.ok == 'true'
+        with:
+          repository: Kuwait-Iraq-vACC/kwiq-documentation-site
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          path: docs-site
+
+      - name: Write the changelog
+        if: steps.token.outputs.ok == 'true'
+        run: |
+          cat > gen.py <<'PY'
+          import json, re, sys
+          # stdin: one release per line (tag_name, published_at, body); argv[1]: output Changelog.md
+          rels = [json.loads(l) for l in sys.stdin if l.strip()]
+          rels.sort(key=lambda r: r["published_at"], reverse=True)
+          out = ["---", "title: Changelog", "---", "",
+                 "Every release of the KWIQ Controller Plugin, newest first. The plugin offers each one as EuroScope starts.", ""]
+          for r in rels:
+              items = []
+              for line in (r.get("body") or "").splitlines():
+                  m = re.match(r"^\s*[*-]\s+(.*?)(?:\s+by\s+@\S+)?(?:\s+in\s+https?://\S+)?\s*$", line)
+                  if not m or line.lstrip().startswith(("**Full Changelog", "* @")):
+                      continue
+                  t = m.group(1).strip()
+                  if t and "made their first contribution" not in t:
+                      items.append("- " + t)
+              out += ["## " + r["tag_name"].lstrip("v"), "", "*" + r["published_at"][:10] + "*", ""]
+              out += items or ["- Maintenance release."]
+              out.append("")
+          open(sys.argv[1], "w").write("\n".join(out))
+          PY
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.prerelease|not) | select(.draft|not) | {tag_name, published_at, body}' \
+            | python3 gen.py "docs-site/$PAGE"
+
+      - name: Commit it
+        if: steps.token.outputs.ok == 'true'
+        working-directory: docs-site
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$PAGE"
+          git diff --cached --quiet && { echo "unchanged"; exit 0; }
+          git commit -m "KWIQ Controller Plugin changelog (${GITHUB_SHA::7})"
+          git push
 
   cleanup:
     # a closed pull request no longer needs its test build
