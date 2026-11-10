@@ -1,7 +1,8 @@
 // squawk_logic.hpp - when to give an aircraft a squawk, adapted from the UK Controller Plugin
 // (https://github.com/VATSIM-UK/uk-controller-plugin, src/plugin/squawk: SquawkAssignment, SquawkEventHandler,
-// SquawkGenerator, SquawkValidator; GPL-3.0). Core allocates the codes (domestic, VFR or international, from the
-// route and flight rules); this only decides when to ask.
+// SquawkGenerator, SquawkValidator; GPL-3.0). Core allocates the codes (from the requester's FIR, the route and
+// the flight rules); this only decides when to ask. No code is built in: which codes Core never assigns, and which
+// of those still count as a code the aircraft has, come from Core (GET /squawk/non-assignable).
 // Pure logic (no Windows / EuroScope dependencies), unit-tested in tests/test_logic.cpp.
 // License: GPL-3.0-or-later
 #pragma once
@@ -17,14 +18,63 @@ inline bool ValidSquawk(const std::string& s) {
     for (char c : s) if (c < '0' || c > '7') return false;
     return true;
 }
-// Never assigned from Core: emergency, radio failure, hijack and the "no code" ones
-inline bool AllowedSquawk(const std::string& s) {
-    return ValidSquawk(s) && s != "7500" && s != "7600" && s != "7700" && s != "1200" && s != "2200" &&
-           s != "0200" && s != "0000" && s != "1234";
+
+// ---- Core's non-assignable codes (UKCP's NonAssignableSquawkCode, with ranges, categories and a flag) -------
+// GET /api/plugin/squawk/non-assignable, one line per row:
+//   NONASSIGNABLE|<first>|<last>|<category>|<counts as assigned 0/1>|<description>
+// A single code has first = last, and may be any 1 to 4 digits (0 and 9999 turn up in the VATSIM data feed); a
+// range is two squawks, first <= last. Core never hands any of them out. "Counts as assigned" says whether an
+// aircraft showing the code has a code: yes for emergencies (7500, 7600, 7700), so the plugin never replaces
+// them; no for default and non-discrete codes (1200, 2000, 2200, 7000 ...), which are replaced automatically.
+struct NonAssignable {
+    std::string first, last, category, description;
+    bool countsAsAssigned = false;
+};
+using CodeList = std::vector<NonAssignable>;
+
+inline bool CodeText(const std::string& s) {
+    if (s.empty() || s.size() > 4) return false;
+    for (char c : s) if (c < '0' || c > '9') return false;
+    return true;
 }
-// A controller has given the aircraft a code (EuroScope's default and "none" codes, 2000 among them, do not count)
-inline bool HasAssignedSquawk(const std::string& s) {
-    return ValidSquawk(s) && s != "0200" && s != "2200" && s != "1200" && s != "2000" && s != "0000" && s != "1234";
+// Malformed rows are left out. An empty result means there is no list: squawk assignment stays off.
+inline CodeList ParseNonAssignable(const std::string& body) {
+    CodeList out;
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(Trim(line), '|');
+        if (f.size() < 6 || Trim(f[0]) != "NONASSIGNABLE") continue;
+        NonAssignable r;
+        r.first = Trim(f[1]);
+        r.last = Trim(f[2]);
+        r.category = Lower(Trim(f[3]));
+        std::string counts = Trim(f[4]);
+        if (counts != "0" && counts != "1") continue;
+        r.countsAsAssigned = counts == "1";
+        for (size_t i = 5; i < f.size(); i++) r.description += (i > 5 ? "|" : "") + f[i];
+        r.description = Trim(r.description);
+        if (r.first == r.last) { if (!CodeText(r.first)) continue; }
+        else if (!ValidSquawk(r.first) || !ValidSquawk(r.last) || r.first > r.last) continue;   // same length: text order is octal order
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+// The row a code falls in, or nullptr
+inline const NonAssignable* FindCode(const CodeList& list, const std::string& s) {
+    for (const auto& r : list) {
+        if (r.first == r.last) { if (s == r.first) return &r; }
+        else if (ValidSquawk(s) && s >= r.first && s <= r.last) return &r;
+    }
+    return nullptr;
+}
+// A code Core may hand out: a squawk that isn't on the list
+inline bool AllowedSquawk(const CodeList& list, const std::string& s) {
+    return ValidSquawk(s) && !FindCode(list, s);
+}
+// The aircraft has a code: a squawk that is either not on the list or on it as "counts as assigned"
+inline bool HasAssignedSquawk(const CodeList& list, const std::string& s) {
+    if (!ValidSquawk(s)) return false;
+    const NonAssignable* r = FindCode(list, s);
+    return !r || r->countsAsAssigned;
 }
 
 // ---- callsigns ---------------------------------------------------------------------------------
@@ -110,8 +160,8 @@ inline bool Possible(const User& u, const Aircraft& a) {
 }
 // UKCP GeneralAssignmentNeeded: no code yet, and either tracked by the user or waiting on the ground at an
 // airport the user gives departures their squawk
-inline bool AssignmentNeeded(const User& u, const Aircraft& a) {
-    if (!Possible(u, a) || HasAssignedSquawk(a.squawk)) return false;
+inline bool AssignmentNeeded(const User& u, const Aircraft& a, const CodeList& codes) {
+    if (!Possible(u, a) || HasAssignedSquawk(codes, a.squawk)) return false;
     if (a.trackedByMe) return true;
     return a.groundSpeed <= UNTRACKED_MAX_SPEED && a.fromOrigin <= UNTRACKED_MAX_FROM_ORIGIN && a.deliveryByMe;
 }
@@ -120,8 +170,8 @@ inline bool ForceNeeded(const Stored* s, const Aircraft& a) {
     return s && (s->origin != a.origin || s->destination != a.destination);
 }
 // Reconnected with the same plan: give it back the code it had (UKCP also needs no change of plan here)
-inline bool PreviousNeeded(const User& u, const Aircraft& a, const Stored* s) {
-    return AssignmentNeeded(u, a) && s && HasAssignedSquawk(s->squawk) && !ForceNeeded(s, a);
+inline bool PreviousNeeded(const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
+    return AssignmentNeeded(u, a, codes) && s && HasAssignedSquawk(codes, s->squawk) && !ForceNeeded(s, a);
 }
 // Forcing a new code, or setting one by hand: a controller, on an aircraft nobody else tracks
 inline bool ChangeAllowed(const User& u, const Aircraft& a) {
@@ -130,20 +180,20 @@ inline bool ChangeAllowed(const User& u, const Aircraft& a) {
 
 enum class Action { None, Previous, Assign };
 // UKCP SquawkEventHandler::AttemptAssignment, without the UK's circuit and local codes
-inline Action Decide(const User& u, const Aircraft& a, const Stored* s) {
-    if (PreviousNeeded(u, a, s)) return Action::Previous;
+inline Action Decide(const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
+    if (PreviousNeeded(u, a, s, codes)) return Action::Previous;
     if (s && s->byHand && !ForceNeeded(s, a)) return Action::None;
-    if (AssignmentNeeded(u, a)) return Action::Assign;
+    if (AssignmentNeeded(u, a, codes)) return Action::Assign;
     return Action::None;
 }
 
 // ---- Core ------------------------------------------------------------------------------------------
-// /api/plugin/squawk-assignment/<callsign> answers SQUAWK|<code>; anything else, or a code Core must
-// never hand out, is no code
-inline std::string ParseSquawk(const std::string& body) {
+// /api/plugin/squawk-assignment/<callsign> answers SQUAWK|<code>; anything else, or a code on Core's own
+// non-assignable list, is no code
+inline std::string ParseSquawk(const std::string& body, const CodeList& codes) {
     for (const auto& line : SplitChar(body, '\n')) {
         auto f = SplitChar(Trim(line), '|');
-        if (f.size() >= 2 && f[0] == "SQUAWK" && AllowedSquawk(Trim(f[1]))) return Trim(f[1]);
+        if (f.size() >= 2 && f[0] == "SQUAWK" && AllowedSquawk(codes, Trim(f[1]))) return Trim(f[1]);
     }
     return "";
 }
@@ -173,6 +223,13 @@ inline std::string FormEncode(const std::vector<std::pair<std::string, std::stri
         }
     }
     return out;
+}
+
+// PUT /squawk-assignment/<callsign>: the flight, and who is asking (the controller's own callsign), as Core
+// picks the range from the requester's FIR
+inline std::string AssignForm(const Aircraft& a, const std::string& requester) {
+    return FormEncode({ { "origin", a.origin }, { "destination", a.destination }, { "rules", a.vfr ? "V" : "I" },
+                        { "requester", requester } });
 }
 
 } // namespace kwiq::squawk

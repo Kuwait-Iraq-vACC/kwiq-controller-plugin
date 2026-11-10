@@ -158,8 +158,36 @@ int main() {
     {
         using namespace kwiq::squawk;
         CHECK(ValidSquawk("4521") && !ValidSquawk("4528") && !ValidSquawk("452") && !ValidSquawk("45a1"));
-        CHECK(!AllowedSquawk("7700") && !AllowedSquawk("2200") && AllowedSquawk("4521"));
-        CHECK(!HasAssignedSquawk("2200") && !HasAssignedSquawk("2000") && !HasAssignedSquawk("") && HasAssignedSquawk("7000"));
+        // Core's non-assignable codes: never handed out; "counts as assigned" only for the emergency ones
+        const CodeList codes = ParseNonAssignable(
+            "NONASSIGNABLE|7500|7500|Emergency|1|Never to be used on the VATSIM network\r\n"
+            "NONASSIGNABLE|7600|7600|emergency|1|Radio failure\n"
+            "NONASSIGNABLE|7700|7700|emergency|1|Mayday\n"
+            "NONASSIGNABLE|2000|2000|conspicuity|0|IFR conspicuity\n"
+            "NONASSIGNABLE|7000|7000|conspicuity|0|VFR conspicuity\n"
+            "NONASSIGNABLE|2200|2200|default|0|Often used VATSIM non-discrete code\n"
+            "NONASSIGNABLE|1200|1200|default|0|Default code on pilot clients\n"
+            "NONASSIGNABLE|0|0|default|0|Sometimes appears in the VATSIM data feed\n"
+            "NONASSIGNABLE|9999|9999|default|0|Sometimes appears in the VATSIM data feed\n"
+            "NONASSIGNABLE|0440|0447|test|0|A range | with a bar\n"
+            "NONASSIGNABLE|7477|7400|other|0|first after last\n"                 // left out: malformed
+            "NONASSIGNABLE|1280|1290|other|0|not octal\n"
+            "NONASSIGNABLE|1300|1300|other|2|bad flag\n"
+            "NONASSIGNABLE|12345|12345|other|0|too long\n"
+            "NONASSIGNABLE|1400|1400|other\n"
+            "SQUAWK|1234\n");
+        CHECK(codes.size() == 10 && codes[0].category == "emergency" && codes[0].countsAsAssigned && !codes[3].countsAsAssigned);
+        CHECK(codes[9].first == "0440" && codes[9].last == "0447" && codes[9].description == "A range | with a bar");
+        CHECK(ParseNonAssignable("").empty() && ParseNonAssignable("junk\nSQUAWK|4521\n").empty());
+        CHECK(FindCode(codes, "0") && FindCode(codes, "9999") && FindCode(codes, "0443") && !FindCode(codes, "0450") && !FindCode(codes, "4521"));
+        // use 1: Core may hand out a code only if it isn't on the list
+        CHECK(!AllowedSquawk(codes, "7700") && !AllowedSquawk(codes, "2200") && !AllowedSquawk(codes, "0444") && AllowedSquawk(codes, "4521"));
+        CHECK(AllowedSquawk(codes, "1234") && !AllowedSquawk(codes, "1238") && !AllowedSquawk(CodeList(), "9999"));   // only what Core lists
+        // use 2: an emergency code counts as a code; default and non-discrete ones don't
+        CHECK(HasAssignedSquawk(codes, "7700") && HasAssignedSquawk(codes, "7500") && HasAssignedSquawk(codes, "4521"));
+        CHECK(!HasAssignedSquawk(codes, "2200") && !HasAssignedSquawk(codes, "2000") && !HasAssignedSquawk(codes, "7000") &&
+              !HasAssignedSquawk(codes, "1200") && !HasAssignedSquawk(codes, "0441") && !HasAssignedSquawk(codes, ""));
+        CHECK(HasAssignedSquawk(CodeList(), "2000"));               // nothing built in
         CHECK(PositionMatches("OKBK_TWR", "OKBK_N_TWR") && PositionMatches("OKBK_TWR", "okbk_twr"));
         CHECK(!PositionMatches("OKBK_TWR", "OKBK_APP") && !PositionMatches("OKBK_TWR", "OKBK"));
         CHECK(CallsignPrefix("OKBK_N_TWR") == "OKBK" && CallsignSuffix("OKBK_N_TWR") == "TWR");
@@ -177,40 +205,50 @@ int main() {
         Aircraft gnd;                                               // on the ground at OKBK
         gnd.callsign = "KAC123"; gnd.origin = "OKBK"; gnd.destination = "OMDB";
         gnd.fromOrigin = 0.5; gnd.altitude = 200; gnd.groundSpeed = 0; gnd.deliveryByMe = true;
-        CHECK(Decide(twr, gnd, nullptr) == Action::Assign);
+        CHECK(Decide(twr, gnd, nullptr, codes) == Action::Assign);
         Aircraft a = gnd; a.deliveryByMe = false;
-        CHECK(Decide(twr, a, nullptr) == Action::None);
+        CHECK(Decide(twr, a, nullptr, codes) == Action::None);
         a = gnd; a.groundSpeed = 140;                               // untracked and rolling
-        CHECK(Decide(twr, a, nullptr) == Action::None);
+        CHECK(Decide(twr, a, nullptr, codes) == Action::None);
         a = gnd; a.squawk = "4521";
-        CHECK(Decide(twr, a, nullptr) == Action::None);
+        CHECK(Decide(twr, a, nullptr, codes) == Action::None);
         a = gnd; a.squawk = "2000";                                 // 2000 is no code
-        CHECK(Decide(twr, a, nullptr) == Action::Assign);
+        CHECK(Decide(twr, a, nullptr, codes) == Action::Assign);
+        a = gnd; a.squawk = "7000";                                 // VFR conspicuity doesn't count: replaced
+        CHECK(Decide(twr, a, nullptr, codes) == Action::Assign);
+        a = gnd; a.squawk = "7700";                                 // an emergency counts: never replaced
+        CHECK(Decide(twr, a, nullptr, codes) == Action::None);
+        a = gnd; a.squawk = "7600";
+        CHECK(Decide(twr, a, nullptr, codes) == Action::None);
         a = gnd; a.altitude = 0;                                    // no position yet
-        CHECK(Decide(twr, a, nullptr) == Action::None);
-        CHECK(Decide(obs, gnd, nullptr) == Action::None);
+        CHECK(Decide(twr, a, nullptr, codes) == Action::None);
+        CHECK(Decide(obs, gnd, nullptr, codes) == Action::None);
         a = gnd; a.vfr = true; a.destination = "OKBK";              // VFR circuits: an ordinary code, Core picks the range
-        CHECK(Decide(twr, a, nullptr) == Action::Assign);
+        CHECK(Decide(twr, a, nullptr, codes) == Action::Assign);
         Stored same{ "OKBK", "OMDB", "4521", false, 0 }, moved{ "OKBK", "OTHH", "4521", false, 0 };
-        CHECK(Decide(twr, gnd, &same) == Action::Previous);         // reconnected: same code back
-        CHECK(ForceNeeded(&moved, gnd) && Decide(twr, gnd, &moved) == Action::Assign);
+        CHECK(Decide(twr, gnd, &same, codes) == Action::Previous);         // reconnected: same code back
+        CHECK(ForceNeeded(&moved, gnd) && Decide(twr, gnd, &moved, codes) == Action::Assign);
         Stored byHand{ "OKBK", "OMDB", "2000", true, 0 };           // set to 2000 by hand: left alone
         a = gnd; a.squawk = "2000";
-        CHECK(Decide(twr, a, &byHand) == Action::None);
+        CHECK(Decide(twr, a, &byHand, codes) == Action::None);
         byHand.destination = "OTHH";                                // until the plan changes
-        CHECK(Decide(twr, a, &byHand) == Action::Assign);
+        CHECK(Decide(twr, a, &byHand, codes) == Action::Assign);
 
         Aircraft trk = gnd;                                         // tracked by the user, airborne, far away
         trk.tracked = trk.trackedByMe = true; trk.deliveryByMe = false;
         trk.groundSpeed = 450; trk.fromOrigin = 120; trk.altitude = 30000;
-        CHECK(Decide(ctr, trk, nullptr) == Action::Assign);
+        CHECK(Decide(ctr, trk, nullptr, codes) == Action::Assign);
 
         Aircraft other = gnd; other.tracked = true;
         CHECK(ChangeAllowed(twr, gnd) && !ChangeAllowed(twr, other) && !ChangeAllowed(obs, gnd));
-        CHECK(ParseSquawk("SQUAWK|4521\r\n") == "4521" && ParseSquawk("SQUAWK|7700") == "" && ParseSquawk("nope") == "");
+        CHECK(ParseSquawk("SQUAWK|4521\r\n", codes) == "4521" && ParseSquawk("SQUAWK|7700", codes) == "" && ParseSquawk("nope", codes) == "");
         CHECK(ParseError("ERROR|No codes left\n") == "No codes left" && ParseError("SQUAWK|4521") == "");
         CHECK(UrlSafeCallsign("KAC123") && !UrlSafeCallsign("KAC/12") && !UrlSafeCallsign(""));
         CHECK(FormEncode({ { "origin", "OKBK" }, { "rules", "V I" } }) == "origin=OKBK&rules=V%20I");
+        // the request: the flight and the requester (the controller's own callsign)
+        CHECK(AssignForm(gnd, "OKBK_TWR") == "origin=OKBK&destination=OMDB&rules=I&requester=OKBK_TWR");
+        Aircraft v = gnd; v.vfr = true;
+        CHECK(AssignForm(v, "ORBI_N_APP") == "origin=OKBK&destination=OMDB&rules=V&requester=ORBI_N_APP");
     }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);

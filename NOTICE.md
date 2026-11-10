@@ -17,7 +17,8 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 ## Changes made to the UK Controller Plugin's squawk code
 - Ported from UKCP's classes (SquawkAssignment, SquawkEventHandler, SquawkGenerator, SquawkAssignmentMenu, SquawkValidator, Login) to plain functions in `squawk_logic.hpp` and the EuroScope events in `KWIQPlugin.cpp`.
 - Codes come from Core (`/api/plugin/squawk-assignment/<callsign>`) instead of the UKCP API. Requests are form fields and answers are plain text (`SQUAWK|<code>`), like the rest of Core's plugin API.
-- UKCP's general and local code types are one request: Core picks the range (domestic, VFR or international) from the departure, destination and flight rules. The UK's circuit code (7010) and local codes are gone.
+- UKCP's general and local code types are one request: Core picks the range from the requesting controller's FIR, the departure, the destination and the flight rules. The UK's circuit code and local codes are gone.
+- No code is built in: the codes never assigned, and which of them count as a code the aircraft has (UKCP's `HasAssignedSquawk`), come from Core's `/squawk/non-assignable`.
 - UKCP's conspicuity option is Non-discrete, with the codes (2000, 7000 for VFR) set in Core. No code is held while Core is asked; an aircraft Core could not give a code is not asked for again for a minute.
 - Who gives departures their squawk comes from Core's top-down order (`/api/plugin/squawk/topdown`) instead of UKCP's airfield ownership.
 - A reconnecting aircraft only gets its old code back if its departure and destination are unchanged; a code set by hand is left alone until they change.
