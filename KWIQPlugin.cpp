@@ -16,6 +16,7 @@
 #include <map>
 #include <set>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <mmsystem.h>       // PlaySound (link winmm)
 #include <shellapi.h>       // ShellExecute
@@ -294,157 +295,64 @@ static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows, size_t total)
     SetWindowTextA(gSrd.sInfo, info.c_str());
 }
 
-// ---- Notice popups -------------------------------------------------------------------------
-// Windows-style message boxes (title bar, icon, message, buttons on a grey strip), but not modal:
-// EuroScope keeps running behind them and they never take keyboard focus. They are only shown when
-// EuroScope starts, never in the middle of a session.
-enum { NOTICE_KEY = 2, NOTICE_INFO = 3, NOTICE_ES_VERSION = 4 };
-static void (*gOnNotice)(int kind, int button) = nullptr;       // button 1 = first, 2 = second (or closed)
-static const char* const kNoticeClass = "KWIQNoticeWnd";
-static bool gNoticeReg = false;
-enum { NW = 440, NPAD = 22, NICON = 32, NBTN_W = 112, NBTN_H = 28, NFOOT = 48 };
-struct Notice {
-    HWND hwnd = nullptr;
-    int kind = 0, textH = 0;
-    LPCSTR icon = nullptr;
-    std::string body;
-};
-static Notice gKey, gInfo, gEsVersion;
-static HFONT gFontBody = nullptr;
-
-static void PaintNotice(HWND h, const Notice& n) {
-    PAINTSTRUCT ps;
-    HDC dc = BeginPaint(h, &ps);
-    RECT rc; GetClientRect(h, &rc);
-    RECT body = rc, foot = rc;
-    body.bottom = rc.bottom - NFOOT; foot.top = body.bottom;
-    FillRect(dc, &body, (HBRUSH)GetStockObject(WHITE_BRUSH));
-    HBRUSH f = CreateSolidBrush(RGB(240, 240, 240));
-    FillRect(dc, &foot, f); DeleteObject(f);
-    if (n.icon) DrawIcon(dc, NPAD, NPAD, LoadIconA(nullptr, n.icon));
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(0, 0, 0));
-    HGDIOBJ old = SelectObject(dc, gFontBody);
-    RECT tb = { NPAD + NICON + 14, NPAD + 6, rc.right - NPAD, body.bottom - NPAD };
-    DrawTextA(dc, n.body.c_str(), -1, &tb, DT_WORDBREAK | DT_LEFT | DT_NOPREFIX);
-    SelectObject(dc, old);
-    EndPaint(h, &ps);
-}
-
-static LRESULT CALLBACK NoticeProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    Notice* n = (Notice*)GetWindowLongPtrA(h, GWLP_USERDATA);
-    switch (m) {
-    case WM_NCCREATE:
-        SetWindowLongPtrA(h, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTA*)l)->lpCreateParams);
-        break;
-    case WM_ERASEBKGND: return 1;
-    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
-    case WM_NCHITTEST: {                                 // the key setup cannot be dragged by its title bar
-        LRESULT hit = DefWindowProcA(h, m, w, l);
-        return (n && n->kind == NOTICE_KEY && hit == HTCAPTION) ? HTCLIENT : hit;
+// ---- Message boxes ---------------------------------------------------------------------------------
+// Every popup is a plain Windows message box, shown the way the UK Controller Plugin shows its own
+// (kwiq_win::Box: MessageBoxW, owned by EuroScope's active window, on EuroScope's thread) (#55).
+// The one exception is the API key setup: it waits while the controller signs in to myKWIQ, up to the
+// 15 minutes the listener waits, so it runs on a thread of its own and EuroScope keeps going. It is
+// not owned by EuroScope, so MB_SETFOREGROUND | MB_TOPMOST keep it in front. OK opens the page again
+// and the box comes back until the key arrives; the plugin then closes it, so it can't be dismissed (#18).
+class KeySetupBox {
+public:
+    ~KeySetupBox() { Close(); }
+    bool Open() const { return running_; }
+    void Show() {
+        if (running_) return;
+        if (thread_.joinable()) thread_.join();
+        closing_ = false;
+        reopen_ = false;
+        running_ = true;
+        thread_ = std::thread(&KeySetupBox::Run, this);
     }
-    case WM_SYSCOMMAND:
-        if (n && n->kind == NOTICE_KEY && (w & 0xFFF0) == SC_MOVE) return 0;
-        break;
-    case WM_PAINT:
-        if (n) { PaintNotice(h, *n); return 0; }
-        break;
-    case WM_COMMAND: {
-        int id = LOWORD(w);
-        if (n && (id == 1 || id == 2)) {
-            int kind = n->kind;
-            DestroyWindow(h);
-            if (gOnNotice) gOnNotice(kind, id);
+    // True once after each OK: the plugin opens myKWIQ's page again (main thread)
+    bool TakeReopen() { return reopen_.exchange(false); }
+    // Closes the box (OK, as if clicked) and waits for its thread, which takes a few milliseconds
+    void Close() {
+        closing_ = true;
+        while (running_) {                       // the box may not be up yet: ask until the thread ends
+            DWORD id = threadId_;
+            if (id) EnumThreadWindows(id, CloseBox, 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        return 0;
+        if (thread_.joinable()) thread_.join();
     }
-    case WM_CLOSE: {                                     // the title bar's X counts as the last button
-        int kind = n ? n->kind : 0;
-        if (kind == NOTICE_KEY) return 0;                // the key setup only closes once a key is connected
-        DestroyWindow(h);
-        if (gOnNotice && kind) gOnNotice(kind, 2);
-        return 0;
-    }
-    case WM_NCDESTROY:
-        if (n) *n = Notice();
-        SetWindowLongPtrA(h, GWLP_USERDATA, 0);
-        break;
-    }
-    return DefWindowProcA(h, m, w, l);
-}
 
-// btn1 is on the right, as the main choice; btn2 (optional) to its left
-static bool ShowNotice(Notice& n, int kind, const std::string& title, const std::string& body, LPCSTR icon,
-                       const char* btn1, const char* btn2) {
-    if (!gMod)
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)&NoticeProc, &gMod);
-    if (!gNoticeReg) {
-        WNDCLASSEXA wc; ZeroMemory(&wc, sizeof(wc));
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = NoticeProc;
-        wc.hInstance = gMod;
-        wc.hCursor = LoadCursorA(nullptr, MAKEINTRESOURCEA(32512));
-        wc.lpszClassName = kNoticeClass;
-        if (!RegisterClassExA(&wc)) return false;
-        gNoticeReg = true;
+private:
+    static BOOL CALLBACK CloseBox(HWND h, LPARAM) { PostMessageW(h, WM_COMMAND, IDOK, 0); return TRUE; }
+    void Run() {
+        threadId_ = GetCurrentThreadId();
+        try {
+            while (!closing_) {
+                MessageBoxW(nullptr,
+                            L"Sign in to myKWIQ in your browser and click Connect EuroScope. The link is also on your "
+                            L"clipboard.\r\n\r\nThis message closes once your API key is connected. Select OK to open the "
+                            L"page again.\r\n\r\nNeed help? discord.kuwait-iraqvacc.net",
+                            L"KWIQ API Key Setup", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
+                if (!closing_) reopen_ = true;
+            }
+        } catch (...) {}
+        running_ = false;
     }
-    if (!gFontBody) {                                    // the font Windows uses in its own message boxes
-        NONCLIENTMETRICSA ncm; ZeroMemory(&ncm, sizeof(ncm));
-        ncm.cbSize = sizeof(ncm);
-        gFontBody = SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)
-            ? CreateFontIndirectA(&ncm.lfMessageFont) : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    }
-    if (n.hwnd) DestroyWindow(n.hwnd);                  // WM_NCDESTROY resets n
-    n = Notice();
-    n.kind = kind; n.body = body; n.icon = icon;
+    std::thread thread_;
+    std::atomic<bool> running_{ false }, closing_{ false }, reopen_{ false };
+    std::atomic<DWORD> threadId_{ 0 };
+};
+static KeySetupBox gKeyBox;
 
-    HDC dc = GetDC(nullptr);
-    HGDIOBJ old = SelectObject(dc, gFontBody);
-    RECT tr = { 0, 0, NW - 2 * NPAD - NICON - 14, 0 };
-    DrawTextA(dc, body.c_str(), -1, &tr, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
-    SelectObject(dc, old);
-    ReleaseDC(nullptr, dc);
-    int bodyH = (std::max)((int)(tr.bottom - tr.top) + 12, (int)NICON) + 2 * NPAD;
-
-    // The key setup has no X: it stays until a key is connected
-    DWORD style = WS_POPUP | WS_CAPTION | (kind == NOTICE_KEY ? 0 : WS_SYSMENU), ex = WS_EX_TOPMOST | WS_EX_DLGMODALFRAME | WS_EX_NOACTIVATE;
-    RECT rc = { 0, 0, NW, bodyH + NFOOT };
-    AdjustWindowRectEx(&rc, style, FALSE, ex);
-    int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
-    int x, y;
-    Centre(ww, wh, x, y);
-    HWND h = CreateWindowExA(ex, kNoticeClass, title.c_str(), style, x, y, ww, wh, nullptr, nullptr, gMod, &n);
-    if (!h) { n = Notice(); return false; }
-    n.hwnd = h;
-    int by = bodyH + (NFOOT - NBTN_H) / 2;
-    HWND b1 = Child("BUTTON", btn1, BS_DEFPUSHBUTTON, NW - NPAD - NBTN_W, by, NBTN_W, NBTN_H, h, 1);
-    SendMessageA(b1, WM_SETFONT, (WPARAM)gFontBody, TRUE);
-    if (btn2 && *btn2) {
-        HWND b2 = Child("BUTTON", btn2, BS_PUSHBUTTON, NW - NPAD - 2 * NBTN_W - 8, by, NBTN_W, NBTN_H, h, 2);
-        SendMessageA(b2, WM_SETFONT, (WPARAM)gFontBody, TRUE);
-    }
-    ShowWindow(h, SW_SHOWNOACTIVATE);
-    return true;
-}
-
-// API key setup: waits while the controller connects on myKWIQ, and closes only once the key arrives.
-static void ShowKeyPrompt() {
-    ShowNotice(gKey, NOTICE_KEY, "KWIQ API Key Setup",
-               "Sign in to myKWIQ in your browser and click Connect EuroScope. This window closes once your API key "
-               "is connected. The link is also on your clipboard. Help: discord.kuwait-iraqvacc.net",
-               IDI_INFORMATION, "Reopen Browser", nullptr);
-}
-static bool KeyPromptOpen() { return gKey.hwnd != nullptr; }
-static void CloseKeyPrompt() { if (gKey.hwnd) DestroyWindow(gKey.hwnd); }
-// A plain confirmation, e.g. once the API key has been saved
-static void ShowInfo(const std::string& title, const std::string& body) {
-    ShowNotice(gInfo, NOTICE_INFO, title, body, IDI_INFORMATION, "OK", nullptr);
-}
-// Incorrect EuroScope version: OK opens the setup guide
-static void ShowEsVersion(const std::string& body) {
-    ShowNotice(gEsVersion, NOTICE_ES_VERSION, "Incorrect EuroScope Version", body, IDI_WARNING, "OK", nullptr);
-}
+static void ShowKeyPrompt() { gKeyBox.Show(); }
+static bool KeyPromptOpen() { return gKeyBox.Open(); }
+static bool KeyPromptReopen() { return gKeyBox.TakeReopen(); }
+static void CloseKeyPrompt() { gKeyBox.Close(); }
 
 // ---- Procedure notifications window (KWIQ menu > Notifications) --------------------------------
 // The list on the left (unread first marked *), the selected one's text on the right, and Mark read /
@@ -559,11 +467,7 @@ static void UpdateNotices(const std::vector<kwiq::ProcedureNotice>& items) {
 static void Shutdown() {
     if (gNotices.hwnd) DestroyWindow(gNotices.hwnd);
     if (gNoticesReg && gMod) { UnregisterClassA(kNoticesClass, gMod); gNoticesReg = false; }
-    if (gKey.hwnd) DestroyWindow(gKey.hwnd);
-    if (gInfo.hwnd) DestroyWindow(gInfo.hwnd);
-    if (gEsVersion.hwnd) DestroyWindow(gEsVersion.hwnd);
-    if (gFontBody) { DeleteObject(gFontBody); gFontBody = nullptr; }
-    if (gNoticeReg && gMod) { UnregisterClassA(kNoticeClass, gMod); gNoticeReg = false; }
+    gKeyBox.Close();                                     // its thread must end before the plugin does
     if (gEvt.hwnd) DestroyWindow(gEvt.hwnd);
     if (gSrd.hwnd) DestroyWindow(gSrd.hwnd);
     if (gClassReg && gMod) { UnregisterClassA(kClass, gMod); gClassReg = false; }
@@ -715,7 +619,6 @@ struct SfStatus {
     std::string package, local, upstream, url, sound;               // package = OKAC or ORBB; sound = resolved wav path or empty
 };
 static void SrdSearchThunk(const std::string& adep, const std::string& ades, const std::string& lvl);
-static void NoticeThunk(int kind, int button);
 
 class CKWIQPlugin : public CVCHPlugin {
 public:
@@ -737,7 +640,6 @@ public:
         RegisterTagItemFunction("Explain FPC result",       KWIQ_FUNC_FPC_EXPLAIN);
         RegisterTagItemFunction("Open SRD search window",   KWIQ_FUNC_SRD_SEARCH);
         kwiq_ui::gOnSearch = &SrdSearchThunk;
-        kwiq_ui::gOnNotice = &NoticeThunk;
         apiKey_ = apikey::Load();
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
         // myKWIQ's one-off code, swapped for the key with Core on the listener's thread
@@ -766,7 +668,6 @@ public:
     }
     virtual ~CKWIQPlugin() {
         kwiq_ui::gOnSearch = nullptr;
-        kwiq_ui::gOnNotice = nullptr;
         kwiq_ui::Shutdown();
         keyLink_.Stop();
         rdf_.Stop();                                         // TrackAudio's thread uses curl and this plugin (#47)
@@ -1366,11 +1267,13 @@ private:
         std::string key = keyLink_.Take();
         if (!key.empty()) {
             SetApiKey(key);
-            kwiq_ui::ShowInfo("KWIQ API Key", "Your API key has been received and saved. The plugin is now connected.");
+            kwiq_win::Box("KWIQ API Key Connected", "Your API key has been received and saved. The plugin is now connected.",
+                          MB_OK | MB_ICONINFORMATION);
             return;
         }
-        // The listener gives up after 15 minutes; the setup stays, so start a new one for Reopen Browser
+        // The listener gives up after 15 minutes; the setup stays, so start a new one for the next OK
         if (kwiq_ui::KeyPromptOpen() && !keyLink_.Running()) keyLink_.Start();
+        if (kwiq_ui::KeyPromptReopen()) OpenConnectPage();   // OK in the setup box: the page again
         if (now - startedAt_ < 5) return;                    // let EuroScope settle first
 
         std::string reason;
@@ -1409,10 +1312,14 @@ private:
         if (kwiq::EuroScopeVersionAccepted(esVersion_, accepted)) return;
         std::string list;
         for (const std::string& v : kwiq::EuroScopeVersions(accepted)) list += (list.empty() ? "" : " or ") + v;
-        if (now - startedAt_ <= STARTUP_SECONDS)
-            kwiq_ui::ShowEsVersion("You are on an incorrect EuroScope version: " + esVersion_ + ". The Kuwait & Iraq vACC uses " +
-                                   list + ".\n\nPress OK to open the EuroScope setup guide.");
         Msg("Incorrect EuroScope version " + esVersion_ + " (the vACC uses " + list + "). Setup guide: " + url, true);
+        // As UKCP asks about its API key: OK opens the page, Cancel doesn't (EuroScope's thread, modal)
+        if (now - startedAt_ <= STARTUP_SECONDS &&
+            kwiq_win::Box("KWIQ Incorrect EuroScope Version",
+                          "You are on an incorrect EuroScope version: " + esVersion_ + ". The Kuwait & Iraq vACC uses " + list +
+                          ".\r\n\r\nSelect OK to open the EuroScope setup guide.", MB_OKCANCEL | MB_ICONWARNING) == IDOK &&
+            kwiq::IsWebLink(url))
+            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 
     // " | Wine 9.0" when EuroScope runs through Wine or CrossOver (a Mac or Linux), for support
@@ -1583,16 +1490,6 @@ private:
     static inline std::vector<EuroScopePlugIn::CRadarScreen*> radars_;
     void RefreshRadars() { for (auto* r : radars_) r->RequestRefresh(); }
 
-public:
-    void OnNotice(int kind, int button) {
-        if (kind == kwiq_ui::NOTICE_KEY && button == 1) { OpenConnectPage(); kwiq_ui::ShowKeyPrompt(); }
-        if (kind == kwiq_ui::NOTICE_ES_VERSION && button == 1) {
-            std::string url;
-            { std::lock_guard<std::mutex> g(mu_); url = esUrl_; }
-            if (kwiq::IsWebLink(url)) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        }
-    }
-private:
     void Msg(const std::string& m, bool err) {
         DisplayUserMessage("KWIQ Controller Plugin", err ? "Error" : "Info", m.c_str(), true, err, false, false, false);
     }
@@ -2022,9 +1919,6 @@ EuroScopePlugIn::CRadarScreen* CKWIQPlugin::OnRadarScreenCreated(const char*, bo
 // Called from the windows' WndProcs, so nothing may escape into Windows either
 static void SrdSearchThunk(const std::string& adep, const std::string& ades, const std::string& lvl) {
     try { if (gPlugin) gPlugin->RunSrdSearch(adep, ades, lvl); } catch (...) {}
-}
-static void NoticeThunk(int kind, int button) {
-    try { if (gPlugin) gPlugin->OnNotice(kind, button); } catch (...) {}
 }
 
 // Entry points: declared (with dllexport) in EuroScopePlugIn.h, so no extern "C" here. The loader

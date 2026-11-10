@@ -7,6 +7,7 @@
 //      plugin is to start (in full, reduced after a declined update, or not at all: Core's kill switch).
 //   3. The plugin is loaded from bin.
 // This file never changes itself: a new loader comes with the next sector file packages.
+// Its message boxes are UKCP's (kwiq_win::Box): shown while EuroScope loads the plugin, as UKCP's loader does.
 
 #include "kwiq_win.hpp"
 #include "EuroScopePlugIn.h"
@@ -42,11 +43,18 @@ static void Inactive(EuroScopePlugIn::CPlugIn** pp, const std::string& why) {
     *pp = gFallback = new CKWIQUnavailable(why);
 }
 
-// The first time: download the updater, with the controller's OK. Returns why it failed, or "".
-static std::string FirstTimeDownload(const std::string& updater) {
-    if (Box("Performing first time download. This will download and run the KWIQ Plugin Updater to install the plugin.\n\n"
-            "Select OK to continue.", MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
-        return "The first time download was cancelled. It will be offered again the next time EuroScope starts.";
+// As UKCP's DisplayLoaderError
+static void LoaderError(const std::string& message, UINT icon = MB_ICONSTOP) {
+    Box("KWIQ Loader Error", message, MB_OK | icon);
+}
+
+// The first time: download the updater, with the controller's OK (UKCP's DisplayFirstTimeDownloadMessage).
+// Returns why it failed, or "". cancelled: the controller chose Cancel, which UKCP answers with no further box.
+static std::string FirstTimeDownload(const std::string& updater, bool& cancelled) {
+    cancelled = Box("KWIQ First Time Download",
+                    "Performing first time download. This will download and run the KWIQ Plugin Updater to install the "
+                    "plugin.\r\n\r\nSelect OK to continue.", MB_OKCANCEL | MB_ICONINFORMATION) != IDOK;
+    if (cancelled) return "The first time download was cancelled. It will be offered again the next time EuroScope starts.";
     std::string body;
     int status = CoreGet(L"/latest", "0", body, 64 * 1024, 10000);
     if (status != 200) return "Core could not be reached, so the plugin could not be installed. Try again the next time EuroScope starts.";
@@ -60,13 +68,14 @@ static std::string FirstTimeDownload(const std::string& updater) {
 void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
     std::string core = CorePath(), updater = UpdaterPath();
     if (core.empty() || !MakeDirs()) {
-        Box("The KWIQ Controller Plugin cannot be installed, because %LOCALAPPDATA%\\KWIQ cannot be created.", MB_OK | MB_ICONSTOP);
+        LoaderError("The KWIQ Controller Plugin cannot be installed, because %LOCALAPPDATA%\\KWIQ cannot be created.");
         Inactive(ppPlugInInstance, "The plugin could not be installed in %LOCALAPPDATA%\\KWIQ.");
         return;
     }
     // Loaded twice (e.g. from both OKAC and ORBB in Other Set > Plug-ins): both share one plugin, so the second stays idle
     if (GetModuleHandleA(core.c_str())) {
-        Box("The KWIQ Controller Plugin is loaded twice. Please remove one of them in Other Set > Plug-ins.", MB_OK | MB_ICONWARNING);
+        LoaderError("The KWIQ Controller Plugin is loaded twice.\r\n\r\nPlease remove one of them in Other Set > Plug-ins.",
+                    MB_ICONWARNING);
         Inactive(ppPlugInInstance, "");
         return;
     }
@@ -76,9 +85,10 @@ void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlug
     MigrateOldInstall();
 
     if (!Exists(updater)) {
-        std::string err = FirstTimeDownload(updater);
+        bool cancelled = false;
+        std::string err = FirstTimeDownload(updater, cancelled);
         if (!err.empty()) {
-            Box(err, MB_OK | MB_ICONSTOP);
+            if (!cancelled) LoaderError("Unable to perform the first time download of the KWIQ Plugin Updater.\r\n\r\n" + err);
             Inactive(ppPlugInInstance, err);
             return;
         }
@@ -107,7 +117,7 @@ void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlug
     if (gCore) { FreeLibrary(gCore); gCore = nullptr; }
     gCoreExit = nullptr;
     DeleteFileA(core.c_str());                                       // installed again at the next start
-    Box("The plugin could not be loaded from " + core + ". It will be installed again the next time EuroScope starts.", MB_OK | MB_ICONWARNING);
+    LoaderError("The plugin could not be loaded from " + core + ".\r\n\r\nIt will be installed again the next time EuroScope starts.");
     Inactive(ppPlugInInstance, "The plugin could not be loaded. It will be installed again the next time EuroScope starts.");
 }
 

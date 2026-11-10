@@ -18,7 +18,6 @@ namespace kwiq_win {
 
 static const wchar_t* const kCoreHost = L"core.kuwait-iraqvacc.net";
 static const wchar_t* const kCorePath = L"/api/plugin";
-static const char* const kTitle = "KWIQ Controller Plugin";
 static const char* const kChangelogUrl = "https://docs.kuwait-iraqvacc.net/Controller%20Guidance/KWIQ%20Controller%20Plugin/Changelog/";
 
 inline std::string Env(const char* name) {
@@ -167,8 +166,21 @@ inline std::string DownloadDll(const wchar_t* what, const std::string& sha, cons
 
 #endif // KWIQ_NO_WINHTTP
 
-inline int Box(const std::string& text, UINT flags) {
-    return MessageBoxA(nullptr, text.c_str(), kTitle, flags | MB_TOPMOST | MB_SETFOREGROUND);
+// UTF-8 to UTF-16, for the W versions of the Windows API
+inline std::wstring Widen(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
+    return w;
+}
+
+// A plain Windows message box, exactly as the UK Controller Plugin opens its own (WinApi::OpenMessageBox):
+// MessageBoxW owned by the active window, modal, with a title per purpose ("KWIQ Automatic Update", ...) and
+// only the button and icon flags (#55). Returns IDOK, IDYES and so on.
+inline int Box(const std::string& title, const std::string& text, UINT flags) {
+    return MessageBoxW(GetActiveWindow(), Widen(text).c_str(), Widen(title).c_str(), flags);
 }
 
 } // namespace kwiq_win

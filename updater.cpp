@@ -8,6 +8,8 @@
 //   * After an update, the controller is offered the changelog.
 //   * Core's kill switch (plugin.enabled = 0) as EuroScope starts: the plugin is not loaded.
 // Every file is downloaded from Core and checked against the SHA-256 Core publishes.
+// The message boxes are UKCP's (PerformUpdates.cpp): same titles, buttons, icons and wording, shown while
+// EuroScope loads the plugin (kwiq_win::Box).
 
 #include "kwiq_win.hpp"
 #include <shellapi.h>
@@ -51,12 +53,22 @@ static std::string Install(const std::string& core, const std::string& coreSha, 
     return "";
 }
 
+// UKCP's DisplayPreUpdateConsentNotification: asked twice, as an update is required
 static bool AskToUpdate(const std::string& latest, const std::string& installed) {
-    if (Box("A new version of the KWIQ Controller Plugin, version " + latest + ", is available. You have version " + installed +
-            ".\n\nWould you like to update now?", MB_YESNO | MB_ICONINFORMATION) == IDYES) return true;
-    return Box("To use the KWIQ Controller Plugin, you must update to the latest version, because old or faulty versions "
-               "can affect other controllers and pilots on the network.\n\nSelect Yes to update now, or No to start with only "
-               "the outdated sector file alert and the EuroScope version check.", MB_YESNO | MB_ICONEXCLAMATION) == IDYES;
+    if (Box("KWIQ Automatic Update",
+            "A new version of the KWIQ Controller Plugin, version " + latest + ", is available. You have version " +
+            installed + ".\r\n\r\nWould you like to update now?", MB_YESNO | MB_ICONINFORMATION) == IDYES)
+        return true;
+    return Box("KWIQ Automatic Update",
+               "In order to use the KWIQ Controller Plugin, you must update to the latest version.\r\n\r\n"
+               "This is because old or faulty versions of the plugin can affect other controllers and pilots on the "
+               "network.\r\n\r\nSelect Yes to update now, or No to start with only the outdated sector file alert and "
+               "the EuroScope version check.", MB_YESNO | MB_ICONEXCLAMATION) == IDYES;
+}
+
+// As UKCP reports a failed update
+static void UpdateFailed(const std::string& message) {
+    Box("KWIQ Automatic Update Failed", message, MB_OK | MB_ICONSTOP);
 }
 
 // Returns a kwiq::StartMode for the loader
@@ -82,20 +94,22 @@ extern "C" __declspec(dllexport) int KWIQUpdaterRun() {
         if (installed.empty() || AskToUpdate(latest, installed)) {
             std::string err = Install(core, coreSha, updaterSha, installed.empty() ? "0" : installed);
             if (err.empty()) updated = true;
-            else if (installed.empty()) Box("The KWIQ Controller Plugin could not be installed. " + err, MB_OK | MB_ICONSTOP);
-            else Box("The update could not be installed, so version " + installed + " will be used. " + err, MB_OK | MB_ICONWARNING);
+            else if (installed.empty()) UpdateFailed("The KWIQ Controller Plugin could not be installed.\r\n\r\n" + err);
+            else UpdateFailed(err + "\r\n\r\nThe plugin will load with the version already installed, " + installed + ".");
         } else declined = true;
     } else if (answered && !installed.empty()) {
         UpdateSelf(updaterSha, installed);                       // the plugin is current; keep this file in step
     } else if (installed.empty()) {
-        Box(answered ? "Core has no version of the KWIQ Controller Plugin to install yet."
-                     : "The KWIQ Controller Plugin could not be installed, because Core could not be reached. It will try again "
-                       "the next time EuroScope starts.", MB_OK | MB_ICONSTOP);
+        UpdateFailed(answered ? "Core has no version of the KWIQ Controller Plugin to install yet."
+                              : "The KWIQ Controller Plugin could not be installed, because Core could not be reached."
+                                "\r\n\r\nIt will try again the next time EuroScope starts.");
     }
 
+    // UKCP's DisplayPostUpdateNotification
     if (updated && !installed.empty() &&
-        Box("The KWIQ Controller Plugin has been updated to version " + latest + ".\n\nWould you like to view the changelog now?",
-            MB_YESNO | MB_ICONINFORMATION) == IDYES)
+        Box("KWIQ Automatic Update Complete",
+            "The KWIQ Controller Plugin has been updated to version " + latest + ".\r\n\r\n"
+            "Would you like to view the changelog now?", MB_YESNO | MB_ICONINFORMATION) == IDYES)
         ShellExecuteA(nullptr, "open", changelog.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 
     return (int)kwiq::DecideStart(answered, killSwitch, Exists(core), declined);
