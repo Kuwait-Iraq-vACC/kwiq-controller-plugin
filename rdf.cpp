@@ -521,9 +521,19 @@ bool KwiqRdf::Command(const std::string& cmd) {
     return false;
 }
 
-std::string KwiqRdf::BridgeStatus() const {
-    if (!d_->started) return "Off";
-    if (d_->wsOpen) return "TrackAudio";
-    if (std::time(nullptr) - d_->afvSeenAt < 600) return "AFV";
-    return "Not connected";
+kwiq::TrackAudioState KwiqRdf::TrackAudio() const {
+    std::string version;
+    { std::lock_guard<std::mutex> g(d_->mtxInfo); version = d_->trackAudioVersion; }
+    bool inUse = d_->BridgeEnabled() || d_->DrawEnabled();
+    return kwiq::TrackAudioStatus(d_->started, inUse, d_->wsOpen, version, std::time(nullptr) - d_->afvSeenAt < 600);
+}
+
+void KwiqRdf::Reconnect() {
+    if (!d_->started) return;
+    d_->socketTrackAudio.stop();
+    d_->wsOpen = false;
+    std::string addr;
+    { std::lock_guard<std::mutex> g(d_->mtxEndpoint); addr = d_->addressTrackAudio; }
+    d_->socketTrackAudio.setUrl("ws://" + addr + TRACKAUDIO_PARAM_WS);
+    d_->socketTrackAudio.start();
 }

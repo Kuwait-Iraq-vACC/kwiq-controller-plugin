@@ -696,4 +696,38 @@ inline bool TrackAudioVersionOk(const std::string& text) {
     return key(v) >= key(min);
 }
 
+// The KWIQ menu's TrackAudio row: the state of the connection to TrackAudio, which the plugin makes on its own.
+//   running:   RDF started (not when another RDF or afv-euroscope-bridge is loaded)
+//   inUse:     Core's settings (or the controller's RDF Drawing) use TrackAudio: the bridge or drawing is on
+//   wsOpen:    TrackAudio's WebSocket is open
+//   version:   what TrackAudio said its version is (empty if it didn't); an unreadable one isn't "too old"
+//   afvRecent: the AFV standalone client was heard from in the last 10 minutes
+enum class TrackAudioState { Off, Connected, TooOld, AfvClient, NotRunning };
+inline TrackAudioState TrackAudioStatus(bool running, bool inUse, bool wsOpen, const std::string& version, bool afvRecent) {
+    if (!running || !inUse) return TrackAudioState::Off;
+    if (wsOpen) return ParseSemVer(version).valid && !TrackAudioVersionOk(version) ? TrackAudioState::TooOld : TrackAudioState::Connected;
+    return afvRecent ? TrackAudioState::AfvClient : TrackAudioState::NotRunning;
+}
+inline const char* TrackAudioStateText(TrackAudioState s) {
+    switch (s) {
+    case TrackAudioState::Connected:  return "Connected";
+    case TrackAudioState::TooOld:     return "Version too old";
+    case TrackAudioState::AfvClient:  return "AFV client";
+    case TrackAudioState::NotRunning: return "Not running";
+    default:                          return "Off";
+    }
+}
+// What a click on the row does: with TrackAudio connected, sync the channels again (.rdf refresh); without it,
+// try to connect now (leaving EuroScope's channels as they are); when off, nothing
+enum class TrackAudioClick { None, Resync, Reconnect };
+inline TrackAudioClick TrackAudioClickAction(TrackAudioState s) {
+    switch (s) {
+    case TrackAudioState::Connected:
+    case TrackAudioState::TooOld:     return TrackAudioClick::Resync;
+    case TrackAudioState::AfvClient:
+    case TrackAudioState::NotRunning: return TrackAudioClick::Reconnect;
+    default:                          return TrackAudioClick::None;
+    }
+}
+
 } // namespace kwiq

@@ -38,8 +38,11 @@ public:
     bool Transmitting(const std::string& callsign);
     // .RDF REFRESH and .RDF RELOAD (upper case); true if handled
     bool Command(const std::string& cmd);
-    // For the KWIQ menu: "TrackAudio", "AFV" or "Not connected"
-    std::string BridgeStatus() const;
+    // For the KWIQ menu's TrackAudio row and .kwiq status (kwiq::TrackAudioStateText)
+    kwiq::TrackAudioState TrackAudio() const;
+    // Main thread: try to connect to TrackAudio now, leaving EuroScope's voice channels as they are
+    // (unlike .rdf reload, which switches them all off first). Nothing if RDF didn't start.
+    void Reconnect();
 
     struct Impl;
 private:

@@ -249,6 +249,26 @@ int main() {
     CHECK(WildcardMatch("", "") && !WildcardMatch("", "A") && WildcardMatch("**", "abc") && WildcardMatch("a*c", "abbbc") && !WildcardMatch("a*c", "abcd"));
     CHECK(!ParseSemVer("").valid && !ParseSemVer("1.2").valid && ParseSemVer("v1.3.0-beta.5").pre == 1 && ParseSemVer("v1.3.0-beta.5").preNum == 5);
 
+    // the KWIQ menu's TrackAudio row
+    CHECK(TrackAudioStatus(false, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Off);       // RDF didn't start
+    CHECK(TrackAudioStatus(true, false, true, "TrackAudio v1.3.0", true) == TrackAudioState::Off);        // Core: bridge and drawing off
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Connected);
+    CHECK(TrackAudioStatus(true, true, true, "", false) == TrackAudioState::Connected);                    // no version (yet)
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio", false) == TrackAudioState::Connected);          // unreadable version
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.3.0-beta.4", false) == TrackAudioState::TooOld);
+    CHECK(TrackAudioStatus(true, true, false, "TrackAudio v1.3.0-beta.4", false) == TrackAudioState::NotRunning);
+    CHECK(TrackAudioStatus(true, true, false, "", true) == TrackAudioState::AfvClient);
+    CHECK(std::string(TrackAudioStateText(TrackAudioState::Connected)) == "Connected" &&
+          std::string(TrackAudioStateText(TrackAudioState::TooOld)) == "Version too old" &&
+          std::string(TrackAudioStateText(TrackAudioState::AfvClient)) == "AFV client" &&
+          std::string(TrackAudioStateText(TrackAudioState::NotRunning)) == "Not running" &&
+          std::string(TrackAudioStateText(TrackAudioState::Off)) == "Off");
+    CHECK(TrackAudioClickAction(TrackAudioState::Connected) == TrackAudioClick::Resync &&
+          TrackAudioClickAction(TrackAudioState::TooOld) == TrackAudioClick::Resync &&
+          TrackAudioClickAction(TrackAudioState::NotRunning) == TrackAudioClick::Reconnect &&
+          TrackAudioClickAction(TrackAudioState::AfvClient) == TrackAudioClick::Reconnect &&
+          TrackAudioClickAction(TrackAudioState::Off) == TrackAudioClick::None);
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

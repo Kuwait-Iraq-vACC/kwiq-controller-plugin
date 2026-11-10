@@ -71,7 +71,7 @@ enum {
     KWIQ_MENU_REFRESH      = 2109,
     KWIQ_MENU_STATUS       = 2110,
     KWIQ_MENU_HIDE         = 2111,
-    KWIQ_MENU_BRIDGE       = 2112,   // TrackAudio bridge status (shows .rdf refresh's result)
+    KWIQ_MENU_BRIDGE       = 2112,   // TrackAudio's connection (a status row: a click resyncs or reconnects)
     KWIQ_MENU_LAST         = 2112
 };
 
@@ -876,7 +876,7 @@ public:
             std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED (too old)") +
                 " | EuroScope " + (esVersion_.empty() ? std::string("?") : esVersion_) +
                 " | API key " + (apiKey_.empty() ? std::string("not set") : std::string("connected")) + WineNote() +
-                " | RDF " + (rdf_.DrawOn() ? "on" : "off") + ", bridge " + rdf_.BridgeStatus() +
+                " | RDF " + (rdf_.DrawOn() ? "on" : "off") + ", TrackAudio " + kwiq::TrackAudioStateText(rdf_.TrackAudio()) +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
@@ -940,6 +940,15 @@ public:
         SaveDataToSettings("kwiq_button", "KWIQ button on the radar screen", shown ? "1" : "0");
         Msg(shown ? "The KWIQ button is shown." : "The KWIQ button is hidden. Type .kwiq button to show it again.", false);
     }
+    // The TrackAudio row: TrackAudio connects on its own, so this is a status, not a switch. A click syncs the
+    // channels again while connected, tries to connect now while not, and does nothing when RDF is off.
+    void TrackAudioClicked() {
+        switch (kwiq::TrackAudioClickAction(rdf_.TrackAudio())) {
+        case kwiq::TrackAudioClick::Resync:    OnCompileCommand(".rdf refresh"); return;
+        case kwiq::TrackAudioClick::Reconnect: rdf_.Reconnect(); Msg("RDF: trying to connect to TrackAudio again.", false); return;
+        default: return;
+        }
+    }
     void OpenMenu(RECT area) {
         // One column, each line padded so the values line up on the right (the list uses a fixed-width font)
         auto line = [](const char* label, const char* value) {
@@ -950,7 +959,7 @@ public:
         AddPopupListElement(line("API Key", apiKey_.empty() ? "Not set" : "Connected").c_str(), "", KWIQ_MENU_KEY);
         AddPopupListElement(line("Sector Indicators", sectorDraw_ ? "On" : "Off").c_str(), "", KWIQ_MENU_SECTORS);
         AddPopupListElement(line("RDF Drawing", rdf_.DrawOn() ? "On" : "Off").c_str(), "", KWIQ_MENU_RDF);
-        AddPopupListElement(line("TrackAudio", rdf_.BridgeStatus().c_str()).c_str(), "", KWIQ_MENU_BRIDGE);
+        AddPopupListElement(line("TrackAudio", kwiq::TrackAudioStateText(rdf_.TrackAudio())).c_str(), "", KWIQ_MENU_BRIDGE);
         AddPopupListElement(line("Slot Auto Refresh", autoRefresh_ ? "On" : "Off").c_str(), "", KWIQ_MENU_AUTOREFRESH);
         AddPopupListElement("Event Routes", "", KWIQ_MENU_EVENT_ROUTES);
         AddPopupListElement("SRD Search", "", KWIQ_MENU_SRD);
@@ -972,7 +981,7 @@ public:
         case KWIQ_MENU_KEY:          StartKeySetup(); return;
         case KWIQ_MENU_SECTORS:      OnCompileCommand(".kwiq sector"); return;
         case KWIQ_MENU_RDF:          SetRdfDraw(rdf_.DrawOn() ? 0 : 1); return;
-        case KWIQ_MENU_BRIDGE:       OnCompileCommand(".rdf refresh"); return;
+        case KWIQ_MENU_BRIDGE:       TrackAudioClicked(); return;
         case KWIQ_MENU_AUTOREFRESH:  OnCompileCommand(".kwiq autorefresh"); return;
         case KWIQ_MENU_EVENT_ROUTES: OpenRoutesWindow(pt); return;
         case KWIQ_MENU_SRD:          OpenSrdWindow(pt); return;
