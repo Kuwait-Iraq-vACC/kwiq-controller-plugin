@@ -469,7 +469,7 @@ static void NoticesShowSelected() {
     SetWindowTextA(w.text, n ? n->text.c_str() : "");
     SetWindowTextA(w.bRead, n && n->read ? "Mark unread" : "Mark read");
     EnableWindow(w.bRead, n != nullptr);
-    EnableWindow(w.bLink, n && !n->link.empty());
+    EnableWindow(w.bLink, n && kwiq::IsWebLink(n->link));         // only a web page is ever opened (#44)
 }
 static void NoticesFill() {
     NoticesWin& w = gNotices;
@@ -495,7 +495,7 @@ static LRESULT CALLBACK NoticesProc(HWND h, UINT m, WPARAM wp, LPARAM l) {
         else if (HIWORD(wp) == BN_CLICKED) {
             for (auto& n : w.items) {
                 if (n.id != w.selId) continue;
-                if (id == ID_NT_LINK && !n.link.empty()) ShellExecuteA(nullptr, "open", n.link.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                if (id == ID_NT_LINK && kwiq::IsWebLink(n.link)) ShellExecuteA(nullptr, "open", n.link.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 if (id == ID_NT_READ) {
                     n.read = !n.read;                    // shown at once; Core is told in the background
                     if (gOnMarkRead) gOnMarkRead(n.id, n.read);
@@ -1089,7 +1089,8 @@ public:
         return out;
     }
     void OpenNotices() {
-        kwiq_ui::gOnMarkRead = [](const std::string& id, bool read) { if (gPlugin) gPlugin->MarkRead(id, read); };
+        // Called from the window's WndProc, so nothing may escape into Windows (#45)
+        kwiq_ui::gOnMarkRead = [](const std::string& id, bool read) { try { if (gPlugin) gPlugin->MarkRead(id, read); } catch (...) {} };
         kwiq_ui::ShowNotices(NoticesForMe());
         noticesDue_ = true;                                          // and fetch them again
     }
@@ -1104,22 +1105,28 @@ public:
         if (markWorker_.joinable()) markWorker_.join();
         markBusy_ = true;
         markWorker_ = std::thread([this]() {
-            for (;;) {
-                std::pair<std::string, bool> m;
-                {
-                    std::lock_guard<std::mutex> g(mu_);
-                    if (pendingMarks_.empty() || quit_) { markBusy_ = false; return; }
-                    m = pendingMarks_.front();
-                    pendingMarks_.erase(pendingMarks_.begin());
+            try {                                                   // nothing may leave a thread's function (#48)
+                for (;;) {
+                    std::pair<std::string, bool> m;
+                    {
+                        std::lock_guard<std::mutex> g(mu_);
+                        if (pendingMarks_.empty() || quit_) { markBusy_ = false; return; }
+                        m = pendingMarks_.front();
+                        pendingMarks_.erase(pendingMarks_.begin());
+                    }
+                    std::string body, err;
+                    // The ID is percent-encoded, so whatever Core sends stays one path segment (#49)
+                    kwiq_net::HttpSend(m.second ? "POST" : "DELETE", std::string(CORE_NOTICES_URL) + "/" + kwiq::UrlEncode(m.first) + "/read",
+                                       "", body, err);
+                    if (!err.empty()) SetError("Notifications", err); else ClearError("Notifications");
                 }
-                std::string body, err;
-                kwiq_net::HttpSend(m.second ? "POST" : "DELETE", std::string(CORE_NOTICES_URL) + "/" + m.first + "/read", "", body, err);
-                if (!err.empty()) SetError("Notifications", err); else ClearError("Notifications");
-            }
+            } catch (...) {}
+            markBusy_ = false;                                      // the next Mark read starts a new worker
         });
     }
-    // METARs and notifications: fetched when Core pushes "updated", and polled as a fallback
-    void AuxRefresh(bool metar, bool notices) {
+    // METARs and notifications: fetched when Core pushes "updated", and polled as a fallback.
+    // A function-try-block: nothing may leave the thread's function, and auxBusy_ is reset either way (#48).
+    void AuxRefresh(bool metar, bool notices) try {
         std::string body, err;
         if (metar) {
             if (kwiq_net::HttpGet(CORE_METAR_URL, body, err)) {
@@ -1137,6 +1144,8 @@ public:
                 noticesNew_ = true;
             } else if (err != "HTTP 404") SetError("Notifications", err);
         }
+        auxBusy_ = false;
+    } catch (...) {
         auxBusy_ = false;
     }
     void TickQnhAndNotices(std::time_t now) {

@@ -885,8 +885,8 @@ inline std::vector<TrlRule> ParseTrl(const std::string& body) {
         if (f.size() < 4 || f[0] != "TRL") continue;
         TrlRule r;
         r.prefix = Upper(Trim(f[1]));
-        r.ta = std::atoi(Trim(f[2]).c_str());
-        for (const auto& t : SplitChar(f[3], ',')) { std::string x = Trim(t); if (!x.empty()) r.v.push_back(std::atoi(x.c_str())); }
+        r.ta = ToInt(f[2]);
+        for (const auto& t : SplitChar(f[3], ',')) { std::string x = Trim(t); if (!x.empty()) r.v.push_back(ToInt(x)); }
         if (!r.prefix.empty() && r.v.size() % 2 == 1) rules.push_back(r);
     }
     return rules;
@@ -986,6 +986,18 @@ inline std::vector<ProcedureNotice> ParseNotices(const std::string& body) {
 inline bool NoticeRelevant(const ProcedureNotice& n, const std::vector<std::string>& covered) {
     for (const auto& a : n.airports) if (std::find(covered.begin(), covered.end(), a) != covered.end()) return true;
     return false;
+}
+// A value for one segment of a URL path (a notification's ID in /notifications/<id>/read): everything but
+// RFC 3986's unreserved characters is percent-encoded (#49), so "/", "?", "#" or a space can't change the URL
+inline std::string UrlEncode(const std::string& s) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~')
+            out += (char)c;
+        else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+    }
+    return out;
 }
 
 } // namespace kwiq
