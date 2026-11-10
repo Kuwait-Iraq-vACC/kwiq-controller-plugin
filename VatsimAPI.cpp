@@ -43,6 +43,9 @@ static void setup_curl_modern(CURL* h, const char* url, string* response) {
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 5L);
     curl_easy_setopt(h, CURLOPT_TIMEOUT, 10L);
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
+    // A limit on what one answer may be (#43): several times the VATSIM data feed, far above anything Core sends.
+    // Larger, curl stops the transfer and it fails with "Maximum file size exceeded".
+    curl_easy_setopt(h, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)32 * 1024 * 1024);
 }
 
 // The personal API key and plugin version, sent to Core only (never to VATSIM or VATCAN)
@@ -252,7 +255,8 @@ void CDataHandler::Shutdown() {
     if (worker.joinable()) { worker.join(); }
 }
 
-void CDataHandler::FetchWorker(string eventCode, bool pullSlots) {
+// A function-try-block: nothing may leave a thread's function, and the next fetch must still be able to start (#45)
+void CDataHandler::FetchWorker(string eventCode, bool pullSlots) try {
     FetchResult result;
 
     if (CDataHandler::vatsimJson3URL.empty()) {
@@ -311,6 +315,8 @@ void CDataHandler::FetchWorker(string eventCode, bool pullSlots) {
         std::lock_guard<std::mutex> lock(pendingMutex);
         pending = std::move(result);
     }
+    fetchInProgress = false;
+} catch (...) {
     fetchInProgress = false;
 }
 
