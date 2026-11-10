@@ -1004,4 +1004,65 @@ inline std::string UrlEncode(const std::string& s) {
 // A size in pixels at 96 DPI, for a screen at dpi (rounded; 0 or less: unscaled)
 inline int ScaleForDpi(int px, int dpi) { return dpi > 0 ? (px * dpi + 48) / 96 : px; }
 
+// The button's place is kept as its offset from the radar area's bottom-right corner (from the button's own
+// bottom-right corner), so it follows the window as it resizes. Positions are in pixels from the radar
+// area's top left; the button is a square of `size` px in a radar area w x h px.
+struct ButtonXY { int x = 0, y = 0; };
+inline int ClampInt(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+// Where its top-left corner goes for an offset, clamped so the whole button stays inside the radar area
+// (at the top left when the area is smaller than the button)
+inline ButtonXY ButtonTopLeft(int w, int h, int size, ButtonXY offset) {
+    int maxX = w - size > 0 ? w - size : 0, maxY = h - size > 0 ? h - size : 0;
+    ButtonXY p;
+    p.x = ClampInt(maxX - offset.x, 0, maxX);
+    p.y = ClampInt(maxY - offset.y, 0, maxY);
+    return p;
+}
+// The offset for a button whose top-left corner is at (x, y), clamped as above
+inline ButtonXY ButtonOffsetFromTopLeft(int w, int h, int size, int x, int y) {
+    int maxX = w - size > 0 ? w - size : 0, maxY = h - size > 0 ? h - size : 0;
+    ButtonXY o;
+    o.x = maxX - ClampInt(x, 0, maxX);
+    o.y = maxY - ClampInt(y, 0, maxY);
+    return o;
+}
+// The offset while it is dragged: centred on the mouse at (px, py), clamped as above
+inline ButtonXY ButtonOffsetAt(int w, int h, int size, int px, int py) {
+    return ButtonOffsetFromTopLeft(w, h, size, px - size / 2, py - size / 2);
+}
+// "x,y" as saved in the profile (kwiq_button_offset, and the older kwiq_button_at): two whole numbers, 0 or more
+inline bool ParseButtonXY(const std::string& s, ButtonXY& out) {
+    size_t comma = s.find(',');
+    if (comma == std::string::npos) return false;
+    auto num = [](const std::string& t, int& v) {
+        if (t.empty() || t.size() > 6) return false;
+        v = 0;
+        for (char c : t) { if (c < '0' || c > '9') return false; v = v * 10 + (c - '0'); }
+        return true;
+    };
+    ButtonXY p;
+    if (!num(s.substr(0, comma), p.x) || !num(s.substr(comma + 1), p.y)) return false;
+    out = p;
+    return true;
+}
+inline std::string FormatButtonXY(ButtonXY p) { return std::to_string(p.x) + "," + std::to_string(p.y); }
+
+// The logo is embedded at a few sizes: the one to draw at `want` px is the smallest that is at least that big
+// (scaled down a little), or the biggest there is. 0 when there are none.
+inline int BestLogoSize(const std::vector<int>& sizes, int want) {
+    int best = 0, biggest = 0;
+    for (int s : sizes) {
+        if (s > biggest) biggest = s;
+        if (s >= want && (best == 0 || s < best)) best = s;
+    }
+    return best ? best : biggest;
+}
+// 32-bit BGRA pixels with straight alpha to premultiplied, as AlphaBlend needs (rounded)
+inline void PremultiplyBgra(unsigned char* px, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        unsigned a = px[i * 4 + 3];
+        for (int c = 0; c < 3; c++) px[i * 4 + c] = (unsigned char)((px[i * 4 + c] * a + 127) / 255);
+    }
+}
+
 } // namespace kwiq

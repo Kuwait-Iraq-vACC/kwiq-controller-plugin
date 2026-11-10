@@ -366,10 +366,52 @@ int main() {
     auto n2 = ParseNotices("NOTICE| 7 |OKBK,,|2026-11-01|1|Title|https://x.net|end\\n\r\n");
     CHECK(n2.size() == 1 && n2[0].id == "7" && n2[0].airports.size() == 1 && n2[0].read && n2[0].text == "end\r\n" && !NoticeRelevant(n2[0], {}));
 
-    // the KWIQ button's size (#59): 30 px at 100%, 38 at 125%, 45 at 150%, 60 at 200%
-    CHECK(ScaleForDpi(30, 96) == 30 && ScaleForDpi(30, 120) == 38 && ScaleForDpi(30, 144) == 45 && ScaleForDpi(30, 192) == 60);
-    CHECK(ScaleForDpi(22, 96) == 22 && ScaleForDpi(22, 120) == 28 && ScaleForDpi(22, 144) == 33 && ScaleForDpi(22, 192) == 44);
-    CHECK(ScaleForDpi(2, 120) == 3 && ScaleForDpi(22, 0) == 22 && ScaleForDpi(22, -5) == 22);
+    // the KWIQ button (#59): 28 px at 100%, 35 at 125%, 42 at 150%, 49 at 175%, 56 at 200%
+    CHECK(ScaleForDpi(28, 96) == 28 && ScaleForDpi(28, 120) == 35 && ScaleForDpi(28, 144) == 42 && ScaleForDpi(28, 168) == 49 &&
+          ScaleForDpi(28, 192) == 56);
+    CHECK(ScaleForDpi(8, 120) == 10 && ScaleForDpi(28, 0) == 28 && ScaleForDpi(28, -5) == 28);
+    {
+        // its place: an offset from the bottom-right corner, so it follows the window
+        ButtonXY off; off.x = 8; off.y = 8;
+        ButtonXY tl = ButtonTopLeft(800, 600, 28, off);
+        CHECK(tl.x == 764 && tl.y == 564);
+        tl = ButtonTopLeft(1000, 700, 28, off);                         // the window grew: still 8 px from the corner
+        CHECK(tl.x == 964 && tl.y == 664);
+        off.x = 5000; off.y = -40;                                     // clamped fully on screen
+        tl = ButtonTopLeft(800, 600, 28, off);
+        CHECK(tl.x == 0 && tl.y == 572);
+        tl = ButtonTopLeft(20, 10, 28, off);                           // a radar area smaller than the button
+        CHECK(tl.x == 0 && tl.y == 0);
+        // dragging: centred on the mouse, clamped, and back again
+        ButtonXY d = ButtonOffsetAt(800, 600, 28, 400, 300);
+        CHECK(d.x == 386 && d.y == 286);
+        tl = ButtonTopLeft(800, 600, 28, d);
+        CHECK(tl.x == 386 && tl.y == 286);
+        d = ButtonOffsetAt(800, 600, 28, -50, 9999);
+        CHECK(d.x == 772 && d.y == 0);
+        d = ButtonOffsetAt(800, 600, 28, 9999, -50);
+        CHECK(d.x == 0 && d.y == 572);
+        // the older kwiq_button_at (top left from the radar's top left) keeps its place
+        d = ButtonOffsetFromTopLeft(800, 600, 28, 378, 10);
+        tl = ButtonTopLeft(800, 600, 28, d);
+        CHECK(d.x == 394 && d.y == 562 && tl.x == 378 && tl.y == 10);
+        // the profile's "x,y"
+        ButtonXY p;
+        CHECK(ParseButtonXY("12,34", p) && p.x == 12 && p.y == 34 && FormatButtonXY(p) == "12,34");
+        CHECK(ParseButtonXY("0,0", p) && p.x == 0 && p.y == 0);
+        p.x = 7; p.y = 7;
+        CHECK(!ParseButtonXY("", p) && !ParseButtonXY("12", p) && !ParseButtonXY("-1,5", p) && !ParseButtonXY("1,2,3", p) &&
+              !ParseButtonXY(" 1,2", p) && !ParseButtonXY("1,", p) && !ParseButtonXY("9999999,1", p) && p.x == 7 && p.y == 7);
+        // which embedded logo to draw
+        std::vector<int> sizes = { 28, 35, 42, 49, 56 };
+        CHECK(BestLogoSize(sizes, 28) == 28 && BestLogoSize(sizes, 31) == 35 && BestLogoSize(sizes, 56) == 56);
+        CHECK(BestLogoSize(sizes, 80) == 56 && BestLogoSize(sizes, 10) == 28 && BestLogoSize(std::vector<int>(), 28) == 0);
+        // premultiplied alpha
+        unsigned char px[12] = { 200, 100, 50, 255,  200, 100, 50, 0,  200, 100, 50, 128 };
+        PremultiplyBgra(px, 3);
+        CHECK(px[0] == 200 && px[1] == 100 && px[2] == 50 && px[3] == 255 && px[4] == 0 && px[5] == 0 && px[6] == 0 && px[7] == 0);
+        CHECK(px[8] == 100 && px[9] == 50 && px[10] == 25 && px[11] == 128);
+    }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;

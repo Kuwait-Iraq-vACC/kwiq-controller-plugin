@@ -1,0 +1,16 @@
+// kwiq.rc - KWIQPluginCore.dll's resources.
+//
+// The KWIQ button's logo (#59): kwiq_logo.png scaled down by kwiq_logo.ps1 to each size the button is drawn
+// at, as 32-bit BMPs with alpha. Kept as RCDATA so the bytes are loaded exactly as written; KWIQPlugin.cpp
+// reads them and alpha-blends the logo onto the radar screen.
+
+#include <windows.h>
+#include "kwiq_res.h"
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
+
+IDR_KWIQ_LOGO_28 RCDATA "kwiq_logo_28.bmp"
+IDR_KWIQ_LOGO_35 RCDATA "kwiq_logo_35.bmp"
+IDR_KWIQ_LOGO_42 RCDATA "kwiq_logo_42.bmp"
+IDR_KWIQ_LOGO_49 RCDATA "kwiq_logo_49.bmp"
+IDR_KWIQ_LOGO_56 RCDATA "kwiq_logo_56.bmp"

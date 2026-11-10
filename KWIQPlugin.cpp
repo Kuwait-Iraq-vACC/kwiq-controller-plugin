@@ -30,6 +30,7 @@
 #include "push.hpp"               // Core's push events (Laravel Reverb), as UKCP gets its own
 #define KWIQ_NO_WINHTTP
 #include "kwiq_win.hpp"           // api-settings.json and the folders the loader uses
+#include "kwiq_res.h"             // kwiq.rc: the KWIQ button's logo
 
 #define KWIQ_PLUGIN_NAME      "KWIQ Controller Plugin"
 #include "version.h"                // KWIQ_PLUGIN_VERSION
@@ -697,6 +698,11 @@ public:
             if (sp && *sp) { std::lock_guard<std::mutex> g(mu_); sectorPath_ = sp; }
             const char* bs = GetDataFromSettings("kwiq_button");
             if (bs && *bs == '0') buttonShown_ = false;
+            const char* bo = GetDataFromSettings("kwiq_button_offset");  // the KWIQ button's place (#59)
+            const char* ba = GetDataFromSettings("kwiq_button_at");      // before #59: its top left
+            kwiq::ButtonXY p;
+            if (bo && kwiq::ParseButtonXY(bo, p)) { buttonOffset_ = p; buttonPlace_ = ButtonPlace::Offset; }
+            else if (ba && kwiq::ParseButtonXY(ba, p)) { buttonOffset_ = p; buttonPlace_ = ButtonPlace::TopLeft; }
             const char* rd = GetDataFromSettings("kwiq_rdf_draw");      // the controller's own RDF switch
             if (rd && (*rd == '0' || *rd == '1')) rdf_.SetLocalDraw(*rd - '0');
             // DiscordEuroScope on or off for this controller; the Configurator writes the same setting
@@ -1123,17 +1129,32 @@ public:
     }
 
     // ---- the KWIQ button and its menu (main thread) (#59) ------------------------------------
-    // As UKCP's OP button (ScreenControls): a small square in the bottom-right corner of each radar screen,
-    // worked out from the radar area on every draw so it follows the window, and not movable, always in
-    // UKCP's colours. ".kwiq button" (or Hide Button in its menu) hides it and brings it back. In reduced
-    // mode it is shown as usual, and a click repeats the reminder instead.
-    // 30 px at 96 DPI: "KWIQ" at 8 pt is 28 px wide in the EuroScope font and in Segoe UI at 100%, so 28
-    // would leave no margin; 30 leaves at least 1 px each side at 100%, 125%, 150% and 200%.
-    static constexpr int BUTTON_SIZE = 30;
+    // The vACC's logo, as other plugins show theirs on the radar screen: no border, label or status colours.
+    // By default in the bottom-right corner of each radar screen, inset by BUTTON_MARGIN; it can be dragged
+    // anywhere, and its place is kept in the profile (kwiq_button_offset) as its offset from the bottom-right
+    // corner, so it follows the window as it resizes and always stays fully on screen. A profile with the
+    // older kwiq_button_at (its top left) keeps that place until it is dragged. ".kwiq button" (or Hide
+    // Button in its menu) hides it and brings it back. In reduced mode it is shown, and a click repeats the
+    // reminder instead.
+    static constexpr int BUTTON_SIZE = 28;                           // px at 96 DPI, scaled for Windows DPI
+    static constexpr int BUTTON_MARGIN = 8;                          // px at 96 DPI, from the corner by default
     bool ButtonShown() const { return buttonShown_ && !duplicate_; }
-    static RECT ButtonRect(const RECT& radar, int size) {
-        RECT r = { radar.right - size, radar.bottom - size, radar.right, radar.bottom };
+    RECT ButtonRect(const RECT& radar, int size, int dpi) const {
+        int w = radar.right - radar.left, h = radar.bottom - radar.top;
+        kwiq::ButtonXY off;
+        if (buttonPlace_ == ButtonPlace::Offset) off = buttonOffset_;
+        else if (buttonPlace_ == ButtonPlace::TopLeft) off = kwiq::ButtonOffsetFromTopLeft(w, h, size, buttonOffset_.x, buttonOffset_.y);
+        else off.x = off.y = kwiq::ScaleForDpi(BUTTON_MARGIN, dpi);
+        kwiq::ButtonXY p = kwiq::ButtonTopLeft(w, h, size, off);
+        RECT r = { radar.left + p.x, radar.top + p.y, radar.left + p.x + size, radar.top + p.y + size };
         return r;
+    }
+    void MoveButton(const RECT& radar, POINT pt, int size, bool released) {
+        buttonOffset_ = kwiq::ButtonOffsetAt(radar.right - radar.left, radar.bottom - radar.top, size,
+                                             (int)(pt.x - radar.left), (int)(pt.y - radar.top));
+        buttonPlace_ = ButtonPlace::Offset;
+        if (released) SaveDataToSettings("kwiq_button_offset", "KWIQ button offset from the bottom-right corner",
+                                         kwiq::FormatButtonXY(buttonOffset_).c_str());
     }
     void ButtonClicked(RECT area) {
         if (reduced_) { Msg(kReducedReminder, true); return; }      // no menu in reduced mode
@@ -1735,6 +1756,9 @@ private:
     std::atomic<int> coreEvery_{ 60 }, srdEvery_{ 300 }, slotsEvery_{ 60 };
     bool settingsLoaded_ = false;                                   // main thread only
     bool buttonShown_ = true;                                       // main thread only
+    enum class ButtonPlace { Default, Offset, TopLeft };            // main thread only: how buttonOffset_ is meant
+    ButtonPlace buttonPlace_ = ButtonPlace::Default;
+    kwiq::ButtonXY buttonOffset_;
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     KwiqRdf rdf_{ this };                                           // RDF and the TrackAudio bridge
@@ -1803,7 +1827,7 @@ public:
     virtual ~CKWIQRadar() {
         CKWIQPlugin::RegisterRadar(this, false);
         if (font_) DeleteObject(font_);
-        if (buttonFont_) DeleteObject(buttonFont_);
+        for (auto& l : logos_) DeleteObject(l.second);
         if (banner_) DeleteObject(banner_);
     }
 
@@ -1844,9 +1868,14 @@ public:
         RestoreDC(hDC, saved);
     } catch (...) {}
 
-    // Any button, as UKCP's OP button opens its menu on a left or a right click
+    // Any button opens the KWIQ menu, a left or a right click
     virtual void OnClickScreenObject(int ObjectType, const char*, POINT, RECT Area, int) override try {
         if (ObjectType == KWIQ_OBJ_BUTTON && gPlugin) gPlugin->ButtonClicked(Area);
+    } catch (...) {}
+    virtual void OnMoveScreenObject(int ObjectType, const char*, POINT Pt, RECT, bool Released) override try {
+        if (ObjectType != KWIQ_OBJ_BUTTON || !gPlugin || buttonSize_ <= 0) return;
+        gPlugin->MoveButton(GetRadarArea(), Pt, buttonSize_, Released);
+        RequestRefresh();
     } catch (...) {}
     // the menu and the key box opened from the button report back here
     virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override try {
@@ -1877,52 +1906,73 @@ private:
         DeleteObject(pen);
     }
 
-    // UKCP's OP button: EuroScope's background green RGB(11, 65, 54) with the label in UKCP's green
-    // RGB(0, 255, 0), on one line, centred, in the EuroScope font at 8 pt. One colour in every state, no
-    // border. The whole square is the click target, and nothing outside it is covered.
+    // The logo, alpha-blended at BUTTON_SIZE scaled for the screen's DPI, from the image embedded at that size
+    // (or the next bigger one). The whole square is the click target; nothing outside it is covered.
     void DrawButton(HDC hDC) {
         int dpi = GetDeviceCaps(hDC, LOGPIXELSX);
         int size = kwiq::ScaleForDpi(CKWIQPlugin::BUTTON_SIZE, dpi);
-        RECT r = CKWIQPlugin::ButtonRect(GetRadarArea(), size);
-        if (!buttonFont_ || dpi != buttonDpi_) {
-            if (buttonFont_) DeleteObject(buttonFont_);
-            buttonFont_ = ButtonFont(dpi);
-            buttonDpi_ = dpi;
+        buttonSize_ = size;
+        RECT r = gPlugin->ButtonRect(GetRadarArea(), size, dpi);
+        if (!logosLoaded_) { logosLoaded_ = true; LoadLogos(); }
+        std::vector<int> sizes;
+        for (auto& l : logos_) sizes.push_back(l.first);
+        int best = kwiq::BestLogoSize(sizes, size);
+        auto it = logos_.find(best);
+        if (it != logos_.end()) {
+            HDC mem = CreateCompatibleDC(hDC);
+            if (mem) {
+                HGDIOBJ old = SelectObject(mem, it->second);
+                BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+                GdiAlphaBlend(hDC, r.left, r.top, size, size, mem, 0, 0, best, best, bf);
+                SelectObject(mem, old);
+                DeleteDC(mem);
+            }
+        } else {                                                        // the images didn't load: a plain mark
+            HBRUSH fill = CreateSolidBrush(RGB(11, 65, 54));
+            FillRect(hDC, &r, fill);
+            DeleteObject(fill);
         }
-        int saved = SaveDC(hDC);
-        HBRUSH fill = CreateSolidBrush(RGB(11, 65, 54));
-        FillRect(hDC, &r, fill);
-        SetBkMode(hDC, TRANSPARENT);
-        SetTextColor(hDC, RGB(0, 255, 0));
-        if (buttonFont_) SelectObject(hDC, buttonFont_);
-        DrawTextA(hDC, "KWIQ", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        RestoreDC(hDC, saved);
-        DeleteObject(fill);
-        AddScreenObject(KWIQ_OBJ_BUTTON, "KWIQ", r, false, "KWIQ options");   // not movable, as UKCP's
+        AddScreenObject(KWIQ_OBJ_BUTTON, "KWIQ", r, true, "KWIQ options");    // movable
     }
-    // The EuroScope font at 8 pt (UKCP's OP uses 9 pt), or Segoe UI where it isn't installed
-    static HFONT ButtonFont(int dpi) {
-        for (const char* face : { "EuroScope", "Segoe UI" }) {
-            HFONT f = CreateFontA(-MulDiv(8, dpi > 0 ? dpi : 96, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
-            if (!f) continue;
-            HDC dc = GetDC(nullptr);
-            HGDIOBJ old = SelectObject(dc, f);
-            char got[LF_FACESIZE] = {};
-            GetTextFaceA(dc, LF_FACESIZE, got);
-            SelectObject(dc, old);
-            ReleaseDC(nullptr, dc);
-            if (_stricmp(got, face) == 0 || std::strcmp(face, "Segoe UI") == 0) return f;   // Windows substitutes missing faces
-            DeleteObject(f);
+    // The logo images in kwiq.rc: 32-bit BMPs with straight alpha, premultiplied here for AlphaBlend
+    void LoadLogos() {
+        HMODULE mod = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(&LogoMarker), &mod)) return;
+        for (int id : { IDR_KWIQ_LOGO_28, IDR_KWIQ_LOGO_35, IDR_KWIQ_LOGO_42, IDR_KWIQ_LOGO_49, IDR_KWIQ_LOGO_56 }) {
+            HRSRC res = FindResourceW(mod, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10));     // RT_RCDATA
+            HGLOBAL h = res ? LoadResource(mod, res) : nullptr;
+            const unsigned char* p = h ? static_cast<const unsigned char*>(LockResource(h)) : nullptr;
+            DWORD n = res ? SizeofResource(mod, res) : 0;
+            if (!p || n < sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER)) continue;
+            BITMAPFILEHEADER fh;
+            BITMAPINFOHEADER ih;
+            std::memcpy(&fh, p, sizeof fh);
+            std::memcpy(&ih, p + sizeof fh, sizeof ih);
+            if (fh.bfType != 0x4D42 || ih.biBitCount != 32 || ih.biCompression != BI_RGB || ih.biWidth <= 0 ||
+                ih.biWidth > 256 || ih.biHeight != ih.biWidth) continue;
+            size_t bytes = (size_t)ih.biWidth * (size_t)ih.biWidth * 4;
+            if (fh.bfOffBits > n || n - fh.bfOffBits < bytes) continue;
+            BITMAPINFO bi = {};
+            bi.bmiHeader = ih;
+            bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            void* bits = nullptr;
+            HBITMAP bmp = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+            if (!bmp || !bits) { if (bmp) DeleteObject(bmp); continue; }
+            std::memcpy(bits, p + fh.bfOffBits, bytes);
+            kwiq::PremultiplyBgra(static_cast<unsigned char*>(bits), bytes / 4);
+            GdiFlush();
+            logos_[(int)ih.biWidth] = bmp;
         }
-        return nullptr;
     }
+    static void LogoMarker() {}                                         // an address in this DLL, for its resources
 
     HFONT font_ = nullptr;
     HFONT banner_ = CreateFontA(-26, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                 CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
-    HFONT buttonFont_ = nullptr;                                    // for buttonDpi_
-    int buttonDpi_ = 0;
+    std::map<int, HBITMAP> logos_;                                  // the KWIQ button's logo, by size in px
+    bool logosLoaded_ = false;
+    int buttonSize_ = 0;                                            // as last drawn, for dragging
 };
 
 EuroScopePlugIn::CRadarScreen* CKWIQPlugin::OnRadarScreenCreated(const char*, bool, bool, bool, bool) try {
