@@ -19,16 +19,25 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | ... / Event Slot | the slot time |
 | ... / FPC | `OK`, `RTE`, `MIN` or `MAX` against the SRD |
 | ... / Sector Indicator | the alias of the position tracking the aircraft (also drawn above it) |
+| ... / RDF state | `!` while the aircraft transmits |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
 
 Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** (left button on FPC), **Open SRD search window** (any item).
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
-`.kwiq connect` (get your API key from myKWIQ), `.kwiq key <key>` (enter it by hand; `.kwiq key` says whether one is connected, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq sector` (sector indicators on the radar on or off), `.kwiq autorefresh` (slot auto refresh on or off), `.kwiq update` (says whether a newer version is waiting), `.kwiq alert` (preview the sector file alert), `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or AIRAC_VERSION.txt>` (tell the plugin where your package is; empty = automatic), plus VCH's own `.vch ...` commands.
+`.kwiq connect` (get your API key from myKWIQ), `.kwiq key <key>` (enter it by hand; `.kwiq key` says whether one is connected, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq sector` (sector indicators on the radar on or off), `.kwiq autorefresh` (slot auto refresh on or off), `.kwiq update` (says whether a newer version is waiting), `.kwiq alert` (preview the sector file alert), `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or AIRAC_VERSION.txt>` (tell the plugin where your package is; empty = automatic), `.rdf draw on|off|core` (your own RDF switch; `core` = as Core says), `.rdf refresh` (switch the channels off and sync them again from TrackAudio), `.rdf reload` (reconnect to TrackAudio), plus VCH's own `.vch ...` commands.
 
 ## What Core controls
-Besides Core's address, only myKWIQ's Connect EuroScope page and the default EuroScope setup guide and changelog links are compiled in. `/api/plugin/latest` supplies the latest version, the checksums of the plugin and the updater, the kill switch and the changelog link. `/api/plugin/config` supplies: minimum plugin version, message of the day, refresh intervals, tag texts and colours, sector indicator colours/default, and the current sector file AIRAC. Sector aliases, the SRD and events have their own endpoints. All of it is edited in Filament (Plugin settings, Sector aliases, SRD routes, Plugin events).
+Besides Core's address, only myKWIQ's Connect EuroScope page and the default EuroScope setup guide and changelog links are compiled in. `/api/plugin/latest` supplies the latest version, the checksums of the plugin and the updater, the kill switch and the changelog link. `/api/plugin/config` supplies: minimum plugin version, message of the day, refresh intervals, tag texts and colours, sector indicator colours/default, and the current sector file AIRAC. Sector aliases, RDF settings, the SRD and events have their own endpoints. All of it is edited in Filament (Plugin settings, Sector aliases, SRD routes, Plugin events).
+
+## RDF and the TrackAudio bridge
+RDF (Radio Direction Finder, by Kingfu Chan) is built in, as VCH is: do not load `RDFPlugin.dll` or afv-euroscope-bridge as well (the plugin says so and leaves RDF off if they are).
+- **Direction finding:** a circle (or a line from the middle of the screen when it is off screen) on aircraft transmitting on your frequencies; red when more than one transmits at once. Middle-click shows the last transmission again.
+- **Bridge:** when a station is set to RX or TX in TrackAudio (WebSocket on `127.0.0.1:49080`, 1.3.0 Beta 5 or later) or the AFV standalone client, the matching EuroScope voice channel follows, so frequencies are only set in one place. Only on a direct connection.
+- **Settings from Core** (`/api/plugin/rdf`, one line per logon callsign pattern, the first match wins): `RDF|ORBB_*_CTR|draw=1|bridge=1|colour=#FFFFFF|colour_concurrent=#FF0000|radius=20|threshold=-1|precision=0|low_altitude=0|high_altitude=0|low_precision=0|high_precision=0|controllers=0|require_tx=0`. Keys left out take RDF's defaults; with no matching line, drawing is off and the bridge on. `rdf.endpoint` in `/config` is TrackAudio's address.
+- **Controller:** RDF Drawing in the KWIQ menu or `.rdf draw on|off` overrides Core for themselves (kept in the profile; `.rdf draw core` goes back to Core). The menu also shows whether the bridge is on TrackAudio, AFV or not connected; clicking it runs `.rdf refresh`.
+- **Messages:** once a session, 15 seconds after logging on, if TrackAudio isn't running (and no AFV client is), or is older than 1.3.0 Beta 5.
 
 ## Plugin updates
 Installed and updated the way the UK Controller Plugin is:

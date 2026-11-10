@@ -227,6 +227,22 @@ int main() {
     CHECK(DecideStart(false, true, true, false) == StartMode::Full);       // Core unreachable: the switch is unknown
     CHECK(DecideStart(false, false, false, false) == StartMode::DontLoad);
 
+    // RDF settings from Core, by callsign pattern
+    CHECK(WildcardMatch("ORBB_*_CTR", "orbb_s_ctr") && WildcardMatch("*", "") && WildcardMatch("OK??_TWR", "OKBK_TWR"));
+    CHECK(!WildcardMatch("ORBB_*_CTR", "ORBB_S_APP") && !WildcardMatch("OK??_TWR", "OKBK_A_TWR") && WildcardMatch("*CTR", "ORBB_CTR"));
+    auto rdf = ParseRdf("RDF|ORBB_*_CTR|draw=1|colour=#00FF00|radius=30|require_tx=on\nRDF|*|bridge=0|radius=-5\nJUNK\nRDF||draw=1\n");
+    CHECK(rdf.size() == 2);
+    RdfSettings c = RdfFor(rdf, "ORBB_S_CTR");
+    CHECK(c.draw && c.bridge && c.requireTx && c.radius == 30 && c.colour == 0x00FF00 && c.colourConcurrent == 0x0000FF);
+    RdfSettings o = RdfFor(rdf, "OKBK_TWR");
+    CHECK(!o.draw && !o.bridge && o.radius == 20);                      // a bad radius keeps the default
+    RdfSettings none = RdfFor({}, "OKBK_TWR");
+    CHECK(!none.draw && none.bridge && none.threshold == -1);
+
+    // TrackAudio 1.3.0 Beta 5 or later
+    CHECK(TrackAudioVersionOk("TrackAudio v1.3.0-beta.5") && TrackAudioVersionOk("1.3.0") && TrackAudioVersionOk("v1.4.0-beta.1"));
+    CHECK(TrackAudioVersionOk("1.3.0-rc.1") && !TrackAudioVersionOk("1.3.0-beta.4") && !TrackAudioVersionOk("1.2.9") && !TrackAudioVersionOk("TrackAudio"));
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

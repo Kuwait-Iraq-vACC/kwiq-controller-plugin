@@ -8,6 +8,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")   # /
 
 find_package(CURL CONFIG REQUIRED)               # from vcpkg (static, Windows schannel TLS)
 find_package(nlohmann_json CONFIG REQUIRED)      # from vcpkg
+find_package(ixwebsocket CONFIG REQUIRED)        # from vcpkg, without TLS: RDF only talks to TrackAudio on this PC
 
 # Warnings (#41): KWIQ's own sources are built at /W4, and CI fails on any warning in them. Vendored code
 # (VCH, the Slots-Plugin's VatsimAPI.cpp) keeps the default level. Headers from libs/ and vcpkg are external
@@ -24,6 +25,7 @@ add_library(KWIQPluginCore SHARED
     KWIQPlugin.cpp
     VatsimAPI.cpp
     keylink.cpp          # receives the API key from myKWIQ
+    rdf.cpp              # RDF and the TrackAudio bridge (KingfuChan/RDF)
     requestMenu.cpp      # VCH
     internet.cpp         # VCH
     usefulStuff.cpp      # VCH
@@ -36,6 +38,8 @@ target_link_libraries(KWIQPluginCore PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/libs/EuroScopePlugInDll.lib
     CURL::libcurl
     nlohmann_json::nlohmann_json
+    ixwebsocket::ixwebsocket                      # RDF: TrackAudio's WebSocket
+    crypt32 shlwapi                               # ixwebsocket
     wininet                                       # VCH
     winmm                                         # PlaySound (sector file alert)
     ws2_32                                        # API key from myKWIQ (keylink.cpp)
