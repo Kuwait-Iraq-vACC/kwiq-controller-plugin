@@ -2,7 +2,7 @@
 //
 // Laid out like the UK Controller Plugin's loader. The plugin, KWIQPluginCore.dll, and its updater,
 // KWIQPluginUpdater.dll, live in %LOCALAPPDATA%\KWIQ\bin:
-//   1. The first time, with the controller's OK, the updater is downloaded from Core.
+//   1. The first time, the controller is told (OK only) and the updater is downloaded from Core.
 //   2. The updater runs: it installs or updates the plugin (asking first) and itself, and says how the
 //      plugin is to start (in full, reduced after a declined update, or not at all: Core's kill switch).
 //   3. The plugin is loaded from bin.
@@ -48,16 +48,15 @@ static void LoaderError(const std::string& message, UINT icon = MB_ICONSTOP) {
     Box("KWIQ Loader Error", message, MB_OK | icon);
 }
 
-// The first time: download the updater, with the controller's OK (UKCP's DisplayFirstTimeDownloadMessage).
-// Returns why it failed, or "". cancelled: the controller chose Cancel, which UKCP answers with no further box.
-static std::string FirstTimeDownload(const std::string& updater, bool& cancelled) {
-    cancelled = Box("KWIQ First Time Download",
-                    "Performing first time download. This will download and run the KWIQ Plugin Updater to install the "
-                    "plugin.\r\n\r\nSelect OK to continue.", MB_OKCANCEL | MB_ICONINFORMATION) != IDOK;
-    if (cancelled) return "The first time download was cancelled. It will be offered again the next time EuroScope starts.";
+// The first time: the controller is told (OK only, there is nothing to decline) and the updater is downloaded.
+// Returns why it failed, or "".
+static std::string FirstTimeDownload(const std::string& updater) {
+    Box("KWIQ First Time Download",
+        "The KWIQ Controller Plugin will now download its components from Core: the KWIQ Plugin Updater, which then "
+        "installs the plugin.\r\n\r\nSelect OK to continue.", MB_OK | MB_ICONINFORMATION);
     std::string body;
     int status = CoreGet(L"/latest", "0", body, 64 * 1024, 10000);
-    if (status != 200) return "Core could not be reached, so the plugin could not be installed. Try again the next time EuroScope starts.";
+    if (status != 200) return "Core could not be reached.";
     kwiq::PluginConfig cfg = kwiq::ParseConfig(body);
     std::string dll, err = DownloadDll(L"updater", kwiq::Lower(kwiq::Trim(cfg.Get("plugin.updater_sha256"))), "0", dll);
     if (!err.empty()) return "The KWIQ Plugin Updater could not be downloaded. " + err;
@@ -85,11 +84,13 @@ void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlug
     MigrateOldInstall();
 
     if (!Exists(updater)) {
-        bool cancelled = false;
-        std::string err = FirstTimeDownload(updater, cancelled);
+        // Failed (Core unreachable, a bad checksum, not a 32-bit DLL): said once, the inactive stand-in is
+        // loaded, and the next start tries again. No retry or second prompt in this session.
+        std::string err = FirstTimeDownload(updater);
         if (!err.empty()) {
-            if (!cancelled) LoaderError("Unable to perform the first time download of the KWIQ Plugin Updater.\r\n\r\n" + err);
-            Inactive(ppPlugInInstance, err);
+            Box("KWIQ Automatic Update Failed", "The KWIQ Controller Plugin could not be installed.\r\n\r\n" + err +
+                "\r\n\r\nIt will try again the next time EuroScope starts.", MB_OK | MB_ICONSTOP);
+            Inactive(ppPlugInInstance, "The KWIQ Controller Plugin could not be installed. It will try again the next time EuroScope starts.");
             return;
         }
     }
