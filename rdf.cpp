@@ -219,6 +219,10 @@ struct KwiqRdf::Impl {
     }
 
     // ---- TrackAudio messages (RDF's TrackAudio*Handler) ---------------------------------------
+    // These run on the WebSocket's thread and call the EuroScope API (ControllerMyself, RadarTargetSelect, the
+    // voice channels), as upstream RDF does in the same handlers; kept as it is. Locks are always taken in
+    // the order mtxTransmission, mtxTxFrequencies, mtxSettings. CKWIQPlugin stops the socket before it is
+    // destroyed (Stop), so these never run on a plugin that has gone.
     void TransmissionHandler(const nlohmann::json& data, bool rxEnd) {
         std::unique_lock<std::shared_mutex> t(mtxTransmission);
         std::string callsign = data.at("callsign");
@@ -357,16 +361,20 @@ LRESULT CALLBACK HiddenWindowAFV(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 KwiqRdf::KwiqRdf(EuroScopePlugIn::CPlugIn* es) : d_(new Impl(es)) {}
 
 KwiqRdf::~KwiqRdf() {
-    if (d_->started) {
-        d_->socketTrackAudio.stop();
-        if (d_->hiddenWindowRDF) DestroyWindow(d_->hiddenWindowRDF);
-        if (d_->hiddenWindowAFV) DestroyWindow(d_->hiddenWindowAFV);
-        HINSTANCE exe = GetModuleHandleA(nullptr);
-        if (d_->classRDF) UnregisterClassA(kRdfClass, exe);
-        if (d_->classAFV) UnregisterClassA(kAfvClass, exe);
-    }
+    Stop();
     if (d_->netInit) ix::uninitNetSystem();
-    if (gRdf == d_.get()) gRdf = nullptr;
+}
+
+void KwiqRdf::Stop() {
+    if (gRdf == d_.get()) gRdf = nullptr;            // the AFV windows no longer reach it
+    if (!d_->started) return;
+    d_->started = false;
+    d_->socketTrackAudio.stop();                     // returns once the WebSocket's thread has ended
+    if (d_->hiddenWindowRDF) { DestroyWindow(d_->hiddenWindowRDF); d_->hiddenWindowRDF = nullptr; }
+    if (d_->hiddenWindowAFV) { DestroyWindow(d_->hiddenWindowAFV); d_->hiddenWindowAFV = nullptr; }
+    HINSTANCE exe = GetModuleHandleA(nullptr);
+    if (d_->classRDF) { UnregisterClassA(kRdfClass, exe); d_->classRDF = false; }
+    if (d_->classAFV) { UnregisterClassA(kAfvClass, exe); d_->classAFV = false; }
 }
 
 bool KwiqRdf::Start(std::string& why) {

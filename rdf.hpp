@@ -19,6 +19,9 @@ public:
     ~KwiqRdf();
     // Main thread. False (with why) if another RDF or afv-euroscope-bridge is loaded in this EuroScope.
     bool Start(std::string& why);
+    // Main thread: closes TrackAudio's WebSocket (joining its thread) and the AFV windows. CKWIQPlugin calls it
+    // before it cleans up curl, which that thread uses (#47); the destructor calls it too.
+    void Stop();
     // Core's settings and TrackAudio's address (rdf.endpoint); the WebSocket reconnects if the address changes
     void SetRows(std::vector<kwiq::RdfRow> rows);
     void SetEndpoint(const std::string& hostPort);

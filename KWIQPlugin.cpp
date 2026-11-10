@@ -646,6 +646,7 @@ public:
         kwiq_ui::gOnNotice = nullptr;
         kwiq_ui::Shutdown();
         keyLink_.Stop();
+        rdf_.Stop();                                         // TrackAudio's thread uses curl and this plugin (#47)
         if (soundLooping_) PlaySoundA(nullptr, nullptr, 0);
         quit_ = true;                                        // aborts a running update download
         if (worker_.joinable()) worker_.join();
