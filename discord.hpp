@@ -4,6 +4,7 @@
 // GPL-3.0), see discord.cpp and NOTICE.md. Uses discord-rpc (Multi Theft Auto's fork, MIT) in libs/discord-rpc.
 // Everything DiscordEuroscope_config.json held comes from Core (kwiq::DiscordConfig).
 #pragma once
+#include <windows.h>
 #include <ctime>
 #include <memory>
 #include <string>
