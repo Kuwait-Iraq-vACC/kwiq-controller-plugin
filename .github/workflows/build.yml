@@ -165,6 +165,70 @@ jobs:
             gh pr comment "$PR" --body "Test build $VERSION has been published as a pre-release: [$tag]($url) (built from ${SHA:0:7})."
           fi
 
+  changelog:
+    # Every release from main rebuilds the changelog on docs.kuwait-iraqvacc.net from the release notes of
+    # every published release (pre-releases are never listed), and commits it to kwiq-documentation-site,
+    # which deploys on every push. Needs DOCS_REPO_TOKEN: Contents read and write on that repository only.
+    needs: release
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DOCS_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
+      PAGE: docs/Controller Guidance/KWIQ Controller Plugin/Changelog.md
+    steps:
+      - name: Check for the token
+        id: token
+        run: |
+          if [ -z "$DOCS_TOKEN" ]; then echo "::warning::DOCS_REPO_TOKEN is not set, so the changelog was not updated"; echo "ok=false" >> "$GITHUB_OUTPUT"
+          else echo "ok=true" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.ok == 'true'
+        with:
+          repository: Kuwait-Iraq-vACC/kwiq-documentation-site
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          path: docs-site
+
+      - name: Write the changelog
+        if: steps.token.outputs.ok == 'true'
+        run: |
+          cat > gen.py <<'PY'
+          import json, re, sys
+          # stdin: one release per line (tag_name, published_at, body); argv[1]: output Changelog.md
+          rels = [json.loads(l) for l in sys.stdin if l.strip()]
+          rels.sort(key=lambda r: r["published_at"], reverse=True)
+          out = ["---", "title: Changelog", "---", "",
+                 "Every release of the KWIQ Controller Plugin, newest first. The plugin offers each one as EuroScope starts.", ""]
+          for r in rels:
+              items = []
+              for line in (r.get("body") or "").splitlines():
+                  m = re.match(r"^\s*[*-]\s+(.*?)(?:\s+by\s+@\S+)?(?:\s+in\s+https?://\S+)?\s*$", line)
+                  if not m or line.lstrip().startswith(("**Full Changelog", "* @")):
+                      continue
+                  t = m.group(1).strip()
+                  if t and "made their first contribution" not in t:
+                      items.append("- " + t)
+              out += ["## " + r["tag_name"].lstrip("v"), "", "*" + r["published_at"][:10] + "*", ""]
+              out += items or ["- Maintenance release."]
+              out.append("")
+          open(sys.argv[1], "w").write("\n".join(out))
+          PY
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.prerelease|not) | select(.draft|not) | {tag_name, published_at, body}' \
+            | python3 gen.py "docs-site/$PAGE"
+
+      - name: Commit it
+        if: steps.token.outputs.ok == 'true'
+        working-directory: docs-site
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$PAGE"
+          git diff --cached --quiet && { echo "unchanged"; exit 0; }
+          git commit -m "KWIQ Controller Plugin changelog (${GITHUB_SHA::7})"
+          git push
+
   cleanup:
     # a closed pull request no longer needs its test build
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
