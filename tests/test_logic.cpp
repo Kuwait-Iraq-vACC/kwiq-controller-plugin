@@ -53,7 +53,9 @@ int main() {
     {
         PluginConfig c = ParseConfig("|nokey\r\na|1|2\r\nb| \r\nnobar\r\nn|99999999999\r\n");
         CHECK(c.kv.size() == 3 && c.Get("a") == "1|2" && c.Get("b", "x").empty() && c.GetBool("b", true) && c.GetBool("a", false));
-        CHECK(c.GetInt("n", 5, 0, 100) == 100 && ParseConfig("").kv.empty() && !PluginConfig{ { { "f", "No" } } }.GetBool("f", true));
+        PluginConfig no;
+        no.kv["f"] = "No";
+        CHECK(c.GetInt("n", 5, 0, 100) == 100 && ParseConfig("").kv.empty() && !no.GetBool("f", true));
     }
     CHECK(ParseColour("#ff8000", 1) == 0x000080FFul && ParseColour("", 7) == 7 && ParseColour("#FF80001", 7) == 7 && ParseColour("FF8000", 7) == 7);
     CHECK(CompareVersions("", "") == 0 && CompareVersions("0.6.0.42", "0.6.0") > 0 && CompareVersions("1.x", "1.0") == 0 &&
