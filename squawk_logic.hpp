@@ -41,7 +41,7 @@ inline bool PositionMatches(const std::string& position, const std::string& call
 }
 
 // ---- top-down: who gives departures their squawk (UKCP AirfieldServiceProviderCollection) ---------------
-// Core /api/plugin/squawk/topdown (plain text):  TOPDOWN|<airport>|<position>,<position>,...  lowest first,
+// Core /api/plugin/topdown (plain text, shared with the QNH monitor and notifications):  TOPDOWN|<airport>|<position>,<position>,...  lowest first,
 // e.g. TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR
 using TopDown = std::unordered_map<std::string, std::vector<std::string>>;
 

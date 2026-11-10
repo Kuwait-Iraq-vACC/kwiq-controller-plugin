@@ -60,7 +60,7 @@ If Core cannot give a code, the error is shown once and that aircraft is not ask
 | `GET /squawk-assignment/<callsign>` | `SQUAWK\|<code>` if Core holds a code for it, else 404 |
 | `PUT /squawk-assignment/<callsign>`, form `origin=OKBK&destination=OMDB&rules=I` (or `V`) | `SQUAWK\|<code>`: a new code from the range for that flight (replaces any it held) |
 | `DELETE /squawk-assignment/<callsign>` | 2xx, or 404 if it held none |
-| `GET /squawk/topdown` | one `TOPDOWN\|<airport>\|<position>,<position>,...` line per airport, lowest position first (refreshed with the SRD) |
+| `GET /topdown` | one `TOPDOWN\|<airport>\|<position>,<position>,...` line per airport, lowest position first (refreshed with the SRD) |
 
 Errors may carry `ERROR|<message>` in the body, which the plugin shows. Core must never answer 7500, 7600, 7700, 1200, 2200, 0200, 0000 or 1234; the plugin ignores them. Config keys: `squawk.enabled` (default 0), `squawk.non_discrete` (default 2000), `squawk.non_discrete_vfr` (default 7000).
 

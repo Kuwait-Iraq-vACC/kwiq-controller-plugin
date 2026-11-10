@@ -43,7 +43,7 @@ static const char* CORE_SRD_URL         = CORE_BASE "/srd";
 static const char* CORE_SRD_VERSION_URL = CORE_BASE "/srd/version";
 static const char* CORE_SECTORS_URL     = CORE_BASE "/sectors";
 static const char* CORE_SQUAWK_URL      = CORE_BASE "/squawk-assignment/";   // + callsign
-static const char* CORE_TOPDOWN_URL     = CORE_BASE "/squawk/topdown";
+static const char* CORE_TOPDOWN_URL     = CORE_BASE "/topdown";        // shared with the QNH monitor and notifications
 // myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
 static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
 // EuroScope setup guide, opened from the incorrect EuroScope version popup until Core sends euroscope.setup_url
