@@ -1124,12 +1124,13 @@ public:
 
     // ---- the KWIQ button and its menu (main thread) (#59) ------------------------------------
     // As UKCP's OP button (ScreenControls): a small square in the bottom-right corner of each radar screen,
-    // worked out from the radar area on every draw so it follows the window, and not movable. Its border is
-    // Core's status (kwiq::KwiqButtonStatus). ".kwiq button" (or Hide Button in its menu) hides it and
-    // brings it back. In reduced mode it is shown, amber, and a click repeats the reminder instead.
-    static constexpr int BUTTON_SIZE = 22;                           // px at 96 DPI, as UKCP's
+    // worked out from the radar area on every draw so it follows the window, and not movable, always in
+    // UKCP's colours. ".kwiq button" (or Hide Button in its menu) hides it and brings it back. In reduced
+    // mode it is shown as usual, and a click repeats the reminder instead.
+    // 30 px at 96 DPI: "KWIQ" at 8 pt is 28 px wide in the EuroScope font and in Segoe UI at 100%, so 28
+    // would leave no margin; 30 leaves at least 1 px each side at 100%, 125%, 150% and 200%.
+    static constexpr int BUTTON_SIZE = 30;
     bool ButtonShown() const { return buttonShown_ && !duplicate_; }
-    kwiq::ButtonStatus ButtonState() const { return kwiq::KwiqButtonStatus(reduced_, coreAnswered_); }
     static RECT ButtonRect(const RECT& radar, int size) {
         RECT r = { radar.right - size, radar.bottom - size, radar.right, radar.bottom };
         return r;
@@ -1673,8 +1674,7 @@ private:
                     ClearError("API key");
                     keyRefused_ = false;
                     ApplyConfig(ParseConfig(body));
-                    coreAnswered_ = true;
-                } else { coreAnswered_ = false; fail("Config", err); }
+                } else fail("Config", err);
                 if (!reduced_ && kwiq_net::HttpGet(CORE_EVENT_URL, body, err)) {
                     ClearError("Core");
                     EventData ev = ParseCoreEvent(body);
@@ -1735,7 +1735,6 @@ private:
     std::atomic<int> coreEvery_{ 60 }, srdEvery_{ 300 }, slotsEvery_{ 60 };
     bool settingsLoaded_ = false;                                   // main thread only
     bool buttonShown_ = true;                                       // main thread only
-    std::atomic<bool> coreAnswered_{ false };                       // the last /config request was answered (#59)
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     KwiqRdf rdf_{ this };                                           // RDF and the TrackAudio bridge
@@ -1878,12 +1877,12 @@ private:
         DeleteObject(pen);
     }
 
-    // UKCP's OP button: EuroScope's background colour, the label centred in the EuroScope font at 9 pt. "KQ",
-    // as "KWIQ" doesn't fit legibly in 22 px. The border (2 px at 96 DPI) is the status; the whole square
-    // is the click target, and nothing outside it is covered.
+    // UKCP's OP button: EuroScope's background green RGB(11, 65, 54) with the label in UKCP's green
+    // RGB(0, 255, 0), on one line, centred, in the EuroScope font at 8 pt. One colour in every state, no
+    // border. The whole square is the click target, and nothing outside it is covered.
     void DrawButton(HDC hDC) {
         int dpi = GetDeviceCaps(hDC, LOGPIXELSX);
-        int size = kwiq::ScaleForDpi(CKWIQPlugin::BUTTON_SIZE, dpi), border = (std::max)(1, kwiq::ScaleForDpi(2, dpi));
+        int size = kwiq::ScaleForDpi(CKWIQPlugin::BUTTON_SIZE, dpi);
         RECT r = CKWIQPlugin::ButtonRect(GetRadarArea(), size);
         if (!buttonFont_ || dpi != buttonDpi_) {
             if (buttonFont_) DeleteObject(buttonFont_);
@@ -1892,23 +1891,19 @@ private:
         }
         int saved = SaveDC(hDC);
         HBRUSH fill = CreateSolidBrush(RGB(11, 65, 54));
-        HBRUSH edge = CreateSolidBrush((COLORREF)kwiq::ButtonBorderColour(gPlugin->ButtonState()));
         FillRect(hDC, &r, fill);
-        RECT ring = r;
-        for (int i = 0; i < border; i++) { FrameRect(hDC, &ring, edge); InflateRect(&ring, -1, -1); }
         SetBkMode(hDC, TRANSPARENT);
-        SetTextColor(hDC, RGB(255, 255, 255));
+        SetTextColor(hDC, RGB(0, 255, 0));
         if (buttonFont_) SelectObject(hDC, buttonFont_);
-        DrawTextA(hDC, "KQ", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextA(hDC, "KWIQ", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         RestoreDC(hDC, saved);
         DeleteObject(fill);
-        DeleteObject(edge);
         AddScreenObject(KWIQ_OBJ_BUTTON, "KWIQ", r, false, "KWIQ options");   // not movable, as UKCP's
     }
-    // UKCP's font: the EuroScope font at 9 pt, or Segoe UI where it isn't installed
+    // The EuroScope font at 8 pt (UKCP's OP uses 9 pt), or Segoe UI where it isn't installed
     static HFONT ButtonFont(int dpi) {
         for (const char* face : { "EuroScope", "Segoe UI" }) {
-            HFONT f = CreateFontA(-MulDiv(9, dpi > 0 ? dpi : 96, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            HFONT f = CreateFontA(-MulDiv(8, dpi > 0 ? dpi : 96, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                   OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
             if (!f) continue;
             HDC dc = GetDC(nullptr);
