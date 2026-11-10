@@ -366,6 +366,14 @@ int main() {
     auto n2 = ParseNotices("NOTICE| 7 |OKBK,,|2026-11-01|1|Title|https://x.net|end\\n\r\n");
     CHECK(n2.size() == 1 && n2[0].id == "7" && n2[0].airports.size() == 1 && n2[0].read && n2[0].text == "end\r\n" && !NoticeRelevant(n2[0], {}));
 
+    // the KWIQ button's border (#59): reduced mode wins, then whether Core answered
+    CHECK(KwiqButtonStatus(true, true) == ButtonStatus::Reduced && KwiqButtonStatus(true, false) == ButtonStatus::Reduced);
+    CHECK(KwiqButtonStatus(false, true) == ButtonStatus::Connected && KwiqButtonStatus(false, false) == ButtonStatus::Unreachable);
+    CHECK(ButtonBorderColour(ButtonStatus::Connected) == 0x0000C800ul && ButtonBorderColour(ButtonStatus::Reduced) == 0x0000BFFFul &&
+          ButtonBorderColour(ButtonStatus::Unreachable) == 0x001E1EE6ul);
+    CHECK(ScaleForDpi(22, 96) == 22 && ScaleForDpi(22, 120) == 28 && ScaleForDpi(22, 144) == 33 && ScaleForDpi(22, 192) == 44);
+    CHECK(ScaleForDpi(2, 120) == 3 && ScaleForDpi(22, 0) == 22 && ScaleForDpi(22, -5) == 22);
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

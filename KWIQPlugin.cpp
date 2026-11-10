@@ -697,9 +697,6 @@ public:
             if (sp && *sp) { std::lock_guard<std::mutex> g(mu_); sectorPath_ = sp; }
             const char* bs = GetDataFromSettings("kwiq_button");
             if (bs && *bs == '0') buttonShown_ = false;
-            const char* bp = GetDataFromSettings("kwiq_button_at");
-            int bx, by;
-            if (bp && sscanf_s(bp, "%d,%d", &bx, &by) == 2 && bx >= 0 && by >= 0) { buttonX_ = bx; buttonY_ = by; }
             const char* rd = GetDataFromSettings("kwiq_rdf_draw");      // the controller's own RDF switch
             if (rd && (*rd == '0' || *rd == '1')) rdf_.SetLocalDraw(*rd - '0');
             // DiscordEuroScope on or off for this controller; the Configurator writes the same setting
@@ -1125,24 +1122,21 @@ public:
         Msg(std::string("RDF drawing: ") + (rdf_.DrawOn() ? "on" : "off") + (v < 0 ? " (as the vACC sets it)" : ""), false);
     }
 
-    // ---- the KWIQ button and its menu (main thread) ------------------------------------------
-    // A small red button at the top centre of each radar screen; it can be dragged anywhere, and
-    // ".kwiq button" (or Hide Button in its menu) hides it and brings it back.
-    static constexpr int BUTTON_W = 44, BUTTON_H = 18;
-    bool ButtonShown() const { return buttonShown_ && !duplicate_ && !reduced_; }
-    RECT ButtonRect(const RECT& radar) const {
-        // Top centre until it is dragged somewhere else; always kept inside the radar area
-        int w = radar.right - radar.left, h = radar.bottom - radar.top;
-        int x = buttonX_ < 0 ? (w - BUTTON_W) / 2 : buttonX_, y = buttonY_ < 0 ? 10 : buttonY_;
-        x = (std::max)(0, (std::min)(x, w - BUTTON_W));
-        y = (std::max)(0, (std::min)(y, h - BUTTON_H));
-        RECT r = { radar.left + x, radar.top + y, radar.left + x + BUTTON_W, radar.top + y + BUTTON_H };
+    // ---- the KWIQ button and its menu (main thread) (#59) ------------------------------------
+    // As UKCP's OP button (ScreenControls): a small square in the bottom-right corner of each radar screen,
+    // worked out from the radar area on every draw so it follows the window, and not movable. Its border is
+    // Core's status (kwiq::KwiqButtonStatus). ".kwiq button" (or Hide Button in its menu) hides it and
+    // brings it back. In reduced mode it is shown, amber, and a click repeats the reminder instead.
+    static constexpr int BUTTON_SIZE = 22;                           // px at 96 DPI, as UKCP's
+    bool ButtonShown() const { return buttonShown_ && !duplicate_; }
+    kwiq::ButtonStatus ButtonState() const { return kwiq::KwiqButtonStatus(reduced_, coreAnswered_); }
+    static RECT ButtonRect(const RECT& radar, int size) {
+        RECT r = { radar.right - size, radar.bottom - size, radar.right, radar.bottom };
         return r;
     }
-    void MoveButton(const RECT& radar, POINT pt, bool released) {
-        buttonX_ = (std::max)(0, (std::min)((int)(pt.x - radar.left) - BUTTON_W / 2, (int)(radar.right - radar.left) - BUTTON_W));
-        buttonY_ = (std::max)(0, (std::min)((int)(pt.y - radar.top) - BUTTON_H / 2, (int)(radar.bottom - radar.top) - BUTTON_H));
-        if (released) SaveDataToSettings("kwiq_button_at", "KWIQ button position", (std::to_string(buttonX_) + "," + std::to_string(buttonY_)).c_str());
+    void ButtonClicked(RECT area) {
+        if (reduced_) { Msg(kReducedReminder, true); return; }      // no menu in reduced mode
+        OpenMenu(area);
     }
     void ShowButton(bool shown) {
         buttonShown_ = shown;
@@ -1679,7 +1673,8 @@ private:
                     ClearError("API key");
                     keyRefused_ = false;
                     ApplyConfig(ParseConfig(body));
-                } else fail("Config", err);
+                    coreAnswered_ = true;
+                } else { coreAnswered_ = false; fail("Config", err); }
                 if (!reduced_ && kwiq_net::HttpGet(CORE_EVENT_URL, body, err)) {
                     ClearError("Core");
                     EventData ev = ParseCoreEvent(body);
@@ -1740,7 +1735,7 @@ private:
     std::atomic<int> coreEvery_{ 60 }, srdEvery_{ 300 }, slotsEvery_{ 60 };
     bool settingsLoaded_ = false;                                   // main thread only
     bool buttonShown_ = true;                                       // main thread only
-    int buttonX_ = -1, buttonY_ = -1;                               // main thread only: from the radar's top left; -1 = top centre
+    std::atomic<bool> coreAnswered_{ false };                       // the last /config request was answered (#59)
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     KwiqRdf rdf_{ this };                                           // RDF and the TrackAudio bridge
@@ -1809,7 +1804,7 @@ public:
     virtual ~CKWIQRadar() {
         CKWIQPlugin::RegisterRadar(this, false);
         if (font_) DeleteObject(font_);
-        if (small_) DeleteObject(small_);
+        if (buttonFont_) DeleteObject(buttonFont_);
         if (banner_) DeleteObject(banner_);
     }
 
@@ -1850,13 +1845,9 @@ public:
         RestoreDC(hDC, saved);
     } catch (...) {}
 
+    // Any button, as UKCP's OP button opens its menu on a left or a right click
     virtual void OnClickScreenObject(int ObjectType, const char*, POINT, RECT Area, int) override try {
-        if (ObjectType == KWIQ_OBJ_BUTTON && gPlugin) gPlugin->OpenMenu(Area);
-    } catch (...) {}
-    virtual void OnMoveScreenObject(int ObjectType, const char*, POINT Pt, RECT, bool Released) override try {
-        if (ObjectType != KWIQ_OBJ_BUTTON || !gPlugin) return;
-        gPlugin->MoveButton(GetRadarArea(), Pt, Released);
-        RequestRefresh();
+        if (ObjectType == KWIQ_OBJ_BUTTON && gPlugin) gPlugin->ButtonClicked(Area);
     } catch (...) {}
     // the menu and the key box opened from the button report back here
     virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override try {
@@ -1887,29 +1878,56 @@ private:
         DeleteObject(pen);
     }
 
+    // UKCP's OP button: EuroScope's background colour, the label centred in the EuroScope font at 9 pt. "KQ",
+    // as "KWIQ" doesn't fit legibly in 22 px. The border (2 px at 96 DPI) is the status; the whole square
+    // is the click target, and nothing outside it is covered.
     void DrawButton(HDC hDC) {
-        RECT r = gPlugin->ButtonRect(GetRadarArea());
+        int dpi = GetDeviceCaps(hDC, LOGPIXELSX);
+        int size = kwiq::ScaleForDpi(CKWIQPlugin::BUTTON_SIZE, dpi), border = (std::max)(1, kwiq::ScaleForDpi(2, dpi));
+        RECT r = CKWIQPlugin::ButtonRect(GetRadarArea(), size);
+        if (!buttonFont_ || dpi != buttonDpi_) {
+            if (buttonFont_) DeleteObject(buttonFont_);
+            buttonFont_ = ButtonFont(dpi);
+            buttonDpi_ = dpi;
+        }
         int saved = SaveDC(hDC);
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(127, 29, 29));
-        HBRUSH fill = CreateSolidBrush(RGB(185, 28, 28));
-        SelectObject(hDC, pen);
-        SelectObject(hDC, fill);
-        RoundRect(hDC, r.left, r.top, r.right, r.bottom, 6, 6);
+        HBRUSH fill = CreateSolidBrush(RGB(11, 65, 54));
+        HBRUSH edge = CreateSolidBrush((COLORREF)kwiq::ButtonBorderColour(gPlugin->ButtonState()));
+        FillRect(hDC, &r, fill);
+        RECT ring = r;
+        for (int i = 0; i < border; i++) { FrameRect(hDC, &ring, edge); InflateRect(&ring, -1, -1); }
         SetBkMode(hDC, TRANSPARENT);
         SetTextColor(hDC, RGB(255, 255, 255));
-        if (small_) SelectObject(hDC, small_);
-        DrawTextA(hDC, "KWIQ", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if (buttonFont_) SelectObject(hDC, buttonFont_);
+        DrawTextA(hDC, "KQ", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         RestoreDC(hDC, saved);
-        DeleteObject(pen);
         DeleteObject(fill);
-        AddScreenObject(KWIQ_OBJ_BUTTON, "KWIQ", r, true, "KWIQ options");
+        DeleteObject(edge);
+        AddScreenObject(KWIQ_OBJ_BUTTON, "KWIQ", r, false, "KWIQ options");   // not movable, as UKCP's
+    }
+    // UKCP's font: the EuroScope font at 9 pt, or Segoe UI where it isn't installed
+    static HFONT ButtonFont(int dpi) {
+        for (const char* face : { "EuroScope", "Segoe UI" }) {
+            HFONT f = CreateFontA(-MulDiv(9, dpi > 0 ? dpi : 96, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
+            if (!f) continue;
+            HDC dc = GetDC(nullptr);
+            HGDIOBJ old = SelectObject(dc, f);
+            char got[LF_FACESIZE] = {};
+            GetTextFaceA(dc, LF_FACESIZE, got);
+            SelectObject(dc, old);
+            ReleaseDC(nullptr, dc);
+            if (_stricmp(got, face) == 0 || std::strcmp(face, "Segoe UI") == 0) return f;   // Windows substitutes missing faces
+            DeleteObject(f);
+        }
+        return nullptr;
     }
 
     HFONT font_ = nullptr;
     HFONT banner_ = CreateFontA(-26, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                 CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
-    HFONT small_ = CreateFontA(-11, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                               CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
+    HFONT buttonFont_ = nullptr;                                    // for buttonDpi_
+    int buttonDpi_ = 0;
 };
 
 EuroScopePlugIn::CRadarScreen* CKWIQPlugin::OnRadarScreenCreated(const char*, bool, bool, bool, bool) try {

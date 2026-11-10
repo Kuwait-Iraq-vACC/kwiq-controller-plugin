@@ -1000,4 +1000,23 @@ inline std::string UrlEncode(const std::string& s) {
     return out;
 }
 
+// ---- the KWIQ button (#59) ------------------------------------------------------------------------
+// Its border colour: amber in reduced mode (a declined update), otherwise green while Core answered the
+// last config request and red when it didn't (unreachable, timed out or refused, and before the first answer).
+enum class ButtonStatus { Connected, Reduced, Unreachable };
+inline ButtonStatus KwiqButtonStatus(bool reduced, bool coreAnswered) {
+    if (reduced) return ButtonStatus::Reduced;
+    return coreAnswered ? ButtonStatus::Connected : ButtonStatus::Unreachable;
+}
+// As a COLORREF (0x00BBGGRR): green RGB(0, 200, 0), amber RGB(255, 191, 0), red RGB(230, 30, 30)
+inline unsigned long ButtonBorderColour(ButtonStatus s) {
+    switch (s) {
+    case ButtonStatus::Connected: return 0x0000C800ul;
+    case ButtonStatus::Reduced:   return 0x0000BFFFul;
+    default:                      return 0x001E1EE6ul;
+    }
+}
+// A size in pixels at 96 DPI, for a screen at dpi (rounded; 0 or less: unscaled)
+inline int ScaleForDpi(int px, int dpi) { return dpi > 0 ? (px * dpi + 48) / 96 : px; }
+
 } // namespace kwiq
