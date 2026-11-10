@@ -19,7 +19,7 @@ namespace kwiq_win {
 static const wchar_t* const kCoreHost = L"core.kuwait-iraqvacc.net";
 static const wchar_t* const kCorePath = L"/api/plugin";
 static const char* const kTitle = "KWIQ Controller Plugin";
-static const char* const kChangelogUrl = "https://docs.kuwait-iraqvacc.net/KWIQ%20Controller%20Plugin/Changelog/";
+static const char* const kChangelogUrl = "https://docs.kuwait-iraqvacc.net/Controller%20Guidance/KWIQ%20Controller%20Plugin/Changelog/";
 
 inline std::string Env(const char* name) {
     char b[MAX_PATH] = {};
