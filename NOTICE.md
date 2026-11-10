@@ -39,6 +39,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - New placeholder `{event}`.
 - `Discord_Initialize` does not register a URL handler in the registry.
 - `.discord hotreload` is gone: Core's settings arrive on their own.
+- Texts are cut at a UTF-8 character boundary (127 bytes, 31 for button labels), and a button whose URL Discord would refuse (not http(s), or over 512 bytes) is left out.
 
 ## Slot detection: permission
 The plugin information string in the VATCAN source (`SituPlugin.cpp`) declares CC BY-NC 4.0, and the repository has no licence file.
