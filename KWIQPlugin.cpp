@@ -46,7 +46,7 @@ static const char* CORE_SRD_VERSION_URL = CORE_BASE "/srd/version";
 static const char* CORE_SECTORS_URL     = CORE_BASE "/sectors";
 static const char* CORE_RDF_URL         = CORE_BASE "/rdf";
 static const char* CORE_DISCORD_URL     = CORE_BASE "/discord";
-static const char* CORE_TOPDOWN_URL     = CORE_BASE "/topdown";
+static const char* CORE_TOPDOWN_ORDERS_URL     = CORE_BASE "/topdown";
 static const char* CORE_TRL_URL         = CORE_BASE "/trl";
 static const char* CORE_METAR_URL       = CORE_BASE "/metar";
 static const char* CORE_NOTICES_URL     = CORE_BASE "/notifications";
@@ -1804,7 +1804,7 @@ private:
                 } else fail("SRD", err);
             }
             if (doSrd && !reduced_) {                  // top-down orders and transition levels; none yet is fine
-                if (kwiq_net::HttpGet(CORE_TOPDOWN_URL, body, err)) { ClearError("Top-down"); auto td = ParseTopDownOrders(body); std::lock_guard<std::mutex> g(mu_); topDown_ = std::move(td); }
+                if (kwiq_net::HttpGet(CORE_TOPDOWN_ORDERS_URL, body, err)) { ClearError("Top-down"); auto td = ParseTopDownOrders(body); std::lock_guard<std::mutex> g(mu_); topDown_ = std::move(td); }
                 else if (err != "HTTP 404") fail("Top-down", err);
                 if (kwiq_net::HttpGet(CORE_TRL_URL, body, err)) { ClearError("TRL"); auto t = ParseTrl(body); std::lock_guard<std::mutex> g(mu_); trl_ = std::move(t); }
                 else if (err != "HTTP 404") fail("TRL", err);
