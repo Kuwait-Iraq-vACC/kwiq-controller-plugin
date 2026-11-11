@@ -1,8 +1,8 @@
-// version.h - the plugin's version, shared by the loader (loader.cpp) and the plugin.
-// Change the base version by hand; GitHub Actions adds its build number (0.5.0.42) to every release.
+// version.h - the plugin's version, shared by the loader (loader.cpp), the updater (updater.cpp) and the plugin.
+// Change the base version by hand; GitHub Actions adds its build number (0.6.0.42) to every release.
 #pragma once
 
-#define KWIQ_PLUGIN_VERSION_BASE "0.5.0"
+#define KWIQ_PLUGIN_VERSION_BASE "0.6.0"
 #ifndef KWIQ_BUILD_NUMBER
 #define KWIQ_BUILD_NUMBER 0
 #endif

@@ -7,6 +7,10 @@
 //
 // Event Routes (#61): the same kind of dialog, with SRD Search's font, styles, margins, results list and
 // copy button: today's routes for Core's event, and Copy Route String To Clipboard for the one selected.
+//
+// The KWIQ button's logo (#59): kwiq_logo.png scaled down by kwiq_logo.ps1 to each size the button is drawn
+// at, as 32-bit BMPs with alpha. Kept as RCDATA so the bytes are loaded exactly as written; KWIQPlugin.cpp
+// reads them and alpha-blends the logo onto the radar screen.
 
 #include <windows.h>
 #include <commctrl.h>
@@ -45,3 +49,9 @@ BEGIN
     PUSHBUTTON      "Copy Route String To Clipboard", IDC_EVT_ROUTE_COPY, 7, 172, 110, 14, WS_DISABLED
     PUSHBUTTON      "Close", IDOK, 254, 172, 50, 14
 END
+
+IDR_KWIQ_LOGO_28 RCDATA "kwiq_logo_28.bmp"
+IDR_KWIQ_LOGO_35 RCDATA "kwiq_logo_35.bmp"
+IDR_KWIQ_LOGO_42 RCDATA "kwiq_logo_42.bmp"
+IDR_KWIQ_LOGO_49 RCDATA "kwiq_logo_49.bmp"
+IDR_KWIQ_LOGO_56 RCDATA "kwiq_logo_56.bmp"
