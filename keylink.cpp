@@ -79,31 +79,9 @@ void KeyLink::Loop() {
         if (select(0, &fds, nullptr, nullptr, &tv) <= 0) continue;
         SOCKET c = accept(s, nullptr, nullptr);
         if (c == INVALID_SOCKET) continue;
-        DWORD timeout = 3000;
-        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-        std::string req;
-        char buf[2048];
-        while (req.size() < 8192 && req.find("\r\n") == std::string::npos) {
-            int n = recv(c, buf, sizeof(buf), 0);
-            if (n <= 0) break;
-            req.append(buf, n);
-        }
-        std::string key = kwiq::QueryValue(req, "key"), code = kwiq::QueryValue(req, "code"), state = kwiq::QueryValue(req, "state");
-        bool fromCode = !code.empty() && state == state_;
-        if (fromCode && Claim) key = Claim(code);
-        bool ok = kwiq::IsApiKey(key) && state == state_;
-        if (fromCode && !ok) {
-            Reply(c, 502, "Your API key could not be collected from Core. Please try again from EuroScope, with the KWIQ button and API Key. "
-                          "Need help? Ask in our <a style=\"color:#f87171\" href=\"https://discord.kuwait-iraqvacc.net\">Discord server</a>.");
-        } else if (ok) {
-            Reply(c, 200, "Your API key has been received. You can close this window and return to EuroScope.");
-            { std::lock_guard<std::mutex> g(mu_); received_ = key; }
-            stop_ = true;
-        } else if (req.compare(0, 6, "GET /?") == 0) {
-            Reply(c, 400, "This link is not valid. Please start again from the KWIQ button in EuroScope, and choose API Key.");
-        } else {
-            Reply(c, 404, "Not found.");
-        }
+        // Nothing may leave the thread's function (#45): a request that fails gets no answer, and the
+        // listener carries on
+        try { Serve((std::uintptr_t)c); } catch (...) {}
         shutdown(c, SD_SEND);
         closesocket(c);
     }
@@ -111,4 +89,34 @@ void KeyLink::Loop() {
     sock_ = ~(std::uintptr_t)0;
     WSACleanup();
     running_ = false;
+}
+
+// One request from the browser
+void KeyLink::Serve(std::uintptr_t client) {
+    SOCKET c = (SOCKET)client;
+    DWORD timeout = 3000;
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    std::string req;
+    char buf[2048];
+    while (req.size() < 8192 && req.find("\r\n") == std::string::npos) {
+        int n = recv(c, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        req.append(buf, n);
+    }
+    std::string key = kwiq::QueryValue(req, "key"), code = kwiq::QueryValue(req, "code"), state = kwiq::QueryValue(req, "state");
+    bool fromCode = !code.empty() && state == state_;
+    if (fromCode && Claim) key = Claim(code);
+    bool ok = kwiq::IsApiKey(key) && state == state_;
+    if (fromCode && !ok) {
+        Reply(c, 502, "Your API key could not be collected from Core. Please try again from EuroScope, with the KWIQ button and API Key. "
+                      "Need help? Ask in our <a style=\"color:#f87171\" href=\"https://discord.kuwait-iraqvacc.net\">Discord server</a>.");
+    } else if (ok) {
+        Reply(c, 200, "Your API key has been received. You can close this window and return to EuroScope.");
+        { std::lock_guard<std::mutex> g(mu_); received_ = key; }
+        stop_ = true;
+    } else if (req.compare(0, 6, "GET /?") == 0) {
+        Reply(c, 400, "This link is not valid. Please start again from the KWIQ button in EuroScope, and choose API Key.");
+    } else {
+        Reply(c, 404, "Not found.");
+    }
 }
