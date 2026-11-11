@@ -4,6 +4,7 @@
 //   * Event routes (OK / CHK) + "Open event routes window"
 //   * Event Flag (EV) / Event Slot from VATCAN bookings (see VatsimAPI.cpp)
 //   * FPC against the SRD, "Explain FPC result", "Open SRD search window"
+//   * RDF (Radio Direction Finder, GPL-3.0, Kingfu Chan) and its TrackAudio bridge are built in (rdf.cpp)
 //
 // All route data comes from Core (Laravel). License: GPL-3.0-or-later, see LICENSE and NOTICE.md.
 
@@ -21,6 +22,7 @@
 #include "kwiq_logic.hpp"
 #include "VatsimAPI.h"
 #include "keylink.hpp"
+#include "rdf.hpp"                // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
 #define KWIQ_NO_WINHTTP
 #include "kwiq_win.hpp"           // api-settings.json and the folders the loader uses
 
@@ -38,6 +40,7 @@ static const char* CORE_EVENT_URL       = CORE_BASE "/event";
 static const char* CORE_SRD_URL         = CORE_BASE "/srd";
 static const char* CORE_SRD_VERSION_URL = CORE_BASE "/srd/version";
 static const char* CORE_SECTORS_URL     = CORE_BASE "/sectors";
+static const char* CORE_RDF_URL         = CORE_BASE "/rdf";
 // myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
 static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
 // EuroScope setup guide, opened from the incorrect EuroScope version popup until Core sends euroscope.setup_url
@@ -51,6 +54,7 @@ enum {
     KWIQ_ITEM_EVENT_SLOT  = 1003,
     KWIQ_ITEM_FPC         = 1004,
     KWIQ_ITEM_SECTOR      = 1005,   // sector indicator of the position that tracks the aircraft
+    KWIQ_ITEM_RDF         = 1006,   // RDF state: "!" while the aircraft transmits
     KWIQ_FUNC_EVENT_ROUTES = 2001,   // "Open event routes window"
     KWIQ_FUNC_FPC_EXPLAIN  = 2002,   // "Explain FPC result"
     KWIQ_FUNC_SRD_SEARCH   = 2003,   // "Open SRD search window"
@@ -58,6 +62,7 @@ enum {
     KWIQ_OBJ_BUTTON        = 2100,
     KWIQ_MENU_KEY          = 2101,
     KWIQ_MENU_SECTORS      = 2102,
+    KWIQ_MENU_RDF          = 2103,   // RDF drawing on or off
     KWIQ_MENU_AUTOREFRESH  = 2104,
     KWIQ_MENU_EVENT_ROUTES = 2105,
     KWIQ_MENU_SRD          = 2106,
@@ -65,7 +70,9 @@ enum {
     KWIQ_MENU_UPDATE       = 2108,
     KWIQ_MENU_REFRESH      = 2109,
     KWIQ_MENU_STATUS       = 2110,
-    KWIQ_MENU_HIDE         = 2111
+    KWIQ_MENU_HIDE         = 2111,
+    KWIQ_MENU_BRIDGE       = 2112,   // TrackAudio's connection (a status row: a click resyncs or reconnects)
+    KWIQ_MENU_LAST         = 2112
 };
 
 // ---------------------------------------------------------------------------
@@ -602,6 +609,7 @@ public:
         RegisterTagItemType("Event Slot",  KWIQ_ITEM_EVENT_SLOT);
         RegisterTagItemType("FPC",         KWIQ_ITEM_FPC);
         RegisterTagItemType("Sector Indicator", KWIQ_ITEM_SECTOR);
+        RegisterTagItemType("RDF state",   KWIQ_ITEM_RDF);
         RegisterTagItemFunction("Open event routes window", KWIQ_FUNC_EVENT_ROUTES);
         RegisterTagItemFunction("Explain FPC result",       KWIQ_FUNC_FPC_EXPLAIN);
         RegisterTagItemFunction("Open SRD search window",   KWIQ_FUNC_SRD_SEARCH);
@@ -625,6 +633,8 @@ public:
         }
         Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded", false);
         if (reduced_) { Msg(kReducedReminder, true); return; }
+        std::string why;
+        if (!rdf_.Start(why)) Msg(why, true);
         // EuroScope should load KWIQPlugin.dll, which updates and then loads this file; loaded directly,
         // nothing updates it
         if (!GetModuleHandleA("KWIQPlugin.dll"))
@@ -636,6 +646,7 @@ public:
         kwiq_ui::gOnNotice = nullptr;
         kwiq_ui::Shutdown();
         keyLink_.Stop();
+        rdf_.Stop();                                         // TrackAudio's thread uses curl and this plugin (#47)
         if (soundLooping_) PlaySoundA(nullptr, nullptr, 0);
         quit_ = true;                                        // aborts a running update download
         if (worker_.joinable()) worker_.join();
@@ -662,11 +673,18 @@ public:
             const char* bp = GetDataFromSettings("kwiq_button_at");
             int bx, by;
             if (bp && sscanf_s(bp, "%d,%d", &bx, &by) == 2 && bx >= 0 && by >= 0) { buttonX_ = bx; buttonY_ = by; }
+            const char* rd = GetDataFromSettings("kwiq_rdf_draw");      // the controller's own RDF switch
+            if (rd && (*rd == '0' || *rd == '1')) rdf_.SetLocalDraw(*rd - '0');
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
         TickConnection(now);
         TickKeySetup(now);
         TickEuroScopeVersion(now);
+        {
+            EuroScopePlugIn::CController me = ControllerMyself();
+            std::string cs = connected_ && me.IsValid() && me.GetCallsign() ? me.GetCallsign() : "";
+            rdf_.Tick(now, cs, connected_, [this](const std::string& m, bool err) { Msg(m, err); });
+        }
         CDataHandler::refreshInterval = slotsEvery_;
         std::string code;
         { std::lock_guard<std::mutex> g(mu_); code = ev_.active ? ev_.vatcanCode : ""; }
@@ -711,7 +729,7 @@ public:
 
     virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override try {
         if (reduced_) return;
-        if (FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_HIDE) { MenuAction(FunctionId, sItemString, Pt, Area); return; }
+        if (FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_LAST) { MenuAction(FunctionId, sItemString, Pt, Area); return; }
         switch (FunctionId) {
         case KWIQ_FUNC_EVENT_ROUTES: OpenRoutesWindow(Pt); return;
         case KWIQ_FUNC_FPC_EXPLAIN:  ExplainSelected(); return;
@@ -725,7 +743,7 @@ public:
                               int* pColorCode, COLORREF* pRGB, double* pFontSize) override try {
         using namespace kwiq;
         if (reduced_) return;                                // no tag items at all, VCH's included
-        bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_SECTOR;
+        bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_RDF;
         if (ours && !enabled_) return;                       // plugin too old
         UiCfg ui;
         if (ours) { std::lock_guard<std::mutex> g(mu_); ui = ui_; }
@@ -762,6 +780,9 @@ public:
             } else {
                 strncpy_s(sItemString, 16, ac->slotTime.c_str(), _TRUNCATE);
             }
+        }
+        else if (ItemCode == KWIQ_ITEM_RDF) {
+            if (FlightPlan.IsValid() && rdf_.Transmitting(FlightPlan.GetCallsign())) strcpy_s(sItemString, 16, "!");
         }
         else if (ItemCode == KWIQ_ITEM_SECTOR) {
             if (!FlightPlan.IsValid()) return;
@@ -836,6 +857,15 @@ public:
             ShowButton(!buttonShown_);
             return true;
         }
+        if (c == ".RDF DRAW ON" || c == ".RDF DRAW OFF" || c == ".RDF DRAW CORE") {
+            SetRdfDraw(c == ".RDF DRAW CORE" ? -1 : c == ".RDF DRAW ON" ? 1 : 0);
+            return true;
+        }
+        if (c == ".RDF REFRESH" || c == ".RDF RELOAD") {
+            if (!rdf_.Command(c)) Msg("RDF is not running.", true);
+            else Msg(c == ".RDF RELOAD" ? "RDF: reconnecting to TrackAudio." : "RDF: channels synced again with TrackAudio.", false);
+            return true;
+        }
         if (c == ".KWIQ AUTOREFRESH") {
             autoRefresh_ = !autoRefresh_;
             Msg(std::string("Slot auto refresh: ") + (autoRefresh_ ? "on" : "off"), false);
@@ -846,6 +876,7 @@ public:
             std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED (too old)") +
                 " | EuroScope " + (esVersion_.empty() ? std::string("?") : esVersion_) +
                 " | API key " + (apiKey_.empty() ? std::string("not set") : std::string("connected")) + WineNote() +
+                " | RDF " + (rdf_.DrawOn() ? "on" : "off") + ", TrackAudio " + kwiq::TrackAudioStateText(rdf_.TrackAudio()) +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
@@ -876,6 +907,14 @@ public:
     }
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_ && !reduced_; }
     bool Duplicate() const { return duplicate_; }
+    // RDF on the radar screen (REFRESH_PHASE_AFTER_TAGS)
+    void DrawRdf(EuroScopePlugIn::CRadarScreen* screen, HDC hDC) { if (!duplicate_ && !reduced_) rdf_.Draw(screen, hDC); }
+    // The controller's own RDF switch: 1 on, 0 off, -1 as Core says. Kept in the profile.
+    void SetRdfDraw(int v) {
+        rdf_.SetLocalDraw(v);
+        SaveDataToSettings("kwiq_rdf_draw", "KWIQ RDF drawing (empty = as Core says)", v < 0 ? "" : v ? "1" : "0");
+        Msg(std::string("RDF drawing: ") + (rdf_.DrawOn() ? "on" : "off") + (v < 0 ? " (as the vACC sets it)" : ""), false);
+    }
 
     // ---- the KWIQ button and its menu (main thread) ------------------------------------------
     // A small red button at the top centre of each radar screen; it can be dragged anywhere, and
@@ -901,6 +940,15 @@ public:
         SaveDataToSettings("kwiq_button", "KWIQ button on the radar screen", shown ? "1" : "0");
         Msg(shown ? "The KWIQ button is shown." : "The KWIQ button is hidden. Type .kwiq button to show it again.", false);
     }
+    // The TrackAudio row: TrackAudio connects on its own, so this is a status, not a switch. A click syncs the
+    // channels again while connected, tries to connect now while not, and does nothing when RDF is off.
+    void TrackAudioClicked() {
+        switch (kwiq::TrackAudioClickAction(rdf_.TrackAudio())) {
+        case kwiq::TrackAudioClick::Resync:    OnCompileCommand(".rdf refresh"); return;
+        case kwiq::TrackAudioClick::Reconnect: rdf_.Reconnect(); Msg("RDF: trying to connect to TrackAudio again.", false); return;
+        default: return;
+        }
+    }
     void OpenMenu(RECT area) {
         // One column, each line padded so the values line up on the right (the list uses a fixed-width font)
         auto line = [](const char* label, const char* value) {
@@ -910,6 +958,8 @@ public:
         OpenPopupList(area, "KWIQ v" KWIQ_PLUGIN_VERSION, 1);
         AddPopupListElement(line("API Key", apiKey_.empty() ? "Not set" : "Connected").c_str(), "", KWIQ_MENU_KEY);
         AddPopupListElement(line("Sector Indicators", sectorDraw_ ? "On" : "Off").c_str(), "", KWIQ_MENU_SECTORS);
+        AddPopupListElement(line("RDF Drawing", rdf_.DrawOn() ? "On" : "Off").c_str(), "", KWIQ_MENU_RDF);
+        AddPopupListElement(line("TrackAudio", kwiq::TrackAudioStateText(rdf_.TrackAudio())).c_str(), "", KWIQ_MENU_BRIDGE);
         AddPopupListElement(line("Slot Auto Refresh", autoRefresh_ ? "On" : "Off").c_str(), "", KWIQ_MENU_AUTOREFRESH);
         AddPopupListElement("Event Routes", "", KWIQ_MENU_EVENT_ROUTES);
         AddPopupListElement("SRD Search", "", KWIQ_MENU_SRD);
@@ -930,6 +980,8 @@ public:
         switch (id) {
         case KWIQ_MENU_KEY:          StartKeySetup(); return;
         case KWIQ_MENU_SECTORS:      OnCompileCommand(".kwiq sector"); return;
+        case KWIQ_MENU_RDF:          SetRdfDraw(rdf_.DrawOn() ? 0 : 1); return;
+        case KWIQ_MENU_BRIDGE:       TrackAudioClicked(); return;
         case KWIQ_MENU_AUTOREFRESH:  OnCompileCommand(".kwiq autorefresh"); return;
         case KWIQ_MENU_EVENT_ROUTES: OpenRoutesWindow(pt); return;
         case KWIQ_MENU_SRD:          OpenSrdWindow(pt); return;
@@ -1306,6 +1358,7 @@ private:
             if (!IsWebLink(esUrl_)) esUrl_ = ES_SETUP_URL;   // only a web page is ever opened (#44)
             esConfigured_ = true;
         }
+        rdf_.SetEndpoint(c.Get("rdf.endpoint", "127.0.0.1:49080"));
         CheckSectorFile(false);
     }
 
@@ -1433,6 +1486,11 @@ private:
                     } else ClearError("SRD");
                 } else fail("SRD", err);
             }
+            if (doSrd && !reduced_) {                  // RDF settings per callsign pattern; none yet is fine
+                if (kwiq_net::HttpGet(CORE_RDF_URL, body, err)) { ClearError("RDF"); rdf_.SetRows(ParseRdf(body)); }
+                else if (err == "HTTP 404") rdf_.SetRows({});
+                else fail("RDF", err);
+            }
             if (doSrd) {                               // sector aliases: tiny, refreshed with the SRD
                 if (kwiq_net::HttpGet(CORE_SECTORS_URL, body, err)) {
                     ClearError("Sectors");
@@ -1456,6 +1514,7 @@ private:
     int buttonX_ = -1, buttonY_ = -1;                               // main thread only: from the radar's top left; -1 = top centre
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
+    KwiqRdf rdf_{ this };                                           // RDF and the TrackAudio bridge
     std::string keyPromptedFor_, keyToldFor_;                      // main thread only: the key problem last offered / told about
     bool justConnected_ = false;                                    // main thread only: logged on since the last key check
     std::string esVersion_;                                         // the running EuroScope's, read once at start
@@ -1518,6 +1577,7 @@ public:
             if (gPlugin->SctBannerShown(now)) DrawSctBanner(hDC, gPlugin->SctBannerColour(now));
             if (gPlugin->ButtonShown()) DrawButton(hDC);
         }
+        if (Phase == EuroScopePlugIn::REFRESH_PHASE_AFTER_TAGS) gPlugin->DrawRdf(this, hDC);
         if (Phase != EuroScopePlugIn::REFRESH_PHASE_AFTER_TAGS || !gPlugin->SectorDrawEnabled()) return;
         RECT area = GetRadarArea();
         int saved = SaveDC(hDC);
@@ -1554,7 +1614,7 @@ public:
     } catch (...) {}
     // the menu and the key box opened from the button report back here
     virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override try {
-        if (gPlugin && FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_HIDE) gPlugin->MenuAction(FunctionId, sItemString, Pt, Area);
+        if (gPlugin && FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_LAST) gPlugin->MenuAction(FunctionId, sItemString, Pt, Area);
     } catch (...) {}
 
 private:

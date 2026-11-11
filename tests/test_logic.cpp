@@ -227,6 +227,48 @@ int main() {
     CHECK(DecideStart(false, true, true, false) == StartMode::Full);       // Core unreachable: the switch is unknown
     CHECK(DecideStart(false, false, false, false) == StartMode::DontLoad);
 
+    // RDF settings from Core, by callsign pattern
+    CHECK(WildcardMatch("ORBB_*_CTR", "orbb_s_ctr") && WildcardMatch("*", "") && WildcardMatch("OK??_TWR", "OKBK_TWR"));
+    CHECK(!WildcardMatch("ORBB_*_CTR", "ORBB_S_APP") && !WildcardMatch("OK??_TWR", "OKBK_A_TWR") && WildcardMatch("*CTR", "ORBB_CTR"));
+    auto rdf = ParseRdf("RDF|ORBB_*_CTR|draw=1|colour=#00FF00|radius=30|require_tx=on\nRDF|*|bridge=0|radius=-5\nJUNK\nRDF||draw=1\n");
+    CHECK(rdf.size() == 2);
+    RdfSettings c = RdfFor(rdf, "ORBB_S_CTR");
+    CHECK(c.draw && c.bridge && c.requireTx && c.radius == 30 && c.colour == 0x00FF00 && c.colourConcurrent == 0x0000FF);
+    RdfSettings o = RdfFor(rdf, "OKBK_TWR");
+    CHECK(!o.draw && !o.bridge && o.radius == 20);                      // a bad radius keeps the default
+    RdfSettings none = RdfFor({}, "OKBK_TWR");
+    CHECK(!none.draw && none.bridge && none.threshold == -1);
+
+    // TrackAudio 1.3.0 Beta 5 or later
+    CHECK(TrackAudioVersionOk("TrackAudio v1.3.0-beta.5") && TrackAudioVersionOk("1.3.0") && TrackAudioVersionOk("v1.4.0-beta.1"));
+    CHECK(TrackAudioVersionOk("1.3.0-rc.1") && !TrackAudioVersionOk("1.3.0-beta.4") && !TrackAudioVersionOk("1.2.9") && !TrackAudioVersionOk("TrackAudio"));
+    // RDF edge cases (#52)
+    CHECK(ParseRdf("").empty() && ParseRdf("RDF\r\nRDF| \r\n").empty());
+    auto rcr = ParseRdf("RDF|okbk_twr|draw=1|radius=x|threshold=-5|colour=#00ff00|nokey\r\n");
+    CHECK(rcr.size() == 1 && rcr[0].pattern == "OKBK_TWR" && rcr[0].s.draw && rcr[0].s.radius == 20 && rcr[0].s.threshold == -5 && rcr[0].s.colour == 0x00FF00);
+    CHECK(WildcardMatch("", "") && !WildcardMatch("", "A") && WildcardMatch("**", "abc") && WildcardMatch("a*c", "abbbc") && !WildcardMatch("a*c", "abcd"));
+    CHECK(!ParseSemVer("").valid && !ParseSemVer("1.2").valid && ParseSemVer("v1.3.0-beta.5").pre == 1 && ParseSemVer("v1.3.0-beta.5").preNum == 5);
+
+    // the KWIQ menu's TrackAudio row
+    CHECK(TrackAudioStatus(false, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Off);       // RDF didn't start
+    CHECK(TrackAudioStatus(true, false, true, "TrackAudio v1.3.0", true) == TrackAudioState::Off);        // Core: bridge and drawing off
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Connected);
+    CHECK(TrackAudioStatus(true, true, true, "", false) == TrackAudioState::Connected);                    // no version (yet)
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio", false) == TrackAudioState::Connected);          // unreadable version
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.3.0-beta.4", false) == TrackAudioState::TooOld);
+    CHECK(TrackAudioStatus(true, true, false, "TrackAudio v1.3.0-beta.4", false) == TrackAudioState::NotRunning);
+    CHECK(TrackAudioStatus(true, true, false, "", true) == TrackAudioState::AfvClient);
+    CHECK(std::string(TrackAudioStateText(TrackAudioState::Connected)) == "Connected" &&
+          std::string(TrackAudioStateText(TrackAudioState::TooOld)) == "Version too old" &&
+          std::string(TrackAudioStateText(TrackAudioState::AfvClient)) == "AFV client" &&
+          std::string(TrackAudioStateText(TrackAudioState::NotRunning)) == "Not running" &&
+          std::string(TrackAudioStateText(TrackAudioState::Off)) == "Off");
+    CHECK(TrackAudioClickAction(TrackAudioState::Connected) == TrackAudioClick::Resync &&
+          TrackAudioClickAction(TrackAudioState::TooOld) == TrackAudioClick::Resync &&
+          TrackAudioClickAction(TrackAudioState::NotRunning) == TrackAudioClick::Reconnect &&
+          TrackAudioClickAction(TrackAudioState::AfvClient) == TrackAudioClick::Reconnect &&
+          TrackAudioClickAction(TrackAudioState::Off) == TrackAudioClick::None);
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <tuple>
 
 namespace kwiq {
 
@@ -604,6 +605,129 @@ inline std::string QueryValue(const std::string& request, const std::string& nam
         return v;
     }
     return "";
+}
+
+// ---- RDF and the TrackAudio bridge (built in from KingfuChan/RDF) --------------------------------
+// Core /api/plugin/rdf (plain text), one line per callsign pattern, in Core's order (the first match wins):
+//   RDF|<pattern>|draw=1|bridge=1|colour=#FFFFFF|colour_concurrent=#FF0000|radius=20|threshold=-1|precision=0|
+//       low_altitude=0|high_altitude=0|low_precision=0|high_precision=0|controllers=0|require_tx=0
+// The pattern is a logon callsign with * (any characters) and ? (one character), e.g. ORBB_*_CTR or *.
+// A key left out takes RDF's default. With no matching line: no drawing, bridge on.
+struct RdfSettings {
+    bool draw = false, bridge = true, controllers = false, requireTx = false;
+    unsigned long colour = 0xFFFFFF, colourConcurrent = 0x0000FF;   // COLORREF (0x00BBGGRR): white, red
+    int radius = 20, threshold = -1, precision = 0, lowAltitude = 0, highAltitude = 0, lowPrecision = 0, highPrecision = 0;
+};
+struct RdfRow { std::string pattern; RdfSettings s; };
+
+inline bool WildcardMatch(const std::string& pattern, const std::string& text) {
+    size_t p = 0, t = 0, star = std::string::npos, mark = 0;
+    while (t < text.size()) {
+        if (p < pattern.size() && (pattern[p] == '?' || std::toupper((unsigned char)pattern[p]) == std::toupper((unsigned char)text[t]))) { p++; t++; }
+        else if (p < pattern.size() && pattern[p] == '*') { star = p++; mark = t; }
+        else if (star != std::string::npos) { p = star + 1; t = ++mark; }
+        else return false;
+    }
+    while (p < pattern.size() && pattern[p] == '*') p++;
+    return p == pattern.size();
+}
+
+inline std::vector<RdfRow> ParseRdf(const std::string& body) {
+    std::vector<RdfRow> rows;
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(Trim(line), '|');
+        if (f.size() < 2 || f[0] != "RDF" || Trim(f[1]).empty()) continue;
+        RdfRow r;
+        r.pattern = Upper(Trim(f[1]));
+        for (size_t i = 2; i < f.size(); i++) {
+            size_t eq = f[i].find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = Lower(Trim(f[i].substr(0, eq))), v = Trim(f[i].substr(eq + 1));
+            auto num = [&](int& out, int lo) { try { int n = std::stoi(v); if (n >= lo) out = n; } catch (...) {} };
+            auto flag = [&](bool& out) { if (v == "1" || Upper(v) == "ON") out = true; else if (v == "0" || Upper(v) == "OFF") out = false; };
+            if (k == "draw") flag(r.s.draw);
+            else if (k == "bridge") flag(r.s.bridge);
+            else if (k == "controllers") flag(r.s.controllers);
+            else if (k == "require_tx") flag(r.s.requireTx);
+            else if (k == "colour") r.s.colour = ParseColour(v, r.s.colour);
+            else if (k == "colour_concurrent") r.s.colourConcurrent = ParseColour(v, r.s.colourConcurrent);
+            else if (k == "radius") num(r.s.radius, 1);
+            else if (k == "threshold") num(r.s.threshold, -1000000);
+            else if (k == "precision") num(r.s.precision, 0);
+            else if (k == "low_altitude") num(r.s.lowAltitude, -100000);
+            else if (k == "high_altitude") num(r.s.highAltitude, 1);
+            else if (k == "low_precision") num(r.s.lowPrecision, 0);
+            else if (k == "high_precision") num(r.s.highPrecision, 0);
+        }
+        rows.push_back(r);
+    }
+    return rows;
+}
+inline RdfSettings RdfFor(const std::vector<RdfRow>& rows, const std::string& callsign) {
+    for (const auto& r : rows) if (WildcardMatch(r.pattern, Upper(callsign))) return r.s;
+    return RdfSettings();
+}
+
+// TrackAudio's version, from the text its HTTP endpoint answers with (e.g. "TrackAudio v1.3.0-beta.5").
+// RDF needs 1.3.0 Beta 5 or later. Prerelease order: alpha < beta < rc < the release. False if unreadable.
+struct SemVer { int major = 0, minor = 0, patch = 0, pre = 3, preNum = 0; bool valid = false; };
+inline SemVer ParseSemVer(const std::string& text) {
+    SemVer v;
+    for (size_t i = 0; i < text.size(); i++) {
+        if (!std::isdigit((unsigned char)text[i]) || (i && std::isdigit((unsigned char)text[i - 1]))) continue;
+        int a, b, c, n = 0;
+        if (std::sscanf(text.c_str() + i, "%d.%d.%d%n", &a, &b, &c, &n) != 3) continue;
+        v.major = a; v.minor = b; v.patch = c; v.valid = true;
+        std::string rest = Lower(text.substr(i + n));
+        if (!rest.empty() && rest[0] == '-') {
+            v.pre = rest.compare(1, 5, "alpha") == 0 ? 0 : rest.compare(1, 4, "beta") == 0 ? 1 : rest.compare(1, 2, "rc") == 0 ? 2 : 0;
+            size_t d = rest.find_first_of("0123456789");
+            v.preNum = d == std::string::npos ? 0 : std::atoi(rest.c_str() + d);
+        }
+        return v;
+    }
+    return v;
+}
+inline bool TrackAudioVersionOk(const std::string& text) {
+    SemVer v = ParseSemVer(text);
+    if (!v.valid) return false;
+    auto key = [](const SemVer& s) { return std::make_tuple(s.major, s.minor, s.patch, s.pre, s.preNum); };
+    SemVer min; min.major = 1; min.minor = 3; min.patch = 0; min.pre = 1; min.preNum = 5;
+    return key(v) >= key(min);
+}
+
+// The KWIQ menu's TrackAudio row: the state of the connection to TrackAudio, which the plugin makes on its own.
+//   running:   RDF started (not when another RDF or afv-euroscope-bridge is loaded)
+//   inUse:     Core's settings (or the controller's RDF Drawing) use TrackAudio: the bridge or drawing is on
+//   wsOpen:    TrackAudio's WebSocket is open
+//   version:   what TrackAudio said its version is (empty if it didn't); an unreadable one isn't "too old"
+//   afvRecent: the AFV standalone client was heard from in the last 10 minutes
+enum class TrackAudioState { Off, Connected, TooOld, AfvClient, NotRunning };
+inline TrackAudioState TrackAudioStatus(bool running, bool inUse, bool wsOpen, const std::string& version, bool afvRecent) {
+    if (!running || !inUse) return TrackAudioState::Off;
+    if (wsOpen) return ParseSemVer(version).valid && !TrackAudioVersionOk(version) ? TrackAudioState::TooOld : TrackAudioState::Connected;
+    return afvRecent ? TrackAudioState::AfvClient : TrackAudioState::NotRunning;
+}
+inline const char* TrackAudioStateText(TrackAudioState s) {
+    switch (s) {
+    case TrackAudioState::Connected:  return "Connected";
+    case TrackAudioState::TooOld:     return "Version too old";
+    case TrackAudioState::AfvClient:  return "AFV client";
+    case TrackAudioState::NotRunning: return "Not running";
+    default:                          return "Off";
+    }
+}
+// What a click on the row does: with TrackAudio connected, sync the channels again (.rdf refresh); without it,
+// try to connect now (leaving EuroScope's channels as they are); when off, nothing
+enum class TrackAudioClick { None, Resync, Reconnect };
+inline TrackAudioClick TrackAudioClickAction(TrackAudioState s) {
+    switch (s) {
+    case TrackAudioState::Connected:
+    case TrackAudioState::TooOld:     return TrackAudioClick::Resync;
+    case TrackAudioState::AfvClient:
+    case TrackAudioState::NotRunning: return TrackAudioClick::Reconnect;
+    default:                          return TrackAudioClick::None;
+    }
 }
 
 } // namespace kwiq
