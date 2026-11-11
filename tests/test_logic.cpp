@@ -123,6 +123,63 @@ int main() {
           ParseLevelFt("35000") == 35000 && ParseLevelFt("") == 0 && ParseLevelFt("abc") == 0);
     CHECK(FlStr(35000) == "FL350" && FlStr(5000) == "FL050");
 
+    // FIR exit points (UK Controller Plugin): the first listed point the route leaves the airspace at
+    FirExits exits = ParseFirExits("EXIT|tasmi|090|180|0\r\nEXIT|ROTAP|300|060|0\nEXIT|SIDAD|315|045|1\n"
+                                   "EXIT|BAD|400|10|0\nEXIT|ALSO|x|10|0\nnonsense\n");
+    CHECK(exits.size() == 3 && exits["TASMI"].size() == 1 && exits["TASMI"][0].from == 90 && exits["SIDAD"][0].internal &&
+          !exits["ROTAP"][0].internal);
+    CHECK(InExitCone(exits["TASMI"][0], 135) && !InExitCone(exits["TASMI"][0], 200));
+    CHECK(InExitCone(exits["ROTAP"][0], 350) && InExitCone(exits["ROTAP"][0], 30) && !InExitCone(exits["ROTAP"][0], 120));   // wraps north
+    std::vector<RoutePoint> north = { { "OKBK", 0 }, { "SIDAD", 10 }, { "ABC", 5 }, { "ROTAP", 355 }, { "LTBA", -1 } };
+    AircraftExit nx = FindFirExit(exits, north);
+    CHECK(nx.internal == "SIDAD" && nx.external == "ROTAP");
+    std::vector<RoutePoint> inbound = { { "ROTAP", 170 }, { "OKBK", -1 } };   // through ROTAP the wrong way
+    CHECK(FindFirExit(exits, inbound).external.empty());
+    std::vector<RoutePoint> last = { { "OKBK", 90 }, { "TASMI", -1 } };       // no next point: no track, no exit
+    CHECK(FindFirExit(exits, last).external.empty());
+
+    // several cones per point: one per direction, each with its own internal flag
+    FirExits two = ParseFirExits("EXIT|BOUND|000|090|0\nEXIT|BOUND|180|270|1\n"     // NE out of the vACC, SW into ORBB
+                                 "EXIT|NORTH|330|030|0\nEXIT|NORTH|150|210|0\n"     // both ways, one cone wrapping north
+                                 "EXIT|DUP|090|180|0\nEXIT|DUP|090|180|0\nEXIT|dup|090|180|0\n"   // the same cone three times
+                                 "EXIT|DUP|090|180|1\n");                         // same headings, other flag: another cone
+    CHECK(two.size() == 3 && two["BOUND"].size() == 2 && two["NORTH"].size() == 2 && two["DUP"].size() == 2);
+    // two cones on one point: both directions match, a third doesn't
+    std::vector<RoutePoint> ne = { { "BOUND", 45 }, { "X", -1 } }, sw = { { "BOUND", 225 }, { "X", -1 } }, se = { { "BOUND", 135 }, { "X", -1 } };
+    CHECK(FindFirExit(two, ne).external == "BOUND" && FindFirExit(two, ne).internal.empty());   // the external cone
+    CHECK(FindFirExit(two, sw).internal == "BOUND" && FindFirExit(two, sw).external.empty());   // the internal cone
+    CHECK(FindFirExit(two, se).internal.empty() && FindFirExit(two, se).external.empty());
+    // a cone that wraps through north, next to an ordinary one on the same point
+    std::vector<RoutePoint> n350 = { { "NORTH", 350 }, { "X", -1 } }, n10 = { { "NORTH", 10 }, { "X", -1 } },
+                            s180 = { { "NORTH", 180 }, { "X", -1 } }, e90 = { { "NORTH", 90 }, { "X", -1 } };
+    CHECK(FindFirExit(two, n350).external == "NORTH" && FindFirExit(two, n10).external == "NORTH" &&
+          FindFirExit(two, s180).external == "NORTH" && FindFirExit(two, e90).external.empty());
+    // the same point internal in one cone and external in another: a later external exit still counts
+    std::vector<RoutePoint> via = { { "BOUND", 200 }, { "NORTH", 0 }, { "X", -1 } };
+    AircraftExit vx = FindFirExit(two, via);
+    CHECK(vx.internal == "BOUND" && vx.external == "NORTH");
+    // overlapping cones on one point (DUP, external and internal at the same headings): external wins
+    std::vector<RoutePoint> dup = { { "DUP", 135 }, { "X", -1 } };
+    CHECK(FindFirExit(two, dup).external == "DUP" && FindFirExit(two, dup).internal.empty());
+    CHECK(ExitConeFor(two["BOUND"], 135) == nullptr && ExitConeFor(two["BOUND"], 0) != nullptr && !ExitConeFor(two["BOUND"], 0)->internal);
+    CHECK(Domestic("OKBK", "OK,OR") && Domestic("orbi", "OK, OR") && !Domestic("LTBA", "OK,OR"));
+    CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
+    CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "SIDAD", "" }) == "SIDAD" && SrdEnd("LTBA", "OK,OR", {}) == "");
+
+    // FPC for a flight leaving the airspace: checked against ADEP to its FIR exit
+    SrdData srdx = ParseSrd("SRD|OKBK|ROTAP|20000|41000|DCT ABC UL602 ROTAP|\n"
+                            "SRD|OKBK|SIDAD||25000|DCT SIDAD|\n"
+                            "SRD|OKBK|ORBI|||DCT QQQ|\n");
+    CHECK(srdx.toPoint.size() == 2 && srdx.pair.size() == 1);
+    auto toLtba = F("DCT SIDAD ABC UL602 ROTAP DCT LTBA");
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", toLtba, 35000, nx) == FpcResult::Ok);
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", toLtba, 45000, nx) == FpcResult::Max);
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", F("DCT SIDAD XYZ ROTAP"), 35000, nx) == FpcResult::Route);
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", F("DCT SIDAD"), 20000, AircraftExit{ "SIDAD", "" }) == FpcResult::Ok);   // only the internal exit known
+    CHECK(CheckFpc(srdx, "OKBK", "ORBI", F("QQQ"), 30000, nx) == FpcResult::Ok);                  // a pair row still wins
+    CHECK(ExplainFpc(srdx, "OKBK", "LTBA", "DCT SIDAD ABC UL602 ROTAP", 35000, nx).find("FIR exit ROTAP") != std::string::npos);
+    CHECK(ExplainFpc(srdx, "OKBK", "LTBA", "DCT SIDAD XYZ ROTAP", 35000, nx).find("does not match") != std::string::npos);
+
     // SRD search
     CHECK(SrdSearch(srd, "okbk", "orbi", 0).size() == 2);
     CHECK(SrdSearch(srd, "OKBK", "ORBI", 35000).size() == 1);   // only the 45000-max row
@@ -130,6 +187,13 @@ int main() {
     CHECK(SrdSearch(srd, "", "", 0).size() == 3);
     CHECK(SrdSearch(srd, "ABC", "XYZ", 0).size() == 1);
     CHECK(SrdSearch(srd, "NOPE", "", 0).empty());
+    // SRD search window columns and notes
+    CHECK(SrdMinText(srd.rows[0]) == "100" && SrdMaxText(srd.rows[0]) == "300");
+    CHECK(SrdMinText(srd.rows[1]) == "MC" && SrdMaxText(srd.rows[2]) == "-");
+    CHECK(SrdNotesText(srd.rows[0]) == "Jets only" && SrdNotesText(srd.rows[1]) == "No notes.");
+    SrdRoute fra; fra.rte = "ABC <FRA> XYZ";
+    CHECK(HasFreeRoute(fra.rte) && !HasFreeRoute(srd.rows[0].rte));
+    CHECK(SrdNotesText(fra).find("Free Route Airspace") != std::string::npos);
 
     // sector indicators, only for the ESE position IDs Core lists, shown as their alias
     SectorMap sm = ParseSectors("SECTOR|bs|sr\nSECTOR|BN|NR\nSECTOR|BGA|BGD\nSECTOR|BX|\nSECTOR|BL|ABCDE\nbad\n");
