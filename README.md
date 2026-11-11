@@ -8,6 +8,9 @@ Kuwait & Iraq vACC EuroScope plugin: VCH, event routes and slots, FPC and SRD se
 3. **Actions > build** runs the logic tests, then builds three 32-bit DLLs on a Windows runner (about 5-10 minutes the first time, faster once vcpkg is cached): `KWIQPlugin.dll` (the loader), `KWIQPluginUpdater.dll` and `KWIQPluginCore.dll` (the plugin). KWIQ's own files are built at /W4, and the build fails if they have any compiler warning (the **Compiler warnings** step lists them); each KWIQ header is also compiled on its own.
 4. Download them from the run's **KWIQPlugin** artifact. Every build on `main` is also published as a release with all three, versioned `KWIQ_PLUGIN_VERSION_BASE` plus the run number (e.g. `v0.6.0.42`), which Core then offers to controllers. Each pull request gets a test pre-release (`pr-<number>`), replaced on every push and removed when the pull request is closed; running the workflow by hand on another branch makes one named after the branch. Core never offers pre-releases. Change `KWIQ_PLUGIN_VERSION_BASE` in `version.h` for a new minor or major version.
 
+## Changelog
+Every release from `main` rebuilds https://docs.kuwait-iraqvacc.net/Controller%20Guidance/KWIQ%20Controller%20Plugin/Changelog/ from the release notes (the PR titles, so write them for controllers) and commits it to kwiq-documentation-site (the `changelog` job, which needs the `DOCS_REPO_TOKEN` secret: Contents read and write on that repository only). Pre-releases are never listed.
+
 ## Load it in EuroScope
 Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from myKWIQ). That is the only file to load: as in the UK Controller Plugin, it installs `KWIQPluginUpdater.dll` and `KWIQPluginCore.dll` in `%LOCALAPPDATA%\KWIQ\bin` and loads the plugin from there. VCH is built in: do not load VCH separately.
 

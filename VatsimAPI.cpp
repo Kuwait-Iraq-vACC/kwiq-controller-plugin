@@ -1,5 +1,6 @@
 // VatsimAPI.cpp - see VatsimAPI.h and NOTICE.md for provenance.
 #include "VatsimAPI.h"
+#include "version.h"
 
 #include <ctime>
 #include <exception>
@@ -28,12 +29,14 @@ static size_t write_data(void* buffer, size_t size, size_t nmemb, void* userp) {
     return size * nmemb;
 }
 
+static void follow_redirects(CURL* h, const string& url);
+
 static void setup_curl_modern(CURL* h, const char* url, string* response) {
     curl_easy_setopt(h, CURLOPT_URL, url);
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_data);
     curl_easy_setopt(h, CURLOPT_WRITEDATA, response);
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(h, CURLOPT_USERAGENT, "KWIQPlugin/0.3");
+    follow_redirects(h, url);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "KWIQPlugin/" KWIQ_PLUGIN_VERSION);
 
     // Native Windows trust store, no certificate file needed
     curl_easy_setopt(h, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA | CURLSSLOPT_NO_REVOKE);
@@ -51,6 +54,15 @@ static void setup_curl_modern(CURL* h, const char* url, string* response) {
 // The personal API key and plugin version, sent to Core only (never to VATSIM or VATCAN)
 static std::mutex authMutex;
 static string authPrefix, authKey, authVersion;
+
+// curl sends headers set with CURLOPT_HTTPHEADER to every host a redirect leads to, so a Core request, which
+// carries X-KWIQ-Key, never follows one: Core answers itself. Other requests follow redirects, but only to https.
+static void follow_redirects(CURL* h, const string& url) {
+    bool core;
+    { std::lock_guard<std::mutex> g(authMutex); core = !authPrefix.empty() && url.compare(0, authPrefix.size(), authPrefix) == 0; }
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, core ? 0L : 1L);
+    curl_easy_setopt(h, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+}
 
 static curl_slist* core_headers(const string& url) {
     std::lock_guard<std::mutex> g(authMutex);
@@ -117,8 +129,8 @@ bool HttpGetBinary(const string& url, string& body, string& err, size_t maxBytes
     curl_easy_setopt(h, CURLOPT_URL, url.c_str());
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_capped);
     curl_easy_setopt(h, CURLOPT_WRITEDATA, &sink);
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(h, CURLOPT_USERAGENT, "KWIQPlugin/0.5");
+    follow_redirects(h, url);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "KWIQPlugin/" KWIQ_PLUGIN_VERSION);
     curl_easy_setopt(h, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA | CURLSSLOPT_NO_REVOKE);
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
