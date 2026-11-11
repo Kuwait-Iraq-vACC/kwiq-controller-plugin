@@ -1629,7 +1629,7 @@ private:
     }
     std::shared_ptr<const kwiq::squawk::TopDown> TopDownNow() {
         std::lock_guard<std::mutex> g(mu_);
-        return topDown_;
+        return sqTopDown_;
     }
     // Core's non-discrete code for the flight rules (squawk.non_discrete, squawk.non_discrete_vfr)
     std::string NonDiscreteCode(bool vfr) {
@@ -2241,7 +2241,7 @@ private:
                     ClearError("Top-down");
                     auto td = std::make_shared<const squawk::TopDown>(squawk::ParseTopDown(body));
                     std::lock_guard<std::mutex> g(mu_);
-                    topDown_ = std::move(td);
+                    sqTopDown_ = std::move(td);
                 } else fail("Top-down", err);
             }
             if (doSrd) {                               // FIR exit points, refreshed with the SRD
@@ -2325,7 +2325,7 @@ private:
     std::string esAccepted_, esUrl_ = ES_SETUP_URL;                 // Core's euroscope.versions and euroscope.setup_url
     bool esConfigured_ = false;                                     // Core's config has arrived at least once
     std::map<std::string, std::string> lastErr_;
-    std::shared_ptr<const kwiq::squawk::TopDown> topDown_ = std::make_shared<const kwiq::squawk::TopDown>();
+    std::shared_ptr<const kwiq::squawk::TopDown> sqTopDown_ = std::make_shared<const kwiq::squawk::TopDown>();   // squawks' copy (#42: one parser for both)
     std::string sqNonDiscrete_ = "2000", sqNonDiscreteVfr_ = "7000";   // Core's squawk.non_discrete and squawk.non_discrete_vfr
     std::shared_ptr<const kwiq::squawk::CodeList> sqCodes_;         // Core's /squawk/non-assignable; null = no list, squawks off
 
