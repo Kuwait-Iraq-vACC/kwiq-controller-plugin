@@ -1,15 +1,20 @@
 name: build
 
-# main:          every build is published as a release (v0.6.0.<run>), which Core offers to controllers.
-#                A release carries the three DLLs: KWIQPlugin.dll (the loader the packages ship),
-#                KWIQPluginUpdater.dll and KWIQPluginCore.dll (which Core mirrors for the updater)
-# pull requests: each one gets a test pre-release (pr-<number>), replaced on every push and removed when
-#                the pull request is closed. Each one is linked in a comment on the pull request.
-#                Core never offers pre-releases.
-# manual run on another branch: a test pre-release named after the branch.
-# A push or pull request is only released when it changes what goes into the DLL (sources, CMakeLists.txt,
-# vcpkg.json, libs/). Anything else (tests, docs, workflows) is still tested and built, but not released.
-# A manual run always releases.
+# Versions are Semantic Versioning (https://semver.org/). The version is KWIQ_VERSION in version.h,
+# changed by hand in the pull request that should make a release. Every build also carries build metadata,
+# <run>.<commit> (0.6.0+115.a1b2c3d), shown in .kwiq status and the log but never compared.
+# main:          tested and built on every push. The version is published as a release, tagged v<version>,
+#                only if that tag doesn't exist yet: a release happens once per version, when version.h
+#                changes it. Core offers releases to controllers. A release carries the three DLLs:
+#                KWIQPlugin.dll (the loader the packages ship), KWIQPluginUpdater.dll and
+#                KWIQPluginCore.dll (which Core mirrors for the updater).
+# pull requests: each one gets a test pre-release tagged pr-<number>, version <version>-pr.<number>.<run>,
+#                replaced on every push and removed when the pull request is closed. Each one is linked in
+#                a comment on the pull request. Core never offers pre-releases.
+# manual run on another branch: a test pre-release named after the branch, version <version>-dev.<run>.
+# A push or pull request is only released when it changes what goes into the DLL (sources, resources,
+# CMakeLists.txt, vcpkg.json, libs/). Anything else (tests, docs, workflows) is still tested and built,
+# but not released. A manual run always releases (on main, still only a version not yet released).
 on:
   push:
     branches: [main]
@@ -47,7 +52,7 @@ jobs:
             echo "Could not compare with $BASE, releasing anyway"; echo "release=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "$changed"
-          if echo "$changed" | grep -qE '^(libs/.*|[^/]+\.(cpp|c|h|hpp)|CMakeLists\.txt|vcpkg\.json)$'; then
+          if echo "$changed" | grep -qE '^(libs/.*|[^/]+\.(cpp|c|h|hpp|rc|bmp)|CMakeLists\.txt|vcpkg\.json)$'; then
             echo "release=true" >> "$GITHUB_OUTPUT"
           else
             echo "No changes to the DLL's inputs, so no release"; echo "release=false" >> "$GITHUB_OUTPUT"
@@ -73,14 +78,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # version.h's KWIQ_VERSION, which must be SemVer. Its build metadata, if any, is replaced by
+      # <run>.<commit>. A pull request builds <version>-pr.<number>.<run>, another branch <version>-dev.<run>
+      # (appended to an existing pre-release: 0.7.0-rc.1.pr.66.115), so a test build is always lower than the
+      # release it leads to.
       - name: Version
         id: version
         shell: bash
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN: ${{ github.run_number }}
         run: |
-          base=$(sed -n 's/^#define KWIQ_PLUGIN_VERSION_BASE "\(.*\)"/\1/p' version.h)
-          [ -n "$base" ] || { echo "KWIQ_PLUGIN_VERSION_BASE not found"; exit 1; }
-          echo "version=$base.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
-          echo "Building $base.${{ github.run_number }}"
+          v=$(sed -n 's/^#define KWIQ_VERSION "\(.*\)"/\1/p' version.h)
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          [[ "$v" =~ $semver ]] || { echo "::error::KWIQ_VERSION in version.h is not a SemVer version: '$v'"; exit 1; }
+          v=${v%%+*}
+          pre=""
+          if [ -n "$PR" ]; then pre="pr.$PR.$RUN"
+          elif [ "$GITHUB_REF" != refs/heads/main ]; then pre="dev.$RUN"; fi
+          if [ -n "$pre" ]; then case "$v" in *-*) v="$v.$pre" ;; *) v="$v-$pre" ;; esac; fi
+          meta="$RUN.${SHA:0:7}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "metadata=$meta" >> "$GITHUB_OUTPUT"
+          echo "Building $v+$meta"
 
       - name: Prepare vcpkg cache
         run: New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
@@ -95,7 +116,8 @@ jobs:
           cmake -S . -B build -A Win32
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=x86-windows-static-md
-          -DKWIQ_BUILD_NUMBER=${{ github.run_number }}
+          -DKWIQ_BUILD_VERSION="${{ steps.version.outputs.version }}"
+          -DKWIQ_BUILD_METADATA="${{ steps.version.outputs.metadata }}"
 
       - name: Build
         run: |
@@ -157,10 +179,17 @@ jobs:
         with:
           name: KWIQPlugin
 
+      # once per version: a version that is already released is not released again (bump version.h)
       - name: Release (main)
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         run: |
-          gh release create "v$VERSION" KWIQPlugin.dll KWIQPluginUpdater.dll KWIQPluginCore.dll --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
+          if gh api "repos/$GH_REPO/git/ref/tags/v$VERSION" --silent 2>/dev/null; then
+            echo "::notice::v$VERSION is already released, so nothing is published. Change KWIQ_VERSION in version.h to release."
+            exit 0
+          fi
+          # a pre-release version (0.7.0-rc.1) is published as a GitHub pre-release, which Core never offers
+          case "$VERSION" in *-*) pre=--prerelease ;; *) pre= ;; esac
+          gh release create "v$VERSION" KWIQPlugin.dll KWIQPluginUpdater.dll KWIQPluginCore.dll $pre --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
 
       - name: Test pre-release (pull requests and other branches)
         if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')

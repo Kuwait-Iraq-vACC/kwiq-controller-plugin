@@ -447,7 +447,7 @@ void KwiqRdf::Tick(std::time_t now, const std::string& callsign, bool loggedOn,
         d_->toldMissing = true;
         msg("TrackAudio is not running, so RDF and the TrackAudio bridge are not working. Start TrackAudio (1.3.0 Beta 5 or later).", true);
     }
-    if (d_->wsOpen && !version.empty() && kwiq::ParseSemVer(version).valid && !kwiq::TrackAudioVersionOk(version) && !d_->toldOld) {
+    if (d_->wsOpen && !version.empty() && kwiq::VersionInText(version).valid && !kwiq::TrackAudioVersionOk(version) && !d_->toldOld) {
         d_->toldOld = true;
         msg(version + " is too old for RDF and the TrackAudio bridge. Update TrackAudio to 1.3.0 Beta 5 or later.", true);
     }

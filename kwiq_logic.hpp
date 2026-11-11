@@ -515,8 +515,102 @@ inline unsigned long ParseColour(const std::string& s, unsigned long def) {
     }
     return ((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF);
 }
-// "0.3.0" style compare: <0, 0, >0
+// ---- Versions: Semantic Versioning 2.0.0 (https://semver.org/) ----------------------------------------
+// The plugin's own version (version.h), Core's plugin.latest_version and plugin.min_version, and TrackAudio's
+// version are compared by SemVer precedence, with this one function. A version is MAJOR.MINOR.PATCH, with an
+// optional -prerelease (dot-separated identifiers of letters, digits and hyphens) and +build metadata.
+// Leniency, on purpose:
+//   - a leading "v" is allowed (v1.3.0, as tags and TrackAudio write it)
+//   - fewer than three numbers count as zeros (0.6 is 0.6.0), as plugin.min_version was written before
+//   - a fourth number is ignored: 0.5 and early 0.6 builds were versioned <base>.<run> (0.5.0.115), which
+//     reads as 0.5.0. It never counts when comparing.
+// Anything else is not a version: it sorts below every version, and two of them compare equal.
+struct Version {
+    bool valid = false;
+    unsigned long long major = 0, minor = 0, patch = 0;
+    int numbers = 0;                              // how many numbers the core had (1 to 4)
+    std::vector<std::string> pre;                 // pre-release identifiers; empty for a release
+};
+inline bool VersionIdentifier(const std::string& s) {
+    if (s.empty()) return false;
+    for (char c : s) if (!std::isalnum((unsigned char)c) && c != '-') return false;
+    return true;
+}
+inline bool NumericIdentifier(const std::string& s) { return !s.empty() && AllDigits(s, 0, s.size()); }
+inline Version ParseVersion(const std::string& text) {
+    Version v;
+    std::string s = Trim(text);
+    if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) s = s.substr(1);
+    size_t plus = s.find('+');
+    if (plus != std::string::npos) {                          // build metadata: checked, then ignored
+        for (const auto& id : SplitChar(s.substr(plus + 1), '.')) if (!VersionIdentifier(id)) return v;
+        s = s.substr(0, plus);
+    }
+    size_t dash = s.find('-');
+    std::string core = s.substr(0, dash);
+    if (dash != std::string::npos) {
+        for (const auto& id : SplitChar(s.substr(dash + 1), '.')) {
+            if (!VersionIdentifier(id)) return v;
+            v.pre.push_back(id);
+        }
+    }
+    auto nums = SplitChar(core, '.');
+    if (nums.empty() || nums.size() > 4) return v;
+    for (const auto& n : nums) if (!NumericIdentifier(n) || n.size() > 18) return v;
+    v.major = std::stoull(nums[0]);
+    v.minor = nums.size() > 1 ? std::stoull(nums[1]) : 0;
+    v.patch = nums.size() > 2 ? std::stoull(nums[2]) : 0;    // nums[3], an old build number, is ignored
+    v.numbers = (int)nums.size();
+    v.valid = true;
+    return v;
+}
+// semver.org section 11: numeric identifiers compare as numbers and are lower than alphanumeric ones, which
+// compare in ASCII order; more identifiers is higher when all before are equal; a release is higher than any
+// of its pre-releases. Major, minor and patch compare as numbers. Build metadata is ignored.
+inline int CompareVersions(const Version& a, const Version& b) {
+    if (!a.valid || !b.valid) return a.valid == b.valid ? 0 : (a.valid ? 1 : -1);
+    if (a.major != b.major) return a.major < b.major ? -1 : 1;
+    if (a.minor != b.minor) return a.minor < b.minor ? -1 : 1;
+    if (a.patch != b.patch) return a.patch < b.patch ? -1 : 1;
+    if (a.pre.empty() != b.pre.empty()) return a.pre.empty() ? 1 : -1;
+    for (size_t i = 0; i < a.pre.size() && i < b.pre.size(); i++) {
+        const std::string& x = a.pre[i];
+        const std::string& y = b.pre[i];
+        bool nx = NumericIdentifier(x), ny = NumericIdentifier(y);
+        if (nx && ny) {                                       // as numbers, of any length
+            std::string sx = x.substr((std::min)(x.find_first_not_of('0'), x.size() - 1));
+            std::string sy = y.substr((std::min)(y.find_first_not_of('0'), y.size() - 1));
+            if (sx.size() != sy.size()) return sx.size() < sy.size() ? -1 : 1;
+            if (sx != sy) return sx < sy ? -1 : 1;
+        } else if (nx != ny) {
+            return nx ? -1 : 1;
+        } else if (x != y) {
+            return x < y ? -1 : 1;
+        }
+    }
+    if (a.pre.size() != b.pre.size()) return a.pre.size() < b.pre.size() ? -1 : 1;
+    return 0;
+}
+// <0, 0, >0
 inline int CompareVersions(const std::string& a, const std::string& b) {
+    return CompareVersions(ParseVersion(a), ParseVersion(b));
+}
+// The first version in a text, e.g. "TrackAudio v1.3.0-beta.5": from the first number that has at least
+// MAJOR.MINOR.PATCH up to the next space; not valid if there is none
+inline Version VersionInText(const std::string& text) {
+    for (size_t i = 0; i < text.size(); i++) {
+        if (!std::isdigit((unsigned char)text[i])) continue;
+        char p = i ? text[i - 1] : ' ';                       // not inside a word or a number, but "v1.3.0" is fine
+        if (std::isdigit((unsigned char)p) || p == '.' || (std::isalpha((unsigned char)p) && p != 'v' && p != 'V')) continue;
+        size_t end = text.find_first_of(" \t\r\n,;()[]", i);
+        Version v = ParseVersion(text.substr(i, end == std::string::npos ? std::string::npos : end - i));
+        if (v.valid && v.numbers >= 3) return v;
+    }
+    return Version();
+}
+// EuroScope's own versions are four plain numbers where the fourth counts (3.2.3.2 is 3.2c r2), not SemVer:
+// <0, 0, >0, missing numbers are zeros
+inline int CompareVersionNumbers(const std::string& a, const std::string& b) {
     auto pa = SplitChar(a, '.'), pb = SplitChar(b, '.');
     for (size_t i = 0; i < (std::max)(pa.size(), pb.size()); i++) {
         int x = i < pa.size() ? ToInt(pa[i]) : 0, y = i < pb.size() ? ToInt(pb[i]) : 0;
@@ -535,7 +629,7 @@ inline std::vector<std::string> EuroScopeVersions(const std::string& accepted) {
 // One of them ("3.2.9" and "3.2.9.0" are the same), or anything when Core lists none
 inline bool EuroScopeVersionAccepted(const std::string& running, const std::string& accepted) {
     std::vector<std::string> vs = EuroScopeVersions(accepted);
-    for (const std::string& v : vs) if (CompareVersions(running, v) == 0) return true;
+    for (const std::string& v : vs) if (CompareVersionNumbers(running, v) == 0) return true;
     return vs.empty();
 }
 
@@ -662,9 +756,10 @@ inline bool LooksLikeX86Dll(const std::string& d) {
     unsigned machine = u8(pe + 4) | (u8(pe + 5) << 8), chr = u8(pe + 22) | (u8(pe + 23) << 8);
     return machine == 0x014c && (chr & 0x2000) != 0;          // I386 + IMAGE_FILE_DLL
 }
-// True when Core advertises a newer plugin than the running one and gave a checksum to verify it with.
+// True when Core advertises a newer plugin than the running one (by SemVer precedence, so build metadata
+// and an old fourth number never count) and gave a checksum to verify it with.
 inline bool UpdateAvailable(const std::string& running, const std::string& latest, const std::string& sha) {
-    return !latest.empty() && sha.size() == 64 && CompareVersions(running, latest) < 0;
+    return ParseVersion(latest).valid && sha.size() == 64 && CompareVersions(running, latest) < 0;
 }
 
 // Personal API key from myKWIQ: "kwiq_" then 40 letters and digits. The first 8 after "kwiq_" are its ID.
@@ -782,31 +877,10 @@ inline RdfSettings RdfFor(const std::vector<RdfRow>& rows, const std::string& ca
 }
 
 // TrackAudio's version, from the text its HTTP endpoint answers with (e.g. "TrackAudio v1.3.0-beta.5").
-// RDF needs 1.3.0 Beta 5 or later. Prerelease order: alpha < beta < rc < the release. False if unreadable.
-struct SemVer { int major = 0, minor = 0, patch = 0, pre = 3, preNum = 0; bool valid = false; };
-inline SemVer ParseSemVer(const std::string& text) {
-    SemVer v;
-    for (size_t i = 0; i < text.size(); i++) {
-        if (!std::isdigit((unsigned char)text[i]) || (i && std::isdigit((unsigned char)text[i - 1]))) continue;
-        int a, b, c, n = 0;
-        if (std::sscanf(text.c_str() + i, "%d.%d.%d%n", &a, &b, &c, &n) != 3) continue;
-        v.major = a; v.minor = b; v.patch = c; v.valid = true;
-        std::string rest = Lower(text.substr(i + n));
-        if (!rest.empty() && rest[0] == '-') {
-            v.pre = rest.compare(1, 5, "alpha") == 0 ? 0 : rest.compare(1, 4, "beta") == 0 ? 1 : rest.compare(1, 2, "rc") == 0 ? 2 : 0;
-            size_t d = rest.find_first_of("0123456789");
-            v.preNum = d == std::string::npos ? 0 : std::atoi(rest.c_str() + d);
-        }
-        return v;
-    }
-    return v;
-}
+// RDF needs 1.3.0 Beta 5 or later, by SemVer precedence (CompareVersions). False if unreadable.
 inline bool TrackAudioVersionOk(const std::string& text) {
-    SemVer v = ParseSemVer(text);
-    if (!v.valid) return false;
-    auto key = [](const SemVer& s) { return std::make_tuple(s.major, s.minor, s.patch, s.pre, s.preNum); };
-    SemVer min; min.major = 1; min.minor = 3; min.patch = 0; min.pre = 1; min.preNum = 5;
-    return key(v) >= key(min);
+    Version v = VersionInText(text);
+    return v.valid && CompareVersions(v, ParseVersion("1.3.0-beta.5")) >= 0;
 }
 
 // The KWIQ menu's TrackAudio row: the state of the connection to TrackAudio, which the plugin makes on its own.
@@ -818,7 +892,7 @@ inline bool TrackAudioVersionOk(const std::string& text) {
 enum class TrackAudioState { Off, Connected, TooOld, AfvClient, NotRunning };
 inline TrackAudioState TrackAudioStatus(bool running, bool inUse, bool wsOpen, const std::string& version, bool afvRecent) {
     if (!running || !inUse) return TrackAudioState::Off;
-    if (wsOpen) return ParseSemVer(version).valid && !TrackAudioVersionOk(version) ? TrackAudioState::TooOld : TrackAudioState::Connected;
+    if (wsOpen) return VersionInText(version).valid && !TrackAudioVersionOk(version) ? TrackAudioState::TooOld : TrackAudioState::Connected;
     return afvRecent ? TrackAudioState::AfvClient : TrackAudioState::NotRunning;
 }
 inline const char* TrackAudioStateText(TrackAudioState s) {
