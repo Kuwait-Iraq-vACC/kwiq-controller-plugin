@@ -98,6 +98,7 @@ enum {
 namespace kwiq_ui {
 
 enum { SRD_MAX_RESULTS = 500 };
+static const int M = 10, GAP = 6, ROWH = 24;                    // the Notifications window's margin, gap and row height
 
 static HMODULE gMod = nullptr;
 // SRD Search: the routes for an origin, a destination and a level (the plugin's data from Core)
