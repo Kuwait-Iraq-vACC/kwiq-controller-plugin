@@ -12,6 +12,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <tuple>
+#include <cmath>
+#include <sstream>
+#include <array>
+#include <map>
+#include <functional>
 
 namespace kwiq {
 
@@ -199,6 +205,7 @@ struct SrdRoute {
 struct SrdData {
     std::vector<SrdRoute> rows;
     std::unordered_map<std::string, std::vector<size_t>> pair; // "ADEP|ADES" for airport-airport rows
+    std::unordered_map<std::string, std::vector<size_t>> toPoint; // "ADEP|POINT" for airport-to-waypoint rows (FIR exits)
     std::vector<size_t> wp;                                    // rows with a waypoint end
     std::string version;
 };
@@ -208,11 +215,12 @@ inline bool IsAirportCode(const std::string& s) {
     return true;
 }
 inline void BuildSrd(SrdData& d) {
-    d.pair.clear(); d.wp.clear();
+    d.pair.clear(); d.toPoint.clear(); d.wp.clear();
     for (size_t i = 0; i < d.rows.size(); i++) {
         const auto& r = d.rows[i];
-        if (IsAirportCode(r.adep) && IsAirportCode(r.ades)) d.pair[r.adep + "|" + r.ades].push_back(i);
-        else d.wp.push_back(i);
+        if (IsAirportCode(r.adep) && IsAirportCode(r.ades)) { d.pair[r.adep + "|" + r.ades].push_back(i); continue; }
+        if (IsAirportCode(r.adep)) d.toPoint[r.adep + "|" + r.ades].push_back(i);
+        d.wp.push_back(i);
     }
 }
 inline SrdData ParseSrd(const std::string& body) {
@@ -248,13 +256,101 @@ inline int ParseLevelFt(const std::string& in) {
     return v < 1000 ? v * 100 : v;
 }
 
-// SRD rows that apply to a flight. Airport-pair rows (ADEP|ADES) take precedence; only when
-// there are none do enroute rows apply (waypoint ends that are both on the filed route).
+// ---- FIR exit points (UK Controller Plugin: intention/FirExitPoint, ExitCone, CachedAircraftFirExitGenerator) ----
+// Core /api/plugin/fir-exits (plain text), one line per exit cone:  EXIT|<point>|<from heading>|<to heading>|<internal 0/1>
+// An aircraft leaves the airspace at a listed point when its track from that point to the next one on its
+// route lies in one of the point's exit cones (from..to, clockwise, degrees). A point can have several cones,
+// one per direction: a point on the OKAC/ORBB boundary is crossed both ways, so the same name on several lines
+// is several cones, each with its own internal flag. Internal cones are on the OKAC/ORBB boundary; the others
+// are where the vACC's airspace ends. Identical lines count once.
+struct FirExit { std::string point; int from = 0, to = 360; bool internal = false; };
+using FirExits = std::unordered_map<std::string, std::vector<FirExit>>;   // point -> its cones; size() = points
+
+inline FirExits ParseFirExits(const std::string& body) {
+    FirExits m;
+    auto heading = [](const std::string& s, int& out) {
+        std::string t = Trim(s);
+        if (t.empty() || t.size() > 3 || !AllDigits(t, 0, t.size())) return false;
+        out = std::atoi(t.c_str());
+        return out <= 360;
+    };
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(Trim(line), '|');
+        if (f.size() < 4 || f[0] != "EXIT") continue;
+        FirExit e;
+        e.point = Upper(Trim(f[1]));
+        if (e.point.empty() || !heading(f[2], e.from) || !heading(f[3], e.to)) continue;
+        e.internal = f.size() > 4 && Trim(f[4]) == "1";
+        auto& cones = m[e.point];
+        bool same = false;
+        for (const auto& c : cones) same = same || (c.from == e.from && c.to == e.to && c.internal == e.internal);
+        if (!same) cones.push_back(e);
+    }
+    return m;
+}
+// UKCP ExitCone::AircraftIsExiting; a cone that wraps through north has to <= from
+inline bool InExitCone(const FirExit& e, int heading) {
+    return e.to <= e.from ? heading >= e.from || heading <= e.to : heading >= e.from && heading <= e.to;
+}
+// A point on the route, with the track to the next one (-1 for the last point)
+struct RoutePoint { std::string name; int track = -1; };
+struct AircraftExit { std::string internal, external; };     // empty when it does not leave there
+// The cone of a point that a track leaves through, or nullptr. If two of its cones overlap at that track, an
+// external one wins: the flight leaves the vACC's airspace there.
+inline const FirExit* ExitConeFor(const std::vector<FirExit>& cones, int track) {
+    const FirExit* hit = nullptr;
+    for (const auto& c : cones) {
+        if (!InExitCone(c, track)) continue;
+        if (!c.internal) return &c;
+        if (!hit) hit = &c;
+    }
+    return hit;
+}
+// UKCP CachedAircraftFirExitGenerator::Generate: the first exit along the route; an internal one only counts
+// before the aircraft leaves the vACC's airspace. Each point is taken if the track is inside any of its cones,
+// with that cone's own internal flag.
+inline AircraftExit FindFirExit(const FirExits& exits, const std::vector<RoutePoint>& route) {
+    AircraftExit out;
+    for (const auto& p : route) {
+        auto it = exits.find(Upper(p.name));
+        if (it == exits.end() || p.track < 0) continue;
+        const FirExit* cone = ExitConeFor(it->second, p.track);
+        if (!cone) continue;
+        if (cone->internal) { if (out.internal.empty()) out.internal = it->first; continue; }
+        out.external = it->first;
+        break;
+    }
+    return out;
+}
+// Airports in the vACC's airspace: ICAO prefixes, "OK,OR" by default (srd.domestic_prefixes in Core)
+inline bool Domestic(const std::string& airport, const std::string& prefixes) {
+    for (const auto& p : SplitChar(prefixes, ',')) {
+        std::string t = Upper(Trim(p));
+        if (!t.empty() && Upper(airport).compare(0, t.size(), t) == 0) return true;
+    }
+    return false;
+}
+// What SRD destination to use for a flight: its destination when it stays in the vACC's airspace, else where
+// it leaves it (UKCP SrdSearchDialog::PrepopulateSearch); empty when that is not known
+inline std::string SrdEnd(const std::string& ades, const std::string& prefixes, const AircraftExit& exit) {
+    if (Domestic(ades, prefixes)) return ades;
+    return !exit.external.empty() ? exit.external : exit.internal;
+}
+
+// SRD rows that apply to a flight. Airport-pair rows (ADEP|ADES) take precedence. Then, for a flight
+// leaving the vACC's airspace, rows from ADEP to its FIR exit point (failing that, its exit between OKAC
+// and ORBB). Only when there are none do enroute rows apply (waypoint ends that are both on the filed route).
 inline void Candidates(const SrdData& d, const std::string& adep, const std::string& ades,
-                       const std::vector<std::string>& filed, std::vector<size_t>& out) {
+                       const std::vector<std::string>& filed, std::vector<size_t>& out,
+                       const AircraftExit& exit = {}) {
     out.clear();
     auto it = d.pair.find(adep + "|" + ades);
     if (it != d.pair.end()) { out = it->second; return; }
+    for (const std::string* point : { &exit.external, &exit.internal }) {
+        if (point->empty()) continue;
+        auto e = d.toPoint.find(adep + "|" + *point);
+        if (e != d.toPoint.end()) { out = e->second; return; }
+    }
     auto on = [&](const std::string& end, const std::string& airport) {
         return IsAirportCode(end) ? end == airport : std::find(filed.begin(), filed.end(), end) != filed.end();
     };
@@ -264,9 +360,9 @@ inline void Candidates(const SrdData& d, const std::string& adep, const std::str
 enum class FpcResult { None, Ok, Route, Min, Max };
 
 inline FpcResult CheckFpc(const SrdData& d, const std::string& adep, const std::string& ades,
-                          const std::vector<std::string>& filed, int rflFt) {
+                          const std::vector<std::string>& filed, int rflFt, const AircraftExit& exit = {}) {
     std::vector<size_t> c;
-    Candidates(d, adep, ades, filed, c);
+    Candidates(d, adep, ades, filed, c, exit);
     if (c.empty()) return FpcResult::None;
     bool routeOk = false;
     FpcResult lvl = FpcResult::None;
@@ -281,13 +377,19 @@ inline FpcResult CheckFpc(const SrdData& d, const std::string& adep, const std::
     return routeOk ? lvl : FpcResult::Route;
 }
 inline std::string ExplainFpc(const SrdData& d, const std::string& adep, const std::string& ades,
-                              const std::string& filedRte, int rflFt) {
+                              const std::string& filedRte, int rflFt, const AircraftExit& exit = {}) {
     auto filed = NormaliseRoute(filedRte);
     std::vector<size_t> c;
-    Candidates(d, adep, ades, filed, c);
-    std::string head = adep + " -> " + ades + " " + (rflFt > 0 ? FlStr(rflFt) : "FL---") + ": ";
-    switch (CheckFpc(d, adep, ades, filed, rflFt)) {
-    case FpcResult::None:  return head + "no SRD route defined for this pair.";
+    Candidates(d, adep, ades, filed, c, exit);
+    // Say which exit the rows are for, when it was one
+    std::string via;
+    if (!c.empty() && IsAirportCode(d.rows[c[0]].adep) && !IsAirportCode(d.rows[c[0]].ades)) via = " (FIR exit " + d.rows[c[0]].ades + ")";
+    else if (c.empty() && !exit.external.empty()) via = " (FIR exit " + exit.external + ")";
+    std::string head = adep + " -> " + ades + via + " " + (rflFt > 0 ? FlStr(rflFt) : "FL---") + ": ";
+    switch (CheckFpc(d, adep, ades, filed, rflFt, exit)) {
+    case FpcResult::None:  return head + (exit.external.empty() && exit.internal.empty()
+                                              ? "no SRD route defined for this pair."
+                                              : "no SRD route defined for this pair or its FIR exit.");
     case FpcResult::Ok:    return head + "route and level conform to the SRD.";
     case FpcResult::Min:
     case FpcResult::Max: {
@@ -308,6 +410,16 @@ inline std::string ExplainFpc(const SrdData& d, const std::string& adep, const s
         if (shown++ == 3) { s += " ... (+" + std::to_string(c.size() - 3) + " more)"; break; }
         s += " | " + d.rows[i].rte;
     }
+    return s;
+}
+// SRD search window, as the UK Controller Plugin's SRD Search dialog: Min (MC = no minimum), Max (- = no limit),
+// FRA (the route has Free Route Airspace in it) and the notes for the selected route
+inline std::string SrdMinText(const SrdRoute& r) { return r.minLvl ? std::to_string(r.minLvl / 100) : "MC"; }
+inline std::string SrdMaxText(const SrdRoute& r) { return r.maxLvl ? std::to_string(r.maxLvl / 100) : "-"; }
+inline bool HasFreeRoute(const std::string& rte) { return rte.find("<FRA>") != std::string::npos; }
+inline std::string SrdNotesText(const SrdRoute& r) {
+    std::string s = r.notes.empty() ? "No notes." : r.notes;
+    if (HasFreeRoute(r.rte)) s += "\r\n\r\nThis route contains segments of Free Route Airspace.";
     return s;
 }
 // Empty field = wildcard. lvlFt 0 = no level filter. Exact (case-insensitive) match on ends.
@@ -561,6 +673,32 @@ inline bool IsApiKey(const std::string& k) {
 }
 inline std::string ApiKeyId(const std::string& k) { return IsApiKey(k) ? k.substr(5, 8) : std::string(); }
 
+// %LOCALAPPDATA%\KWIQ\settings\api-settings.json, as UKCP keeps its key: {"api-key": "kwiq_..."}.
+// A key is only letters, digits and _, so no escaping is needed either way.
+inline std::string ApiSettingsJson(const std::string& key) {
+    return "{\n    \"api-key\": \"" + key + "\"\n}\n";
+}
+inline std::string ApiKeyFromSettingsJson(const std::string& json) {
+    size_t k = json.find("\"api-key\"");
+    if (k == std::string::npos) return "";
+    size_t colon = json.find(':', k + 9);
+    size_t open = colon == std::string::npos ? colon : json.find('"', colon + 1);
+    size_t close = open == std::string::npos ? open : json.find('"', open + 1);
+    if (close == std::string::npos) return "";
+    std::string v = Trim(json.substr(open + 1, close - open - 1));
+    return IsApiKey(v) ? v : "";
+}
+
+// What the updater tells the loader to do with the plugin (KWIQUpdaterRun)
+enum class StartMode { Full = 0, Reduced = 1, DontLoad = 2 };
+// As EuroScope starts: Core's kill switch stops the plugin loading; an update the controller declined
+// starts it reduced; no plugin installed and none to install means nothing to load.
+inline StartMode DecideStart(bool coreAnswered, bool killSwitch, bool installed, bool updateDeclined) {
+    if (coreAnswered && killSwitch) return StartMode::DontLoad;
+    if (!installed) return StartMode::DontLoad;
+    return updateDeclined ? StartMode::Reduced : StartMode::Full;
+}
+
 // One query value from the first line of an HTTP request ("GET /?key=...&state=... HTTP/1.1").
 // Only letters, digits and _ are expected, so no decoding is done; anything else gives "".
 inline std::string QueryValue(const std::string& request, const std::string& name) {
@@ -578,6 +716,459 @@ inline std::string QueryValue(const std::string& request, const std::string& nam
         return v;
     }
     return "";
+}
+
+// ---- RDF and the TrackAudio bridge (built in from KingfuChan/RDF) --------------------------------
+// Core /api/plugin/rdf (plain text), one line per callsign pattern, in Core's order (the first match wins):
+//   RDF|<pattern>|draw=1|bridge=1|colour=#FFFFFF|colour_concurrent=#FF0000|radius=20|threshold=-1|precision=0|
+//       low_altitude=0|high_altitude=0|low_precision=0|high_precision=0|controllers=0|require_tx=0
+// The pattern is a logon callsign with * (any characters) and ? (one character), e.g. ORBB_*_CTR or *.
+// A key left out takes RDF's default. With no matching line: no drawing, bridge on.
+struct RdfSettings {
+    bool draw = false, bridge = true, controllers = false, requireTx = false;
+    unsigned long colour = 0xFFFFFF, colourConcurrent = 0x0000FF;   // COLORREF (0x00BBGGRR): white, red
+    int radius = 20, threshold = -1, precision = 0, lowAltitude = 0, highAltitude = 0, lowPrecision = 0, highPrecision = 0;
+};
+struct RdfRow { std::string pattern; RdfSettings s; };
+
+inline bool WildcardMatch(const std::string& pattern, const std::string& text) {
+    size_t p = 0, t = 0, star = std::string::npos, mark = 0;
+    while (t < text.size()) {
+        if (p < pattern.size() && (pattern[p] == '?' || std::toupper((unsigned char)pattern[p]) == std::toupper((unsigned char)text[t]))) { p++; t++; }
+        else if (p < pattern.size() && pattern[p] == '*') { star = p++; mark = t; }
+        else if (star != std::string::npos) { p = star + 1; t = ++mark; }
+        else return false;
+    }
+    while (p < pattern.size() && pattern[p] == '*') p++;
+    return p == pattern.size();
+}
+
+inline std::vector<RdfRow> ParseRdf(const std::string& body) {
+    std::vector<RdfRow> rows;
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(Trim(line), '|');
+        if (f.size() < 2 || f[0] != "RDF" || Trim(f[1]).empty()) continue;
+        RdfRow r;
+        r.pattern = Upper(Trim(f[1]));
+        for (size_t i = 2; i < f.size(); i++) {
+            size_t eq = f[i].find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = Lower(Trim(f[i].substr(0, eq))), v = Trim(f[i].substr(eq + 1));
+            auto num = [&](int& out, int lo) { try { int n = std::stoi(v); if (n >= lo) out = n; } catch (...) {} };
+            auto flag = [&](bool& out) { if (v == "1" || Upper(v) == "ON") out = true; else if (v == "0" || Upper(v) == "OFF") out = false; };
+            if (k == "draw") flag(r.s.draw);
+            else if (k == "bridge") flag(r.s.bridge);
+            else if (k == "controllers") flag(r.s.controllers);
+            else if (k == "require_tx") flag(r.s.requireTx);
+            else if (k == "colour") r.s.colour = ParseColour(v, r.s.colour);
+            else if (k == "colour_concurrent") r.s.colourConcurrent = ParseColour(v, r.s.colourConcurrent);
+            else if (k == "radius") num(r.s.radius, 1);
+            else if (k == "threshold") num(r.s.threshold, -1000000);
+            else if (k == "precision") num(r.s.precision, 0);
+            else if (k == "low_altitude") num(r.s.lowAltitude, -100000);
+            else if (k == "high_altitude") num(r.s.highAltitude, 1);
+            else if (k == "low_precision") num(r.s.lowPrecision, 0);
+            else if (k == "high_precision") num(r.s.highPrecision, 0);
+        }
+        rows.push_back(r);
+    }
+    return rows;
+}
+inline RdfSettings RdfFor(const std::vector<RdfRow>& rows, const std::string& callsign) {
+    for (const auto& r : rows) if (WildcardMatch(r.pattern, Upper(callsign))) return r.s;
+    return RdfSettings();
+}
+
+// TrackAudio's version, from the text its HTTP endpoint answers with (e.g. "TrackAudio v1.3.0-beta.5").
+// RDF needs 1.3.0 Beta 5 or later. Prerelease order: alpha < beta < rc < the release. False if unreadable.
+struct SemVer { int major = 0, minor = 0, patch = 0, pre = 3, preNum = 0; bool valid = false; };
+inline SemVer ParseSemVer(const std::string& text) {
+    SemVer v;
+    for (size_t i = 0; i < text.size(); i++) {
+        if (!std::isdigit((unsigned char)text[i]) || (i && std::isdigit((unsigned char)text[i - 1]))) continue;
+        int a, b, c, n = 0;
+        if (std::sscanf(text.c_str() + i, "%d.%d.%d%n", &a, &b, &c, &n) != 3) continue;
+        v.major = a; v.minor = b; v.patch = c; v.valid = true;
+        std::string rest = Lower(text.substr(i + n));
+        if (!rest.empty() && rest[0] == '-') {
+            v.pre = rest.compare(1, 5, "alpha") == 0 ? 0 : rest.compare(1, 4, "beta") == 0 ? 1 : rest.compare(1, 2, "rc") == 0 ? 2 : 0;
+            size_t d = rest.find_first_of("0123456789");
+            v.preNum = d == std::string::npos ? 0 : std::atoi(rest.c_str() + d);
+        }
+        return v;
+    }
+    return v;
+}
+inline bool TrackAudioVersionOk(const std::string& text) {
+    SemVer v = ParseSemVer(text);
+    if (!v.valid) return false;
+    auto key = [](const SemVer& s) { return std::make_tuple(s.major, s.minor, s.patch, s.pre, s.preNum); };
+    SemVer min; min.major = 1; min.minor = 3; min.patch = 0; min.pre = 1; min.preNum = 5;
+    return key(v) >= key(min);
+}
+
+// The KWIQ menu's TrackAudio row: the state of the connection to TrackAudio, which the plugin makes on its own.
+//   running:   RDF started (not when another RDF or afv-euroscope-bridge is loaded)
+//   inUse:     Core's settings (or the controller's RDF Drawing) use TrackAudio: the bridge or drawing is on
+//   wsOpen:    TrackAudio's WebSocket is open
+//   version:   what TrackAudio said its version is (empty if it didn't); an unreadable one isn't "too old"
+//   afvRecent: the AFV standalone client was heard from in the last 10 minutes
+enum class TrackAudioState { Off, Connected, TooOld, AfvClient, NotRunning };
+inline TrackAudioState TrackAudioStatus(bool running, bool inUse, bool wsOpen, const std::string& version, bool afvRecent) {
+    if (!running || !inUse) return TrackAudioState::Off;
+    if (wsOpen) return ParseSemVer(version).valid && !TrackAudioVersionOk(version) ? TrackAudioState::TooOld : TrackAudioState::Connected;
+    return afvRecent ? TrackAudioState::AfvClient : TrackAudioState::NotRunning;
+}
+inline const char* TrackAudioStateText(TrackAudioState s) {
+    switch (s) {
+    case TrackAudioState::Connected:  return "Connected";
+    case TrackAudioState::TooOld:     return "Version too old";
+    case TrackAudioState::AfvClient:  return "AFV client";
+    case TrackAudioState::NotRunning: return "Not running";
+    default:                          return "Off";
+    }
+}
+// What a click on the row does: with TrackAudio connected, sync the channels again (.rdf refresh); without it,
+// try to connect now (leaving EuroScope's channels as they are); when off, nothing
+enum class TrackAudioClick { None, Resync, Reconnect };
+inline TrackAudioClick TrackAudioClickAction(TrackAudioState s) {
+    switch (s) {
+    case TrackAudioState::Connected:
+    case TrackAudioState::TooOld:     return TrackAudioClick::Resync;
+    case TrackAudioState::AfvClient:
+    case TrackAudioState::NotRunning: return TrackAudioClick::Reconnect;
+    default:                          return TrackAudioClick::None;
+    }
+}
+
+// ---- DiscordEuroScope (Discord Rich Presence, built in from Kirollos/DiscordEuroScope) ----------------
+// Core /api/plugin/discord (plain text). Every MESSAGE, IMAGE and BUTTON line has four filters, empty = any:
+// state (idle, playback, sweatbox, observer, controller, supervisor), FIR (OKAC, ORBB), logon callsign
+// pattern (* and ?) and event (1 = only while a Core event is on, 0 = only when none is).
+//   APP|<Discord application ID>
+//   SWEATBOX_BYPASS|1                 (sweatbox shows as a normal logon)
+//   MESSAGE|<state>|<fir>|<pattern>|<event>|<details>|<state text>
+//   IMAGE|<state>|<fir>|<pattern>|<event>|<large image URL or key>|<large text>|<small image URL or key>|<small text>
+//   BUTTON|<state>|<fir>|<pattern>|<event>|<label>|<url>          (at most two are shown, in Core's order)
+//   RADIO|<ICAO prefix>|<frequency>|<radio callsign>              e.g. RADIO|ORBB|124.400|Baghdad Control
+// At logon (and whenever the state changes) the plugin takes the matching entries with the most filters set
+// and picks one at random, skipping a message whose placeholders have no value. Texts may use {callsign},
+// {rcallsign}, {frequency}, {current_tracked}, {total_tracked}, {total_inrange} and {event}.
+struct DiscordFilter { std::string state, fir, pattern; int event = -1; };
+struct DiscordEntry { DiscordFilter f; std::vector<std::string> v; };
+struct DiscordConfig {
+    std::string appId;
+    bool sweatboxBypass = false;
+    std::vector<DiscordEntry> messages, images, buttons;
+    std::vector<std::array<std::string, 3>> radios;          // ICAO prefix, frequency, radio callsign
+};
+struct DiscordContext { std::string state, fir, callsign; bool event = false; };
+
+inline DiscordConfig ParseDiscord(const std::string& body) {
+    DiscordConfig c;
+    for (const auto& raw : SplitChar(body, '\n')) {
+        std::string line = raw;
+        while (!line.empty() && (line.back() == '\r')) line.pop_back();
+        auto f = SplitChar(line, '|');
+        std::string kind = Upper(Trim(f[0]));
+        if (kind == "APP" && f.size() >= 2) c.appId = Trim(f[1]);
+        else if (kind == "SWEATBOX_BYPASS" && f.size() >= 2) c.sweatboxBypass = Trim(f[1]) == "1";
+        else if (kind == "RADIO" && f.size() >= 4) c.radios.push_back({ Upper(Trim(f[1])), Trim(f[2]), Trim(f[3]) });
+        else if ((kind == "MESSAGE" || kind == "IMAGE" || kind == "BUTTON") && f.size() >= 6) {
+            DiscordEntry e;
+            e.f.state = Lower(Trim(f[1])); e.f.fir = Upper(Trim(f[2])); e.f.pattern = Upper(Trim(f[3]));
+            std::string ev = Trim(f[4]);
+            e.f.event = ev == "1" ? 1 : ev == "0" ? 0 : -1;
+            for (size_t i = 5; i < f.size(); i++) e.v.push_back(f[i]);
+            size_t want = kind == "MESSAGE" ? 2 : kind == "IMAGE" ? 4 : 2;
+            e.v.resize(want);
+            if (kind == "MESSAGE") c.messages.push_back(e);
+            else if (kind == "IMAGE") c.images.push_back(e);
+            else if (!Trim(e.v[0]).empty() && !Trim(e.v[1]).empty()) c.buttons.push_back(e);
+        }
+    }
+    return c;
+}
+// -1 if the entry does not apply, else how many of its filters are set
+inline int DiscordMatch(const DiscordFilter& f, const DiscordContext& x) {
+    if (!f.state.empty() && f.state != x.state) return -1;
+    if (!f.fir.empty() && f.fir != Upper(x.fir)) return -1;
+    if (!f.pattern.empty() && !WildcardMatch(f.pattern, x.callsign)) return -1;
+    if (f.event >= 0 && (f.event == 1) != x.event) return -1;
+    return (int)!f.state.empty() + (int)!f.fir.empty() + (int)!f.pattern.empty() + (int)(f.event >= 0);
+}
+// {name} placeholders. A placeholder with no value (missing or empty) makes the text unusable.
+inline bool DiscordFormat(const std::string& text, const std::map<std::string, std::string>& values, std::string& out) {
+    out.clear();
+    bool ok = true;
+    for (size_t i = 0; i < text.size(); i++) {
+        size_t close = text[i] == '{' ? text.find('}', i) : std::string::npos;
+        if (close == std::string::npos) { out += text[i]; continue; }
+        auto it = values.find(text.substr(i + 1, close - i - 1));
+        if (it == values.end()) { out += text.substr(i, close - i + 1); i = close; continue; }   // not a placeholder
+        if (it->second.empty()) ok = false;
+        out += it->second;
+        i = close;
+    }
+    return ok;
+}
+// The entry to use: among the matching entries with the most filters set, one picked by `roll` (random),
+// preferring those whose texts all have values. -1 if none matches.
+inline int DiscordPick(const std::vector<DiscordEntry>& entries, const DiscordContext& x,
+                       const std::map<std::string, std::string>& values, unsigned roll) {
+    std::map<int, std::vector<int>, std::greater<int>> tiers;
+    for (size_t i = 0; i < entries.size(); i++) {
+        int m = DiscordMatch(entries[i].f, x);
+        if (m >= 0) tiers[m].push_back((int)i);
+    }
+    int fallback = -1;
+    for (auto& t : tiers) {
+        std::vector<int> usable;
+        for (int i : t.second) {
+            bool ok = true;
+            std::string tmp;
+            for (const auto& s : entries[i].v) ok = DiscordFormat(s, values, tmp) && ok;
+            if (ok) usable.push_back(i);
+        }
+        if (!usable.empty()) return usable[roll % usable.size()];
+        if (fallback < 0) fallback = t.second[roll % t.second.size()];
+    }
+    return fallback;
+}
+// The longest start of text that fits in maxBytes without ending inside a UTF-8 character (#50). Discord's
+// limits are in bytes (128 for texts, 32 for button labels), and half a character is invalid text to it.
+inline std::string Utf8Truncate(const std::string& text, size_t maxBytes) {
+    if (text.size() <= maxBytes) return text;
+    size_t n = maxBytes;                                      // text[n] is the first byte left out
+    while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80) n--;   // inside a character: cut before it
+    return text.substr(0, n);
+}
+// Discord refuses a button whose URL is longer than this
+constexpr size_t kDiscordUrlMax = 512;
+// DiscordEuroScope's lookup: the ICAO prefix of the callsign and the primary frequency
+inline std::string DiscordRadioCallsign(const DiscordConfig& c, const std::string& callsign, const std::string& freq) {
+    std::string icao = Upper(callsign.substr(0, callsign.find('_')));
+    for (const auto& r : c.radios) if (r[0] == icao && r[1] == freq) return r[2];
+    return "";
+}
+
+// ---- QNH monitor -----------------------------------------------------------------------------------
+// The QNH in a METAR, in hPa: Q1013, or A2992 (inches of mercury) converted. -1 if there is none.
+inline int QnhFromMetar(const std::string& metar) {
+    std::istringstream in(metar);
+    std::string tok;
+    while (in >> tok) {
+        if (tok == "RMK") break;
+        while (!tok.empty() && tok.back() == '=') tok.pop_back();
+        if (tok.size() == 5 && (tok[0] == 'Q' || tok[0] == 'A') && std::all_of(tok.begin() + 1, tok.end(), ::isdigit)) {
+            int v = std::atoi(tok.c_str() + 1);
+            return tok[0] == 'Q' ? v : (int)std::floor(v / 100.0 * 33.8639);
+        }
+    }
+    return -1;
+}
+// Core /api/plugin/metar: METAR|<ICAO>|<METAR>
+inline std::map<std::string, std::string> ParseMetars(const std::string& body) {
+    std::map<std::string, std::string> out;
+    for (const auto& line : SplitChar(body, '\n')) {
+        size_t a = line.find('|'), b = a == std::string::npos ? a : line.find('|', a + 1);
+        if (b == std::string::npos || Trim(line.substr(0, a)) != "METAR") continue;
+        std::string icao = Upper(Trim(line.substr(a + 1, b - a - 1)));
+        if (IsAirportCode(icao)) out[icao] = Trim(line.substr(b + 1));
+    }
+    return out;
+}
+
+// Transition levels, from Core /api/plugin/trl, the way TopSky's QNHTL lines give them:
+//   TRL|<ICAO or ICAO prefix>|<TA in ft>|<TRL>,<QNH>,<TRL>,<QNH>,<TRL>...
+// e.g. TRL|OR|14000|160,980,170 (FL160 at QNH 980 and above, FL170 below) and TRL|OK|13000|150 (fixed).
+// The longest matching prefix wins.
+struct TrlRule { std::string prefix; int ta = 0; std::vector<int> v; };
+inline std::vector<TrlRule> ParseTrl(const std::string& body) {
+    std::vector<TrlRule> rules;
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(Trim(line), '|');
+        if (f.size() < 4 || f[0] != "TRL") continue;
+        TrlRule r;
+        r.prefix = Upper(Trim(f[1]));
+        r.ta = ToInt(f[2]);
+        for (const auto& t : SplitChar(f[3], ',')) { std::string x = Trim(t); if (!x.empty()) r.v.push_back(ToInt(x)); }
+        if (!r.prefix.empty() && r.v.size() % 2 == 1) rules.push_back(r);
+    }
+    return rules;
+}
+// The TRL (flight level, e.g. 160) at that QNH, or 0 if Core has none for the airport
+inline int TrlFor(const std::vector<TrlRule>& rules, const std::string& icao, int qnh) {
+    const TrlRule* best = nullptr;
+    for (const auto& r : rules)
+        if (Upper(icao).compare(0, r.prefix.size(), r.prefix) == 0 && (!best || r.prefix.size() > best->prefix.size())) best = &r;
+    if (!best || qnh <= 0) return 0;
+    for (size_t i = 0; i + 1 < best->v.size(); i += 2) if (qnh >= best->v[i + 1]) return best->v[i];
+    return best->v.back();
+}
+// As in #4: "ORBI QNH 979 (was 981) TRL FL170 - CHANGED from FL160"
+inline std::string QnhMessage(const std::string& icao, int qnh, int prevQnh, int trl, int prevTrl) {
+    std::string m = icao + " QNH " + std::to_string(qnh);
+    if (prevQnh > 0 && prevQnh != qnh) m += " (was " + std::to_string(prevQnh) + ")";
+    if (trl > 0) {
+        m += " TRL FL" + std::to_string(trl);
+        if (prevTrl > 0 && prevTrl != trl) m += " - CHANGED from FL" + std::to_string(prevTrl);
+    }
+    return m;
+}
+
+// ---- top-down (shared by the QNH monitor and procedure notifications) --------------------------------
+// Core /api/plugin/topdown: TOPDOWN|<airport>|<position>,<position>,...  lowest first,
+// e.g. TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR
+// A position (OKBK_TWR) is worked by OKBK_TWR, OKBK_1_TWR, OKBK_N_TWR: same prefix and suffix.
+using TopDownOrders = std::map<std::string, std::vector<std::string>>;
+inline bool TopDownPositionMatches(const std::string& position, const std::string& callsign) {
+    size_t a = position.find('_'), b = callsign.find('_');
+    if (a == std::string::npos || b == std::string::npos) return false;
+    return Upper(position.substr(0, a)) == Upper(callsign.substr(0, b)) &&
+           Upper(position.substr(position.rfind('_') + 1)) == Upper(callsign.substr(callsign.rfind('_') + 1));
+}
+inline TopDownOrders ParseTopDownOrders(const std::string& body) {
+    TopDownOrders td;
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(Trim(line), '|');
+        if (f.size() < 3 || f[0] != "TOPDOWN" || !IsAirportCode(Upper(Trim(f[1])))) continue;
+        std::vector<std::string> order;
+        for (const auto& p : SplitChar(f[2], ',')) { std::string x = Upper(Trim(p)); if (x.find('_') != std::string::npos) order.push_back(x); }
+        if (!order.empty()) td[Upper(Trim(f[1]))] = order;
+    }
+    return td;
+}
+// The airport is the user's: the lowest position in its top-down order that anyone is on is one the user
+// is on (online = the other controllers' callsigns). An airport with no order: its own positions only.
+inline bool CoveredByMe(const TopDownOrders& td, const std::string& airport, const std::string& me,
+                        const std::vector<std::string>& online) {
+    if (airport.empty() || me.empty()) return false;
+    auto it = td.find(airport);
+    std::vector<std::string> order = it != td.end() ? it->second
+        : std::vector<std::string>{ airport + "_DEL", airport + "_GND", airport + "_TWR", airport + "_APP" };
+    for (const auto& pos : order) {
+        if (TopDownPositionMatches(pos, me)) return true;
+        for (const auto& cs : online) if (TopDownPositionMatches(pos, cs)) return false;
+    }
+    return false;
+}
+// Every airport Core has an order for (and the user's own) that the user covers now
+inline std::vector<std::string> AirportsCovered(const TopDownOrders& td, const std::string& me, const std::vector<std::string>& online) {
+    std::vector<std::string> out;
+    for (const auto& kv : td) if (CoveredByMe(td, kv.first, me, online)) out.push_back(kv.first);
+    std::string own = Upper(me.substr(0, me.find('_')));
+    if (IsAirportCode(own) && !td.count(own) && CoveredByMe(td, own, me, online)) out.push_back(own);
+    return out;
+}
+
+// ---- procedure notifications ---------------------------------------------------------------------
+// Core /api/plugin/notifications (for the controller's API key):
+//   NOTICE|<id>|<airports, comma separated>|<published, YYYY-MM-DD>|<read 0/1>|<title>|<link>|<text, \n for new lines>
+// Staff post them in Filament for a group of airports (an FIR, a TMA, the military airports...).
+struct ProcedureNotice { std::string id, published, title, link, text; std::vector<std::string> airports; bool read = false; };
+inline std::vector<ProcedureNotice> ParseNotices(const std::string& body) {
+    std::vector<ProcedureNotice> out;
+    for (const auto& line : SplitChar(body, '\n')) {
+        auto f = SplitChar(line, '|');
+        if (f.size() < 8 || Trim(f[0]) != "NOTICE" || Trim(f[1]).empty()) continue;
+        ProcedureNotice n;
+        n.id = Trim(f[1]);
+        for (const auto& a : SplitChar(f[2], ',')) { std::string x = Upper(Trim(a)); if (!x.empty()) n.airports.push_back(x); }
+        n.published = Trim(f[3]);
+        n.read = Trim(f[4]) == "1";
+        n.title = Trim(f[5]);
+        n.link = Trim(f[6]);
+        std::string t;
+        for (size_t i = 7; i < f.size(); i++) t += (i > 7 ? "|" : "") + f[i];
+        for (size_t i = 0; i < t.size(); i++) {
+            if (t[i] == '\\' && i + 1 < t.size() && t[i + 1] == 'n') { n.text += "\r\n"; i++; }
+            else if (t[i] != '\r') n.text += t[i];
+        }
+        out.push_back(n);
+    }
+    return out;
+}
+inline bool NoticeRelevant(const ProcedureNotice& n, const std::vector<std::string>& covered) {
+    for (const auto& a : n.airports) if (std::find(covered.begin(), covered.end(), a) != covered.end()) return true;
+    return false;
+}
+// A value for one segment of a URL path (a notification's ID in /notifications/<id>/read): everything but
+// RFC 3986's unreserved characters is percent-encoded (#49), so "/", "?", "#" or a space can't change the URL
+inline std::string UrlEncode(const std::string& s) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~')
+            out += (char)c;
+        else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+    }
+    return out;
+}
+
+// ---- the KWIQ button (#59) ------------------------------------------------------------------------
+// A size in pixels at 96 DPI, for a screen at dpi (rounded; 0 or less: unscaled)
+inline int ScaleForDpi(int px, int dpi) { return dpi > 0 ? (px * dpi + 48) / 96 : px; }
+
+// The button's place is kept as its offset from the radar area's bottom-right corner (from the button's own
+// bottom-right corner), so it follows the window as it resizes. Positions are in pixels from the radar
+// area's top left; the button is a square of `size` px in a radar area w x h px.
+struct ButtonXY { int x = 0, y = 0; };
+inline int ClampInt(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+// Where its top-left corner goes for an offset, clamped so the whole button stays inside the radar area
+// (at the top left when the area is smaller than the button)
+inline ButtonXY ButtonTopLeft(int w, int h, int size, ButtonXY offset) {
+    int maxX = w - size > 0 ? w - size : 0, maxY = h - size > 0 ? h - size : 0;
+    ButtonXY p;
+    p.x = ClampInt(maxX - offset.x, 0, maxX);
+    p.y = ClampInt(maxY - offset.y, 0, maxY);
+    return p;
+}
+// The offset for a button whose top-left corner is at (x, y), clamped as above
+inline ButtonXY ButtonOffsetFromTopLeft(int w, int h, int size, int x, int y) {
+    int maxX = w - size > 0 ? w - size : 0, maxY = h - size > 0 ? h - size : 0;
+    ButtonXY o;
+    o.x = maxX - ClampInt(x, 0, maxX);
+    o.y = maxY - ClampInt(y, 0, maxY);
+    return o;
+}
+// The offset while it is dragged: centred on the mouse at (px, py), clamped as above
+inline ButtonXY ButtonOffsetAt(int w, int h, int size, int px, int py) {
+    return ButtonOffsetFromTopLeft(w, h, size, px - size / 2, py - size / 2);
+}
+// "x,y" as saved in the profile (kwiq_button_offset, and the older kwiq_button_at): two whole numbers, 0 or more
+inline bool ParseButtonXY(const std::string& s, ButtonXY& out) {
+    size_t comma = s.find(',');
+    if (comma == std::string::npos) return false;
+    auto num = [](const std::string& t, int& v) {
+        if (t.empty() || t.size() > 6) return false;
+        v = 0;
+        for (char c : t) { if (c < '0' || c > '9') return false; v = v * 10 + (c - '0'); }
+        return true;
+    };
+    ButtonXY p;
+    if (!num(s.substr(0, comma), p.x) || !num(s.substr(comma + 1), p.y)) return false;
+    out = p;
+    return true;
+}
+inline std::string FormatButtonXY(ButtonXY p) { return std::to_string(p.x) + "," + std::to_string(p.y); }
+
+// The logo is embedded at a few sizes: the one to draw at `want` px is the smallest that is at least that big
+// (scaled down a little), or the biggest there is. 0 when there are none.
+inline int BestLogoSize(const std::vector<int>& sizes, int want) {
+    int best = 0, biggest = 0;
+    for (int s : sizes) {
+        if (s > biggest) biggest = s;
+        if (s >= want && (best == 0 || s < best)) best = s;
+    }
+    return best ? best : biggest;
+}
+// 32-bit BGRA pixels with straight alpha to premultiplied, as AlphaBlend needs (rounded)
+inline void PremultiplyBgra(unsigned char* px, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        unsigned a = px[i * 4 + 3];
+        for (int c = 0; c < 3; c++) px[i * 4 + c] = (unsigned char)((px[i * 4 + c] * a + 127) / 255);
+    }
 }
 
 } // namespace kwiq

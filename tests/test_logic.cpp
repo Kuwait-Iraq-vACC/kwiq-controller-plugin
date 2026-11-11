@@ -124,6 +124,63 @@ int main() {
           ParseLevelFt("35000") == 35000 && ParseLevelFt("") == 0 && ParseLevelFt("abc") == 0);
     CHECK(FlStr(35000) == "FL350" && FlStr(5000) == "FL050");
 
+    // FIR exit points (UK Controller Plugin): the first listed point the route leaves the airspace at
+    FirExits exits = ParseFirExits("EXIT|tasmi|090|180|0\r\nEXIT|ROTAP|300|060|0\nEXIT|SIDAD|315|045|1\n"
+                                   "EXIT|BAD|400|10|0\nEXIT|ALSO|x|10|0\nnonsense\n");
+    CHECK(exits.size() == 3 && exits["TASMI"].size() == 1 && exits["TASMI"][0].from == 90 && exits["SIDAD"][0].internal &&
+          !exits["ROTAP"][0].internal);
+    CHECK(InExitCone(exits["TASMI"][0], 135) && !InExitCone(exits["TASMI"][0], 200));
+    CHECK(InExitCone(exits["ROTAP"][0], 350) && InExitCone(exits["ROTAP"][0], 30) && !InExitCone(exits["ROTAP"][0], 120));   // wraps north
+    std::vector<RoutePoint> north = { { "OKBK", 0 }, { "SIDAD", 10 }, { "ABC", 5 }, { "ROTAP", 355 }, { "LTBA", -1 } };
+    AircraftExit nx = FindFirExit(exits, north);
+    CHECK(nx.internal == "SIDAD" && nx.external == "ROTAP");
+    std::vector<RoutePoint> inbound = { { "ROTAP", 170 }, { "OKBK", -1 } };   // through ROTAP the wrong way
+    CHECK(FindFirExit(exits, inbound).external.empty());
+    std::vector<RoutePoint> last = { { "OKBK", 90 }, { "TASMI", -1 } };       // no next point: no track, no exit
+    CHECK(FindFirExit(exits, last).external.empty());
+
+    // several cones per point: one per direction, each with its own internal flag
+    FirExits two = ParseFirExits("EXIT|BOUND|000|090|0\nEXIT|BOUND|180|270|1\n"     // NE out of the vACC, SW into ORBB
+                                 "EXIT|NORTH|330|030|0\nEXIT|NORTH|150|210|0\n"     // both ways, one cone wrapping north
+                                 "EXIT|DUP|090|180|0\nEXIT|DUP|090|180|0\nEXIT|dup|090|180|0\n"   // the same cone three times
+                                 "EXIT|DUP|090|180|1\n");                         // same headings, other flag: another cone
+    CHECK(two.size() == 3 && two["BOUND"].size() == 2 && two["NORTH"].size() == 2 && two["DUP"].size() == 2);
+    // two cones on one point: both directions match, a third doesn't
+    std::vector<RoutePoint> ne = { { "BOUND", 45 }, { "X", -1 } }, sw = { { "BOUND", 225 }, { "X", -1 } }, se = { { "BOUND", 135 }, { "X", -1 } };
+    CHECK(FindFirExit(two, ne).external == "BOUND" && FindFirExit(two, ne).internal.empty());   // the external cone
+    CHECK(FindFirExit(two, sw).internal == "BOUND" && FindFirExit(two, sw).external.empty());   // the internal cone
+    CHECK(FindFirExit(two, se).internal.empty() && FindFirExit(two, se).external.empty());
+    // a cone that wraps through north, next to an ordinary one on the same point
+    std::vector<RoutePoint> n350 = { { "NORTH", 350 }, { "X", -1 } }, n10 = { { "NORTH", 10 }, { "X", -1 } },
+                            s180 = { { "NORTH", 180 }, { "X", -1 } }, e90 = { { "NORTH", 90 }, { "X", -1 } };
+    CHECK(FindFirExit(two, n350).external == "NORTH" && FindFirExit(two, n10).external == "NORTH" &&
+          FindFirExit(two, s180).external == "NORTH" && FindFirExit(two, e90).external.empty());
+    // the same point internal in one cone and external in another: a later external exit still counts
+    std::vector<RoutePoint> via = { { "BOUND", 200 }, { "NORTH", 0 }, { "X", -1 } };
+    AircraftExit vx = FindFirExit(two, via);
+    CHECK(vx.internal == "BOUND" && vx.external == "NORTH");
+    // overlapping cones on one point (DUP, external and internal at the same headings): external wins
+    std::vector<RoutePoint> dup = { { "DUP", 135 }, { "X", -1 } };
+    CHECK(FindFirExit(two, dup).external == "DUP" && FindFirExit(two, dup).internal.empty());
+    CHECK(ExitConeFor(two["BOUND"], 135) == nullptr && ExitConeFor(two["BOUND"], 0) != nullptr && !ExitConeFor(two["BOUND"], 0)->internal);
+    CHECK(Domestic("OKBK", "OK,OR") && Domestic("orbi", "OK, OR") && !Domestic("LTBA", "OK,OR"));
+    CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
+    CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "SIDAD", "" }) == "SIDAD" && SrdEnd("LTBA", "OK,OR", {}) == "");
+
+    // FPC for a flight leaving the airspace: checked against ADEP to its FIR exit
+    SrdData srdx = ParseSrd("SRD|OKBK|ROTAP|20000|41000|DCT ABC UL602 ROTAP|\n"
+                            "SRD|OKBK|SIDAD||25000|DCT SIDAD|\n"
+                            "SRD|OKBK|ORBI|||DCT QQQ|\n");
+    CHECK(srdx.toPoint.size() == 2 && srdx.pair.size() == 1);
+    auto toLtba = F("DCT SIDAD ABC UL602 ROTAP DCT LTBA");
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", toLtba, 35000, nx) == FpcResult::Ok);
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", toLtba, 45000, nx) == FpcResult::Max);
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", F("DCT SIDAD XYZ ROTAP"), 35000, nx) == FpcResult::Route);
+    CHECK(CheckFpc(srdx, "OKBK", "LTBA", F("DCT SIDAD"), 20000, AircraftExit{ "SIDAD", "" }) == FpcResult::Ok);   // only the internal exit known
+    CHECK(CheckFpc(srdx, "OKBK", "ORBI", F("QQQ"), 30000, nx) == FpcResult::Ok);                  // a pair row still wins
+    CHECK(ExplainFpc(srdx, "OKBK", "LTBA", "DCT SIDAD ABC UL602 ROTAP", 35000, nx).find("FIR exit ROTAP") != std::string::npos);
+    CHECK(ExplainFpc(srdx, "OKBK", "LTBA", "DCT SIDAD XYZ ROTAP", 35000, nx).find("does not match") != std::string::npos);
+
     // SRD search
     CHECK(SrdSearch(srd, "okbk", "orbi", 0).size() == 2);
     CHECK(SrdSearch(srd, "OKBK", "ORBI", 35000).size() == 1);   // only the 45000-max row
@@ -131,6 +188,13 @@ int main() {
     CHECK(SrdSearch(srd, "", "", 0).size() == 3);
     CHECK(SrdSearch(srd, "ABC", "XYZ", 0).size() == 1);
     CHECK(SrdSearch(srd, "NOPE", "", 0).empty());
+    // SRD search window columns and notes
+    CHECK(SrdMinText(srd.rows[0]) == "100" && SrdMaxText(srd.rows[0]) == "300");
+    CHECK(SrdMinText(srd.rows[1]) == "MC" && SrdMaxText(srd.rows[2]) == "-");
+    CHECK(SrdNotesText(srd.rows[0]) == "Jets only" && SrdNotesText(srd.rows[1]) == "No notes.");
+    SrdRoute fra; fra.rte = "ABC <FRA> XYZ";
+    CHECK(HasFreeRoute(fra.rte) && !HasFreeRoute(srd.rows[0].rte));
+    CHECK(SrdNotesText(fra).find("Free Route Airspace") != std::string::npos);
 
     // sector indicators, only for the ESE position IDs Core lists, shown as their alias
     SectorMap sm = ParseSectors("SECTOR|bs|sr\nSECTOR|BN|NR\nSECTOR|BGA|BGD\nSECTOR|BX|\nSECTOR|BL|ABCDE\nbad\n");
@@ -308,6 +372,207 @@ int main() {
         CHECK(AssignForm(gnd, "OKBK_TWR") == "origin=OKBK&destination=OMDB&rules=I&requester=OKBK_TWR");
         Aircraft v = gnd; v.vfr = true;
         CHECK(AssignForm(v, "ORBI_N_APP") == "origin=OKBK&destination=OMDB&rules=V&requester=ORBI_N_APP");
+    }
+
+    // api-settings.json, as UKCP keeps its key
+    const std::string K = "kwiq_295d6ebdAbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    CHECK(ApiKeyFromSettingsJson(ApiSettingsJson(K)) == K);
+    CHECK(ApiKeyFromSettingsJson("{\"api-url\":\"https://x\",\"api-key\" : \" " + K + " \"}") == K);
+    CHECK(ApiKeyFromSettingsJson("{\"api-key\": \"not a key\"}") == "");
+    CHECK(ApiKeyFromSettingsJson("{}") == "" && ApiKeyFromSettingsJson("") == "" && ApiKeyFromSettingsJson("{\"api-key\": \"kwiq_") == "");
+    CHECK(ApiKeyFromSettingsJson("{\r\n    \"api-key\": \"" + K + "\"\r\n}\r\n") == K);           // CRLF, as Notepad saves it
+
+    // starting the plugin
+    CHECK(DecideStart(true, false, true, false) == StartMode::Full);
+    CHECK(DecideStart(true, false, true, true) == StartMode::Reduced);
+    CHECK(DecideStart(true, true, true, false) == StartMode::DontLoad);
+    CHECK(DecideStart(false, true, true, false) == StartMode::Full);       // Core unreachable: the switch is unknown
+    CHECK(DecideStart(false, false, false, false) == StartMode::DontLoad);
+
+    // RDF settings from Core, by callsign pattern
+    CHECK(WildcardMatch("ORBB_*_CTR", "orbb_s_ctr") && WildcardMatch("*", "") && WildcardMatch("OK??_TWR", "OKBK_TWR"));
+    CHECK(!WildcardMatch("ORBB_*_CTR", "ORBB_S_APP") && !WildcardMatch("OK??_TWR", "OKBK_A_TWR") && WildcardMatch("*CTR", "ORBB_CTR"));
+    auto rdf = ParseRdf("RDF|ORBB_*_CTR|draw=1|colour=#00FF00|radius=30|require_tx=on\nRDF|*|bridge=0|radius=-5\nJUNK\nRDF||draw=1\n");
+    CHECK(rdf.size() == 2);
+    RdfSettings c = RdfFor(rdf, "ORBB_S_CTR");
+    CHECK(c.draw && c.bridge && c.requireTx && c.radius == 30 && c.colour == 0x00FF00 && c.colourConcurrent == 0x0000FF);
+    RdfSettings o = RdfFor(rdf, "OKBK_TWR");
+    CHECK(!o.draw && !o.bridge && o.radius == 20);                      // a bad radius keeps the default
+    RdfSettings none = RdfFor({}, "OKBK_TWR");
+    CHECK(!none.draw && none.bridge && none.threshold == -1);
+
+    // TrackAudio 1.3.0 Beta 5 or later
+    CHECK(TrackAudioVersionOk("TrackAudio v1.3.0-beta.5") && TrackAudioVersionOk("1.3.0") && TrackAudioVersionOk("v1.4.0-beta.1"));
+    CHECK(TrackAudioVersionOk("1.3.0-rc.1") && !TrackAudioVersionOk("1.3.0-beta.4") && !TrackAudioVersionOk("1.2.9") && !TrackAudioVersionOk("TrackAudio"));
+    // RDF edge cases (#52)
+    CHECK(ParseRdf("").empty() && ParseRdf("RDF\r\nRDF| \r\n").empty());
+    auto rcr = ParseRdf("RDF|okbk_twr|draw=1|radius=x|threshold=-5|colour=#00ff00|nokey\r\n");
+    CHECK(rcr.size() == 1 && rcr[0].pattern == "OKBK_TWR" && rcr[0].s.draw && rcr[0].s.radius == 20 && rcr[0].s.threshold == -5 && rcr[0].s.colour == 0x00FF00);
+    CHECK(WildcardMatch("", "") && !WildcardMatch("", "A") && WildcardMatch("**", "abc") && WildcardMatch("a*c", "abbbc") && !WildcardMatch("a*c", "abcd"));
+    CHECK(!ParseSemVer("").valid && !ParseSemVer("1.2").valid && ParseSemVer("v1.3.0-beta.5").pre == 1 && ParseSemVer("v1.3.0-beta.5").preNum == 5);
+
+    // the KWIQ menu's TrackAudio row
+    CHECK(TrackAudioStatus(false, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Off);       // RDF didn't start
+    CHECK(TrackAudioStatus(true, false, true, "TrackAudio v1.3.0", true) == TrackAudioState::Off);        // Core: bridge and drawing off
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Connected);
+    CHECK(TrackAudioStatus(true, true, true, "", false) == TrackAudioState::Connected);                    // no version (yet)
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio", false) == TrackAudioState::Connected);          // unreadable version
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.3.0-beta.4", false) == TrackAudioState::TooOld);
+    CHECK(TrackAudioStatus(true, true, false, "TrackAudio v1.3.0-beta.4", false) == TrackAudioState::NotRunning);
+    CHECK(TrackAudioStatus(true, true, false, "", true) == TrackAudioState::AfvClient);
+    CHECK(std::string(TrackAudioStateText(TrackAudioState::Connected)) == "Connected" &&
+          std::string(TrackAudioStateText(TrackAudioState::TooOld)) == "Version too old" &&
+          std::string(TrackAudioStateText(TrackAudioState::AfvClient)) == "AFV client" &&
+          std::string(TrackAudioStateText(TrackAudioState::NotRunning)) == "Not running" &&
+          std::string(TrackAudioStateText(TrackAudioState::Off)) == "Off");
+    CHECK(TrackAudioClickAction(TrackAudioState::Connected) == TrackAudioClick::Resync &&
+          TrackAudioClickAction(TrackAudioState::TooOld) == TrackAudioClick::Resync &&
+          TrackAudioClickAction(TrackAudioState::NotRunning) == TrackAudioClick::Reconnect &&
+          TrackAudioClickAction(TrackAudioState::AfvClient) == TrackAudioClick::Reconnect &&
+          TrackAudioClickAction(TrackAudioState::Off) == TrackAudioClick::None);
+
+    // DiscordEuroScope rules from Core
+    DiscordConfig dc = ParseDiscord(
+        "APP|1529517649506074776\r\nSWEATBOX_BYPASS|0\n"
+        "MESSAGE|controller||||Controlling {rcallsign} on {frequency}MHz|Tracking {current_tracked} aircraft\n"
+        "MESSAGE|controller||ORBB_*_CTR|1|Controlling {rcallsign} for {event} on {frequency} MHz|\n"
+        "MESSAGE|controller||||Controlling {callsign}|\n"
+        "MESSAGE|idle||||Preparing the scopes!\n"
+        "IMAGE|||||https://cdn.kuwait-iraqvacc.net/discord.png|{callsign}||\n"
+        "BUTTON|||||Website|https://kuwait-iraqvacc.net\nBUTTON|||||Broken|\n"
+        "RADIO|ORBB|124.400|Baghdad Control\n");
+    CHECK(dc.appId == "1529517649506074776" && !dc.sweatboxBypass && dc.messages.size() == 4 && dc.images.size() == 1 && dc.buttons.size() == 1);
+    CHECK(DiscordRadioCallsign(dc, "ORBB_S_CTR", "124.400") == "Baghdad Control" && DiscordRadioCallsign(dc, "OKAC_CTR", "124.400") == "");
+    DiscordContext dx; dx.state = "controller"; dx.fir = "ORBB"; dx.callsign = "ORBB_S_CTR"; dx.event = true;
+    std::map<std::string, std::string> dv = { {"callsign","ORBB_S_CTR"}, {"rcallsign","Baghdad Control"}, {"frequency","124.400"},
+                                              {"current_tracked","3"}, {"total_tracked","5"}, {"total_inrange","40"}, {"event","Tuesdays Over Iraq"} };
+    CHECK(DiscordPick(dc.messages, dx, dv, 7) == 1);                     // the event message is the most specific
+    std::string dout;
+    CHECK(DiscordFormat(dc.messages[1].v[0], dv, dout) && dout == "Controlling Baghdad Control for Tuesdays Over Iraq on 124.400 MHz");
+    dx.event = false; dv["event"] = "";
+    CHECK(DiscordPick(dc.messages, dx, dv, 0) == 0 || DiscordPick(dc.messages, dx, dv, 0) == 2);
+    dv["rcallsign"] = "";                                                 // unknown radio callsign: the {callsign} one
+    CHECK(DiscordPick(dc.messages, dx, dv, 0) == 2 && DiscordPick(dc.messages, dx, dv, 1) == 2);
+    dx.state = "idle";
+    CHECK(DiscordPick(dc.messages, dx, dv, 3) == 3 && DiscordPick(dc.images, dx, dv, 0) == 0);
+    dx.state = "playback";
+    CHECK(DiscordPick(dc.messages, dx, dv, 0) == -1);
+    CHECK(DiscordFormat("{unknown} {callsign}", dv, dout) && dout == "{unknown} ORBB_S_CTR");
+    // Discord's byte limits, never cutting a UTF-8 character in half (#50)
+    CHECK(Utf8Truncate("abc", 5) == "abc" && Utf8Truncate("abcdef", 3) == "abc" && Utf8Truncate("", 0).empty() && Utf8Truncate("abc", 0).empty());
+    CHECK(Utf8Truncate("a\xC3\xA9", 2) == "a" && Utf8Truncate("a\xC3\xA9", 3) == "a\xC3\xA9");                 // e acute: 2 bytes
+    CHECK(Utf8Truncate("\xF0\x9F\x9B\xAB!", 3).empty() && Utf8Truncate("\xF0\x9F\x9B\xAB!", 4) == "\xF0\x9F\x9B\xAB");   // an emoji: 4
+    CHECK(Utf8Truncate("ab\xD8\xA8\xD8\xBA", 5) == "ab\xD8\xA8");                                              // Arabic: 2 a letter
+    // DiscordEuroScope edge cases (#52)
+    {
+        DiscordConfig de = ParseDiscord("");
+        CHECK(de.appId.empty() && de.messages.empty() && de.images.empty() && de.buttons.empty() && !de.sweatboxBypass);
+        de = ParseDiscord("APP\r\nMESSAGE|controller|||\r\nIMAGE|||||k\r\nBUTTON|||||L\r\nRADIO|OR|1\r\nSWEATBOX_BYPASS|1\r\n");
+        CHECK(de.appId.empty() && de.messages.empty() && de.images.size() == 1 && de.images[0].v.size() == 4 && de.images[0].v[0] == "k");
+        CHECK(de.buttons.empty() && de.radios.empty() && de.sweatboxBypass);          // a button needs a label and a URL
+        std::map<std::string, std::string> none;
+        none["event"] = "";
+        CHECK(DiscordFormat("{", none, dout) && dout == "{" && !DiscordFormat("on {event}", none, dout) && dout == "on ");
+        CHECK(DiscordMatch(DiscordFilter(), DiscordContext()) == 0 && DiscordPick(std::vector<DiscordEntry>(), dx, dv, 0) == -1);
+        CHECK(DiscordRadioCallsign(dc, "", "").empty() && DiscordRadioCallsign(dc, "ORBB", "124.400") == "Baghdad Control");
+    }
+
+    // QNH monitor
+    CHECK(QnhFromMetar("OKBK 101250Z 32012KT CAVOK 24/M02 Q1012 NOSIG") == 1012);
+    CHECK(QnhFromMetar("ORBI 101250Z 29010KT 9999 FEW040 18/03 Q0979=") == 979);
+    CHECK(QnhFromMetar("KJFK 101251Z 31015KT 10SM FEW250 08/M06 A2992 RMK AO2 SLP132") == 1013);
+    CHECK(QnhFromMetar("OKBK 101250Z 32012KT CAVOK 24/M02 RMK Q1012") == -1 && QnhFromMetar("") == -1);
+    auto metars = ParseMetars("METAR|okbk|OKBK 101250Z Q1012\nMETAR|XX|bad\nJUNK\n");
+    CHECK(metars.size() == 1 && metars["OKBK"] == "OKBK 101250Z Q1012");
+    auto trl = ParseTrl("TRL|OR|14000|160,980,170\nTRL|OK|13000|150\nTRL|ORMM|14000|170,1000,180\nTRL|OX|1|1,2\n");
+    CHECK(trl.size() == 3);
+    CHECK(TrlFor(trl, "ORBI", 981) == 160 && TrlFor(trl, "ORBI", 980) == 160 && TrlFor(trl, "ORBI", 979) == 170);
+    CHECK(TrlFor(trl, "OKBK", 960) == 150 && TrlFor(trl, "ORMM", 1000) == 170 && TrlFor(trl, "ORMM", 999) == 180);
+    CHECK(TrlFor(trl, "OEJN", 1013) == 0 && TrlFor(trl, "ORBI", -1) == 0);
+    CHECK(QnhMessage("ORBI", 979, 981, 170, 160) == "ORBI QNH 979 (was 981) TRL FL170 - CHANGED from FL160");
+    CHECK(QnhMessage("ORBI", 1004, 1006, 160, 160) == "ORBI QNH 1004 (was 1006) TRL FL160");
+    CHECK(QnhMessage("OEJN", 1013, 0, 0, 0) == "OEJN QNH 1013");
+
+    // top-down
+    auto td = ParseTopDownOrders("TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR\nTOPDOWN|ORBI|ORBI_TWR,ORBI_APP,ORBB_S_CTR\n");
+    CHECK(CoveredByMe(td, "OKBK", "OKAC_CTR", {}) && !CoveredByMe(td, "OKBK", "OKAC_CTR", { "OKBK_N_TWR" }));
+    CHECK(CoveredByMe(td, "OKBK", "OKBK_1_TWR", { "OKAC_CTR" }) && !CoveredByMe(td, "ORBI", "OKAC_CTR", {}));
+    CHECK(CoveredByMe(td, "ORMM", "ORMM_TWR", {}) && !CoveredByMe(td, "ORMM", "ORBB_S_CTR", {}));     // no order: own positions
+    auto cov = AirportsCovered(td, "ORBB_S_CTR", { "ORBI_APP" });
+    CHECK(cov.empty());
+    cov = AirportsCovered(td, "ORBB_S_CTR", {});
+    CHECK(cov.size() == 1 && cov[0] == "ORBI");
+
+    // procedure notifications
+    auto notices = ParseNotices("NOTICE|12|OKBK, okkk|2026-11-01|0|Standard taxi routes|https://docs.kuwait-iraqvacc.net/x|Line 1\\nLine | 2\nNOTICE||OKBK|x|0|t|l|b\n");
+    CHECK(notices.size() == 1 && notices[0].id == "12" && notices[0].airports.size() == 2 && notices[0].airports[1] == "OKKK");
+    CHECK(!notices[0].read && notices[0].text == "Line 1\r\nLine | 2" && notices[0].link == "https://docs.kuwait-iraqvacc.net/x");
+    CHECK(NoticeRelevant(notices[0], { "OKBK" }) && !NoticeRelevant(notices[0], { "ORBI" }));
+    // notification IDs in Core's URL (#49)
+    CHECK(UrlEncode("12") == "12" && UrlEncode("a-b_c.d~e") == "a-b_c.d~e" && UrlEncode("").empty());
+    CHECK(UrlEncode("1/../x?y#z") == "1%2F..%2Fx%3Fy%23z" && UrlEncode("a b") == "a%20b" && UrlEncode("\xC3\xA9") == "%C3%A9");
+
+    // QNH monitor, top-down and notifications: empty, CRLF, short and malformed lines (#52)
+    CHECK(QnhFromMetar("OKBK Q101") == -1 && QnhFromMetar("OKBK QABCD A29.9") == -1 && QnhFromMetar("METAR OKBK Q1012\r\n") == 1012);
+    CHECK(ParseMetars("").empty() && ParseMetars("METAR|OKBK\r\nMETAR||x\r\n").empty() && ParseMetars("METAR|OKBK|OKBK Q1012\r\n").at("OKBK") == "OKBK Q1012");
+    CHECK(ParseTrl("").empty() && ParseTrl("TRL|OR|14000\r\nTRL||1|150\r\nTRL|OR|x|150,980\r\n").empty());
+    auto trl2 = ParseTrl("TRL|or|14000|160, 980 ,170\r\n");
+    CHECK(trl2.size() == 1 && trl2[0].prefix == "OR" && trl2[0].ta == 14000 && TrlFor(trl2, "orbi", 980) == 160 && TrlFor({}, "ORBI", 1013) == 0);
+    CHECK(QnhMessage("OKBK", 1012, 1012, 0, 150) == "OKBK QNH 1012");
+    CHECK(ParseTopDownOrders("").empty() && ParseTopDownOrders("TOPDOWN|OKBK\r\nTOPDOWN|OKB|OKB_TWR\r\nTOPDOWN|OKBK|TWR, \r\n").empty());
+    auto td2 = ParseTopDownOrders("TOPDOWN|okbk| okbk_twr ,OKAC_CTR\r\n");
+    CHECK(td2.size() == 1 && td2["OKBK"].size() == 2 && td2["OKBK"][0] == "OKBK_TWR");
+    CHECK(!TopDownPositionMatches("OKBK_TWR", "OKBK") && !TopDownPositionMatches("OKBK", "OKBK_TWR") && TopDownPositionMatches("okbk_twr", "OKBK_X_TWR"));
+    CHECK(!CoveredByMe(td2, "OKBK", "", {}) && !CoveredByMe(td2, "", "OKBK_TWR", {}) && AirportsCovered(td2, "", {}).empty());
+    CHECK(ParseNotices("").empty() && ParseNotices("NOTICE|1|OKBK|2026-11-01|0|t|l\r\n").empty());
+    auto n2 = ParseNotices("NOTICE| 7 |OKBK,,|2026-11-01|1|Title|https://x.net|end\\n\r\n");
+    CHECK(n2.size() == 1 && n2[0].id == "7" && n2[0].airports.size() == 1 && n2[0].read && n2[0].text == "end\r\n" && !NoticeRelevant(n2[0], {}));
+
+    // the KWIQ button (#59): 28 px at 100%, 35 at 125%, 42 at 150%, 49 at 175%, 56 at 200%
+    CHECK(ScaleForDpi(28, 96) == 28 && ScaleForDpi(28, 120) == 35 && ScaleForDpi(28, 144) == 42 && ScaleForDpi(28, 168) == 49 &&
+          ScaleForDpi(28, 192) == 56);
+    CHECK(ScaleForDpi(8, 120) == 10 && ScaleForDpi(28, 0) == 28 && ScaleForDpi(28, -5) == 28);
+    {
+        // its place: an offset from the bottom-right corner, so it follows the window
+        ButtonXY off; off.x = 8; off.y = 8;
+        ButtonXY tl = ButtonTopLeft(800, 600, 28, off);
+        CHECK(tl.x == 764 && tl.y == 564);
+        tl = ButtonTopLeft(1000, 700, 28, off);                         // the window grew: still 8 px from the corner
+        CHECK(tl.x == 964 && tl.y == 664);
+        off.x = 5000; off.y = -40;                                     // clamped fully on screen
+        tl = ButtonTopLeft(800, 600, 28, off);
+        CHECK(tl.x == 0 && tl.y == 572);
+        tl = ButtonTopLeft(20, 10, 28, off);                           // a radar area smaller than the button
+        CHECK(tl.x == 0 && tl.y == 0);
+        // dragging: centred on the mouse, clamped, and back again
+        ButtonXY d = ButtonOffsetAt(800, 600, 28, 400, 300);
+        CHECK(d.x == 386 && d.y == 286);
+        tl = ButtonTopLeft(800, 600, 28, d);
+        CHECK(tl.x == 386 && tl.y == 286);
+        d = ButtonOffsetAt(800, 600, 28, -50, 9999);
+        CHECK(d.x == 772 && d.y == 0);
+        d = ButtonOffsetAt(800, 600, 28, 9999, -50);
+        CHECK(d.x == 0 && d.y == 572);
+        // the older kwiq_button_at (top left from the radar's top left) keeps its place
+        d = ButtonOffsetFromTopLeft(800, 600, 28, 378, 10);
+        tl = ButtonTopLeft(800, 600, 28, d);
+        CHECK(d.x == 394 && d.y == 562 && tl.x == 378 && tl.y == 10);
+        // the profile's "x,y"
+        ButtonXY p;
+        CHECK(ParseButtonXY("12,34", p) && p.x == 12 && p.y == 34 && FormatButtonXY(p) == "12,34");
+        CHECK(ParseButtonXY("0,0", p) && p.x == 0 && p.y == 0);
+        p.x = 7; p.y = 7;
+        CHECK(!ParseButtonXY("", p) && !ParseButtonXY("12", p) && !ParseButtonXY("-1,5", p) && !ParseButtonXY("1,2,3", p) &&
+              !ParseButtonXY(" 1,2", p) && !ParseButtonXY("1,", p) && !ParseButtonXY("9999999,1", p) && p.x == 7 && p.y == 7);
+        // which embedded logo to draw
+        std::vector<int> sizes = { 28, 35, 42, 49, 56 };
+        CHECK(BestLogoSize(sizes, 28) == 28 && BestLogoSize(sizes, 31) == 35 && BestLogoSize(sizes, 56) == 56);
+        CHECK(BestLogoSize(sizes, 80) == 56 && BestLogoSize(sizes, 10) == 28 && BestLogoSize(std::vector<int>(), 28) == 0);
+        // premultiplied alpha
+        unsigned char px[12] = { 200, 100, 50, 255,  200, 100, 50, 0,  200, 100, 50, 128 };
+        PremultiplyBgra(px, 3);
+        CHECK(px[0] == 200 && px[1] == 100 && px[2] == 50 && px[3] == 255 && px[4] == 0 && px[5] == 0 && px[6] == 0 && px[7] == 0);
+        CHECK(px[8] == 100 && px[9] == 50 && px[10] == 25 && px[11] == 128);
     }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
