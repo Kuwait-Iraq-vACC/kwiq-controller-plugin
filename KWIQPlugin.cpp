@@ -5,6 +5,7 @@
 //   * Event Flag (EV) / Event Slot from VATCAN bookings (see VatsimAPI.cpp)
 //   * FPC against the SRD, "Explain FPC result", "Open SRD search window"
 //   * RDF (Radio Direction Finder, GPL-3.0, Kingfu Chan) and its TrackAudio bridge are built in (rdf.cpp)
+//   * DiscordEuroScope (Discord Rich Presence, GPL-3.0, Kirollos Nashaat) is built in (discord.cpp)
 //
 // All route data comes from Core (Laravel). License: GPL-3.0-or-later, see LICENSE and NOTICE.md.
 
@@ -23,6 +24,7 @@
 #include "VatsimAPI.h"
 #include "keylink.hpp"
 #include "rdf.hpp"                // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
+#include "discord.hpp"            // DiscordEuroScope (Kirollos/DiscordEuroScope), built in
 #define KWIQ_NO_WINHTTP
 #include "kwiq_win.hpp"           // api-settings.json and the folders the loader uses
 
@@ -41,6 +43,7 @@ static const char* CORE_SRD_URL         = CORE_BASE "/srd";
 static const char* CORE_SRD_VERSION_URL = CORE_BASE "/srd/version";
 static const char* CORE_SECTORS_URL     = CORE_BASE "/sectors";
 static const char* CORE_RDF_URL         = CORE_BASE "/rdf";
+static const char* CORE_DISCORD_URL     = CORE_BASE "/discord";
 // myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
 static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
 // EuroScope setup guide, opened from the incorrect EuroScope version popup until Core sends euroscope.setup_url
@@ -72,7 +75,8 @@ enum {
     KWIQ_MENU_STATUS       = 2110,
     KWIQ_MENU_HIDE         = 2111,
     KWIQ_MENU_BRIDGE       = 2112,   // TrackAudio's connection (a status row: a click resyncs or reconnects)
-    KWIQ_MENU_LAST         = 2112
+    KWIQ_MENU_DISCORD      = 2113,   // DiscordEuroScope on or off
+    KWIQ_MENU_LAST         = 2113
 };
 
 // ---------------------------------------------------------------------------
@@ -675,6 +679,9 @@ public:
             if (bp && sscanf_s(bp, "%d,%d", &bx, &by) == 2 && bx >= 0 && by >= 0) { buttonX_ = bx; buttonY_ = by; }
             const char* rd = GetDataFromSettings("kwiq_rdf_draw");      // the controller's own RDF switch
             if (rd && (*rd == '0' || *rd == '1')) rdf_.SetLocalDraw(*rd - '0');
+            // DiscordEuroScope on or off for this controller; the Configurator writes the same setting
+            const char* ds = GetDataFromSettings("DiscordEuroScope");
+            if (ds && *ds == '0') discord_.SetLocal(false);
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
         TickConnection(now);
@@ -684,6 +691,11 @@ public:
             EuroScopePlugIn::CController me = ControllerMyself();
             std::string cs = connected_ && me.IsValid() && me.GetCallsign() ? me.GetCallsign() : "";
             rdf_.Tick(now, cs, connected_, [this](const std::string& m, bool err) { Msg(m, err); });
+        }
+        {
+            std::string eventName;
+            { std::lock_guard<std::mutex> g(mu_); if (ev_.active && !kwiq::RoutesForDate(ev_, TodayCached()).empty()) eventName = ev_.name; }
+            discord_.Tick(now, eventName);
         }
         CDataHandler::refreshInterval = slotsEvery_;
         std::string code;
@@ -866,6 +878,10 @@ public:
             else Msg(c == ".RDF RELOAD" ? "RDF: reconnecting to TrackAudio." : "RDF: channels synced again with TrackAudio.", false);
             return true;
         }
+        if (c == ".KWIQ DISCORD") {
+            SetDiscord(!discord_.Local());
+            return true;
+        }
         if (c == ".KWIQ AUTOREFRESH") {
             autoRefresh_ = !autoRefresh_;
             Msg(std::string("Slot auto refresh: ") + (autoRefresh_ ? "on" : "off"), false);
@@ -877,6 +893,7 @@ public:
                 " | EuroScope " + (esVersion_.empty() ? std::string("?") : esVersion_) +
                 " | API key " + (apiKey_.empty() ? std::string("not set") : std::string("connected")) + WineNote() +
                 " | RDF " + (rdf_.DrawOn() ? "on" : "off") + ", TrackAudio " + kwiq::TrackAudioStateText(rdf_.TrackAudio()) +
+                " | DiscordEuroScope " + (discord_.Active() ? "on" : discord_.Local() ? "off (Core)" : "off") +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
@@ -909,6 +926,13 @@ public:
     bool Duplicate() const { return duplicate_; }
     // RDF on the radar screen (REFRESH_PHASE_AFTER_TAGS)
     void DrawRdf(EuroScopePlugIn::CRadarScreen* screen, HDC hDC) { if (!duplicate_ && !reduced_) rdf_.Draw(screen, hDC); }
+    // DiscordEuroScope on or off for this controller, kept as the DiscordEuroScope setting (the Configurator
+    // writes it too). Core can still turn it off for everyone.
+    void SetDiscord(bool on) {
+        discord_.SetLocal(on);
+        SaveDataToSettings("DiscordEuroScope", "DiscordEuroScope (Discord Rich Presence) on or off", on ? "1" : "0");
+        Msg(std::string("DiscordEuroScope: ") + (on ? "on" : "off"), false);
+    }
     // The controller's own RDF switch: 1 on, 0 off, -1 as Core says. Kept in the profile.
     void SetRdfDraw(int v) {
         rdf_.SetLocalDraw(v);
@@ -960,6 +984,7 @@ public:
         AddPopupListElement(line("Sector Indicators", sectorDraw_ ? "On" : "Off").c_str(), "", KWIQ_MENU_SECTORS);
         AddPopupListElement(line("RDF Drawing", rdf_.DrawOn() ? "On" : "Off").c_str(), "", KWIQ_MENU_RDF);
         AddPopupListElement(line("TrackAudio", kwiq::TrackAudioStateText(rdf_.TrackAudio())).c_str(), "", KWIQ_MENU_BRIDGE);
+        AddPopupListElement(line("DiscordEuroScope", discord_.Local() ? "On" : "Off").c_str(), "", KWIQ_MENU_DISCORD);
         AddPopupListElement(line("Slot Auto Refresh", autoRefresh_ ? "On" : "Off").c_str(), "", KWIQ_MENU_AUTOREFRESH);
         AddPopupListElement("Event Routes", "", KWIQ_MENU_EVENT_ROUTES);
         AddPopupListElement("SRD Search", "", KWIQ_MENU_SRD);
@@ -982,6 +1007,7 @@ public:
         case KWIQ_MENU_SECTORS:      OnCompileCommand(".kwiq sector"); return;
         case KWIQ_MENU_RDF:          SetRdfDraw(rdf_.DrawOn() ? 0 : 1); return;
         case KWIQ_MENU_BRIDGE:       TrackAudioClicked(); return;
+        case KWIQ_MENU_DISCORD:      SetDiscord(!discord_.Local()); return;
         case KWIQ_MENU_AUTOREFRESH:  OnCompileCommand(".kwiq autorefresh"); return;
         case KWIQ_MENU_EVENT_ROUTES: OpenRoutesWindow(pt); return;
         case KWIQ_MENU_SRD:          OpenSrdWindow(pt); return;
@@ -1359,6 +1385,7 @@ private:
             esConfigured_ = true;
         }
         rdf_.SetEndpoint(c.Get("rdf.endpoint", "127.0.0.1:49080"));
+        discordCoreOn_ = c.GetBool("discord.enabled", true);
         CheckSectorFile(false);
     }
 
@@ -1468,6 +1495,11 @@ private:
                     std::lock_guard<std::mutex> g(mu_);
                     ev_ = std::move(ev); evGen_++;
                 } else if (!reduced_) fail("Core", err);
+                if (!reduced_) {                       // DiscordEuroScope's messages, images and buttons
+                    if (kwiq_net::HttpGet(CORE_DISCORD_URL, body, err)) { ClearError("Discord"); discord_.Configure(body, discordCoreOn_); }
+                    else if (err == "HTTP 404") discord_.Configure("", discordCoreOn_);
+                    else fail("Discord", err);
+                }
             }
 
             if (doSrd) {                               // cheap version check, full download only on change
@@ -1515,6 +1547,8 @@ private:
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     KwiqRdf rdf_{ this };                                           // RDF and the TrackAudio bridge
+    KwiqDiscord discord_{ this };                                   // DiscordEuroScope
+    std::atomic<bool> discordCoreOn_{ true };                       // discord.enabled in Core's config
     std::string keyPromptedFor_, keyToldFor_;                      // main thread only: the key problem last offered / told about
     bool justConnected_ = false;                                    // main thread only: logged on since the last key check
     std::string esVersion_;                                         // the running EuroScope's, read once at start

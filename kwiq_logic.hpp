@@ -13,6 +13,9 @@
 #include <cstdlib>
 #include <ctime>
 #include <tuple>
+#include <array>
+#include <map>
+#include <functional>
 
 namespace kwiq {
 
@@ -728,6 +731,117 @@ inline TrackAudioClick TrackAudioClickAction(TrackAudioState s) {
     case TrackAudioState::NotRunning: return TrackAudioClick::Reconnect;
     default:                          return TrackAudioClick::None;
     }
+}
+
+// ---- DiscordEuroScope (Discord Rich Presence, built in from Kirollos/DiscordEuroScope) ----------------
+// Core /api/plugin/discord (plain text). Every MESSAGE, IMAGE and BUTTON line has four filters, empty = any:
+// state (idle, playback, sweatbox, observer, controller, supervisor), FIR (OKAC, ORBB), logon callsign
+// pattern (* and ?) and event (1 = only while a Core event is on, 0 = only when none is).
+//   APP|<Discord application ID>
+//   SWEATBOX_BYPASS|1                 (sweatbox shows as a normal logon)
+//   MESSAGE|<state>|<fir>|<pattern>|<event>|<details>|<state text>
+//   IMAGE|<state>|<fir>|<pattern>|<event>|<large image URL or key>|<large text>|<small image URL or key>|<small text>
+//   BUTTON|<state>|<fir>|<pattern>|<event>|<label>|<url>          (at most two are shown, in Core's order)
+//   RADIO|<ICAO prefix>|<frequency>|<radio callsign>              e.g. RADIO|ORBB|124.400|Baghdad Control
+// At logon (and whenever the state changes) the plugin takes the matching entries with the most filters set
+// and picks one at random, skipping a message whose placeholders have no value. Texts may use {callsign},
+// {rcallsign}, {frequency}, {current_tracked}, {total_tracked}, {total_inrange} and {event}.
+struct DiscordFilter { std::string state, fir, pattern; int event = -1; };
+struct DiscordEntry { DiscordFilter f; std::vector<std::string> v; };
+struct DiscordConfig {
+    std::string appId;
+    bool sweatboxBypass = false;
+    std::vector<DiscordEntry> messages, images, buttons;
+    std::vector<std::array<std::string, 3>> radios;          // ICAO prefix, frequency, radio callsign
+};
+struct DiscordContext { std::string state, fir, callsign; bool event = false; };
+
+inline DiscordConfig ParseDiscord(const std::string& body) {
+    DiscordConfig c;
+    for (const auto& raw : SplitChar(body, '\n')) {
+        std::string line = raw;
+        while (!line.empty() && (line.back() == '\r')) line.pop_back();
+        auto f = SplitChar(line, '|');
+        std::string kind = Upper(Trim(f[0]));
+        if (kind == "APP" && f.size() >= 2) c.appId = Trim(f[1]);
+        else if (kind == "SWEATBOX_BYPASS" && f.size() >= 2) c.sweatboxBypass = Trim(f[1]) == "1";
+        else if (kind == "RADIO" && f.size() >= 4) c.radios.push_back({ Upper(Trim(f[1])), Trim(f[2]), Trim(f[3]) });
+        else if ((kind == "MESSAGE" || kind == "IMAGE" || kind == "BUTTON") && f.size() >= 6) {
+            DiscordEntry e;
+            e.f.state = Lower(Trim(f[1])); e.f.fir = Upper(Trim(f[2])); e.f.pattern = Upper(Trim(f[3]));
+            std::string ev = Trim(f[4]);
+            e.f.event = ev == "1" ? 1 : ev == "0" ? 0 : -1;
+            for (size_t i = 5; i < f.size(); i++) e.v.push_back(f[i]);
+            size_t want = kind == "MESSAGE" ? 2 : kind == "IMAGE" ? 4 : 2;
+            e.v.resize(want);
+            if (kind == "MESSAGE") c.messages.push_back(e);
+            else if (kind == "IMAGE") c.images.push_back(e);
+            else if (!Trim(e.v[0]).empty() && !Trim(e.v[1]).empty()) c.buttons.push_back(e);
+        }
+    }
+    return c;
+}
+// -1 if the entry does not apply, else how many of its filters are set
+inline int DiscordMatch(const DiscordFilter& f, const DiscordContext& x) {
+    if (!f.state.empty() && f.state != x.state) return -1;
+    if (!f.fir.empty() && f.fir != Upper(x.fir)) return -1;
+    if (!f.pattern.empty() && !WildcardMatch(f.pattern, x.callsign)) return -1;
+    if (f.event >= 0 && (f.event == 1) != x.event) return -1;
+    return (int)!f.state.empty() + (int)!f.fir.empty() + (int)!f.pattern.empty() + (int)(f.event >= 0);
+}
+// {name} placeholders. A placeholder with no value (missing or empty) makes the text unusable.
+inline bool DiscordFormat(const std::string& text, const std::map<std::string, std::string>& values, std::string& out) {
+    out.clear();
+    bool ok = true;
+    for (size_t i = 0; i < text.size(); i++) {
+        size_t close = text[i] == '{' ? text.find('}', i) : std::string::npos;
+        if (close == std::string::npos) { out += text[i]; continue; }
+        auto it = values.find(text.substr(i + 1, close - i - 1));
+        if (it == values.end()) { out += text.substr(i, close - i + 1); i = close; continue; }   // not a placeholder
+        if (it->second.empty()) ok = false;
+        out += it->second;
+        i = close;
+    }
+    return ok;
+}
+// The entry to use: among the matching entries with the most filters set, one picked by `roll` (random),
+// preferring those whose texts all have values. -1 if none matches.
+inline int DiscordPick(const std::vector<DiscordEntry>& entries, const DiscordContext& x,
+                       const std::map<std::string, std::string>& values, unsigned roll) {
+    std::map<int, std::vector<int>, std::greater<int>> tiers;
+    for (size_t i = 0; i < entries.size(); i++) {
+        int m = DiscordMatch(entries[i].f, x);
+        if (m >= 0) tiers[m].push_back((int)i);
+    }
+    int fallback = -1;
+    for (auto& t : tiers) {
+        std::vector<int> usable;
+        for (int i : t.second) {
+            bool ok = true;
+            std::string tmp;
+            for (const auto& s : entries[i].v) ok = DiscordFormat(s, values, tmp) && ok;
+            if (ok) usable.push_back(i);
+        }
+        if (!usable.empty()) return usable[roll % usable.size()];
+        if (fallback < 0) fallback = t.second[roll % t.second.size()];
+    }
+    return fallback;
+}
+// The longest start of text that fits in maxBytes without ending inside a UTF-8 character (#50). Discord's
+// limits are in bytes (128 for texts, 32 for button labels), and half a character is invalid text to it.
+inline std::string Utf8Truncate(const std::string& text, size_t maxBytes) {
+    if (text.size() <= maxBytes) return text;
+    size_t n = maxBytes;                                      // text[n] is the first byte left out
+    while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80) n--;   // inside a character: cut before it
+    return text.substr(0, n);
+}
+// Discord refuses a button whose URL is longer than this
+constexpr size_t kDiscordUrlMax = 512;
+// DiscordEuroScope's lookup: the ICAO prefix of the callsign and the primary frequency
+inline std::string DiscordRadioCallsign(const DiscordConfig& c, const std::string& callsign, const std::string& freq) {
+    std::string icao = Upper(callsign.substr(0, callsign.find('_')));
+    for (const auto& r : c.radios) if (r[0] == icao && r[1] == freq) return r[2];
+    return "";
 }
 
 } // namespace kwiq

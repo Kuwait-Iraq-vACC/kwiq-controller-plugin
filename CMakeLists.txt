@@ -9,11 +9,25 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")   # /
 find_package(CURL CONFIG REQUIRED)               # from vcpkg (static, Windows schannel TLS)
 find_package(nlohmann_json CONFIG REQUIRED)      # from vcpkg
 find_package(ixwebsocket CONFIG REQUIRED)        # from vcpkg, without TLS: RDF only talks to TrackAudio on this PC
+find_package(RapidJSON CONFIG REQUIRED)          # from vcpkg, header only: discord-rpc's JSON
+
+# discord-rpc (Multi Theft Auto's fork, MIT), for DiscordEuroScope: built from libs/discord-rpc
+add_library(discord-rpc STATIC
+    libs/discord-rpc/discord_rpc.cpp
+    libs/discord-rpc/rpc_connection.cpp
+    libs/discord-rpc/serialization.cpp
+    libs/discord-rpc/connection_win.cpp
+    libs/discord-rpc/discord_register_win.cpp
+)
+target_include_directories(discord-rpc SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/libs/discord-rpc)
+# WIN32_LEAN_AND_MEAN empty, as connection_win.cpp and discord_register_win.cpp define it (no C4005)
+target_compile_definitions(discord-rpc PRIVATE WIN32_LEAN_AND_MEAN= NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(discord-rpc PRIVATE rapidjson advapi32 psapi)
 
 # Warnings (#41): KWIQ's own sources are built at /W4, and CI fails on any warning in them. Vendored code
 # (VCH, the Slots-Plugin's VatsimAPI.cpp) keeps the default level. Headers from libs/ and vcpkg are external
 # (SYSTEM, so /external:I and /external:W0), so their warnings never count.
-set(KWIQ_OWN_SOURCES KWIQPlugin.cpp keylink.cpp loader.cpp updater.cpp rdf.cpp)
+set(KWIQ_OWN_SOURCES KWIQPlugin.cpp keylink.cpp loader.cpp updater.cpp rdf.cpp discord.cpp)
 set_source_files_properties(${KWIQ_OWN_SOURCES} PROPERTIES COMPILE_OPTIONS "/W4")
 # WIN32_LEAN_AND_MEAN is empty, as VCH's stdafx.h defines it, so it is never redefined (C4005)
 set(KWIQ_DEFINITIONS WIN32_LEAN_AND_MEAN= _CRT_SECURE_NO_WARNINGS)
@@ -26,6 +40,7 @@ add_library(KWIQPluginCore SHARED
     VatsimAPI.cpp
     keylink.cpp          # receives the API key from myKWIQ
     rdf.cpp              # RDF and the TrackAudio bridge (KingfuChan/RDF)
+    discord.cpp          # DiscordEuroScope (Kirollos/DiscordEuroScope)
     requestMenu.cpp      # VCH
     internet.cpp         # VCH
     usefulStuff.cpp      # VCH
@@ -39,6 +54,7 @@ target_link_libraries(KWIQPluginCore PRIVATE
     CURL::libcurl
     nlohmann_json::nlohmann_json
     ixwebsocket::ixwebsocket                      # RDF: TrackAudio's WebSocket
+    discord-rpc                                   # DiscordEuroScope
     crypt32 shlwapi                               # ixwebsocket
     wininet                                       # VCH
     winmm                                         # PlaySound (sector file alert)
@@ -67,7 +83,7 @@ set_target_properties(KWIQPlugin PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugin")
 
 # Each KWIQ header must compile on its own (#41), e.g. windows.h before EuroScopePlugIn.h: one generated .cpp
 # per header, built at /W4 with the plugin's definitions. Nothing is linked from it.
-set(KWIQ_HEADERS kwiq_logic.hpp kwiq_win.hpp keylink.hpp VatsimAPI.h version.h rdf.hpp)
+set(KWIQ_HEADERS kwiq_logic.hpp kwiq_win.hpp keylink.hpp VatsimAPI.h version.h rdf.hpp discord.hpp)
 set(KWIQ_HEADER_CHECKS "")
 foreach(h IN LISTS KWIQ_HEADERS)
     string(MAKE_C_IDENTIFIER "${h}" n)

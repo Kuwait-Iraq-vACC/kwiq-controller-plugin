@@ -269,6 +269,52 @@ int main() {
           TrackAudioClickAction(TrackAudioState::AfvClient) == TrackAudioClick::Reconnect &&
           TrackAudioClickAction(TrackAudioState::Off) == TrackAudioClick::None);
 
+    // DiscordEuroScope rules from Core
+    DiscordConfig dc = ParseDiscord(
+        "APP|1529517649506074776\r\nSWEATBOX_BYPASS|0\n"
+        "MESSAGE|controller||||Controlling {rcallsign} on {frequency}MHz|Tracking {current_tracked} aircraft\n"
+        "MESSAGE|controller||ORBB_*_CTR|1|Controlling {rcallsign} for {event} on {frequency} MHz|\n"
+        "MESSAGE|controller||||Controlling {callsign}|\n"
+        "MESSAGE|idle||||Preparing the scopes!\n"
+        "IMAGE|||||https://cdn.kuwait-iraqvacc.net/discord.png|{callsign}||\n"
+        "BUTTON|||||Website|https://kuwait-iraqvacc.net\nBUTTON|||||Broken|\n"
+        "RADIO|ORBB|124.400|Baghdad Control\n");
+    CHECK(dc.appId == "1529517649506074776" && !dc.sweatboxBypass && dc.messages.size() == 4 && dc.images.size() == 1 && dc.buttons.size() == 1);
+    CHECK(DiscordRadioCallsign(dc, "ORBB_S_CTR", "124.400") == "Baghdad Control" && DiscordRadioCallsign(dc, "OKAC_CTR", "124.400") == "");
+    DiscordContext dx; dx.state = "controller"; dx.fir = "ORBB"; dx.callsign = "ORBB_S_CTR"; dx.event = true;
+    std::map<std::string, std::string> dv = { {"callsign","ORBB_S_CTR"}, {"rcallsign","Baghdad Control"}, {"frequency","124.400"},
+                                              {"current_tracked","3"}, {"total_tracked","5"}, {"total_inrange","40"}, {"event","Tuesdays Over Iraq"} };
+    CHECK(DiscordPick(dc.messages, dx, dv, 7) == 1);                     // the event message is the most specific
+    std::string dout;
+    CHECK(DiscordFormat(dc.messages[1].v[0], dv, dout) && dout == "Controlling Baghdad Control for Tuesdays Over Iraq on 124.400 MHz");
+    dx.event = false; dv["event"] = "";
+    CHECK(DiscordPick(dc.messages, dx, dv, 0) == 0 || DiscordPick(dc.messages, dx, dv, 0) == 2);
+    dv["rcallsign"] = "";                                                 // unknown radio callsign: the {callsign} one
+    CHECK(DiscordPick(dc.messages, dx, dv, 0) == 2 && DiscordPick(dc.messages, dx, dv, 1) == 2);
+    dx.state = "idle";
+    CHECK(DiscordPick(dc.messages, dx, dv, 3) == 3 && DiscordPick(dc.images, dx, dv, 0) == 0);
+    dx.state = "playback";
+    CHECK(DiscordPick(dc.messages, dx, dv, 0) == -1);
+    CHECK(DiscordFormat("{unknown} {callsign}", dv, dout) && dout == "{unknown} ORBB_S_CTR");
+    // Discord's byte limits, never cutting a UTF-8 character in half (#50)
+    CHECK(Utf8Truncate("abc", 5) == "abc" && Utf8Truncate("abcdef", 3) == "abc" && Utf8Truncate("", 0).empty() && Utf8Truncate("abc", 0).empty());
+    CHECK(Utf8Truncate("a\xC3\xA9", 2) == "a" && Utf8Truncate("a\xC3\xA9", 3) == "a\xC3\xA9");                 // e acute: 2 bytes
+    CHECK(Utf8Truncate("\xF0\x9F\x9B\xAB!", 3).empty() && Utf8Truncate("\xF0\x9F\x9B\xAB!", 4) == "\xF0\x9F\x9B\xAB");   // an emoji: 4
+    CHECK(Utf8Truncate("ab\xD8\xA8\xD8\xBA", 5) == "ab\xD8\xA8");                                              // Arabic: 2 a letter
+    // DiscordEuroScope edge cases (#52)
+    {
+        DiscordConfig de = ParseDiscord("");
+        CHECK(de.appId.empty() && de.messages.empty() && de.images.empty() && de.buttons.empty() && !de.sweatboxBypass);
+        de = ParseDiscord("APP\r\nMESSAGE|controller|||\r\nIMAGE|||||k\r\nBUTTON|||||L\r\nRADIO|OR|1\r\nSWEATBOX_BYPASS|1\r\n");
+        CHECK(de.appId.empty() && de.messages.empty() && de.images.size() == 1 && de.images[0].v.size() == 4 && de.images[0].v[0] == "k");
+        CHECK(de.buttons.empty() && de.radios.empty() && de.sweatboxBypass);          // a button needs a label and a URL
+        std::map<std::string, std::string> none;
+        none["event"] = "";
+        CHECK(DiscordFormat("{", none, dout) && dout == "{" && !DiscordFormat("on {event}", none, dout) && dout == "on ");
+        CHECK(DiscordMatch(DiscordFilter(), DiscordContext()) == 0 && DiscordPick(std::vector<DiscordEntry>(), dx, dv, 0) == -1);
+        CHECK(DiscordRadioCallsign(dc, "", "").empty() && DiscordRadioCallsign(dc, "ORBB", "124.400") == "Baghdad Control");
+    }
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
