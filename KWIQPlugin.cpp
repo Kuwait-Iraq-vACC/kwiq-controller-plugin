@@ -236,13 +236,6 @@ static bool Make(Win& win, POINT, const std::string& title, int ch, int cw = CW)
     return true;
 }
 
-static std::string LevelsText(const kwiq::SrdRoute& r) {
-    if (r.minLvl && r.maxLvl) return kwiq::FlStr(r.minLvl) + "-" + kwiq::FlStr(r.maxLvl);
-    if (r.minLvl) return kwiq::FlStr(r.minLvl) + "+";
-    if (r.maxLvl) return "<=" + kwiq::FlStr(r.maxLvl);
-    return "";
-}
-
 static void ShowEvent(POINT pt, const std::string& title, const std::vector<kwiq::EventRoute>& rows) {
     int n = (int)(rows.size() < (size_t)MAX_ROWS ? rows.size() : (size_t)MAX_ROWS);
     int ch = M + (n ? n * (ROWH + ROWGAP) - ROWGAP : ROWH) + M;
