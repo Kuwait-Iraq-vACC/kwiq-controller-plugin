@@ -3,8 +3,9 @@
 //   * VCH (Virtual Controller Helper, GPL-3.0, Jan Fries) is built in: CKWIQPlugin extends CVCHPlugin
 //   * Event routes (OK / CHK) + "Open event routes window"
 //   * Event Flag (EV) / Event Slot from VATCAN bookings (see VatsimAPI.cpp)
-//   * FPC against the SRD, "Explain FPC result", "Open SRD search window"; flights leaving the vACC's airspace
-//     are checked up to their FIR exit point (as in the UK Controller Plugin)
+//   * SRD check against the SRD, "Explain SRD result", "Open SRD search window"; flights leaving the vACC's
+//     airspace are checked up to their FIR exit point (as in the UK Controller Plugin)
+//   * FPC: VFPC's flight plan check (SID, direction, levels, ...), "Explain FPC result" (see fpc_logic.hpp)
 //   * RDF (Radio Direction Finder, GPL-3.0, Kingfu Chan) and its TrackAudio bridge are built in (rdf.cpp)
 //   * DiscordEuroScope (Discord Rich Presence, GPL-3.0, Kirollos Nashaat) is built in (discord.cpp)
 //
@@ -26,6 +27,7 @@
 #include "kwiq_res.h"         // kwiq.rc: the SRD Search dialog
 #include "requestMenu.hpp"      // CVCHPlugin (VCH)
 #include "kwiq_logic.hpp"
+#include "fpc_logic.hpp"
 #include "VatsimAPI.h"
 #include "keylink.hpp"
 #include "rdf.hpp"                // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
@@ -56,6 +58,7 @@ static const char* CORE_TRL_URL         = CORE_BASE "/trl";
 static const char* CORE_METAR_URL       = CORE_BASE "/metar";
 static const char* CORE_NOTICES_URL     = CORE_BASE "/notifications";
 static const char* CORE_FIR_EXITS_URL   = CORE_BASE "/fir-exits";
+static const char* CORE_FPC_URL         = CORE_BASE "/fpc";
 // myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
 static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
 // EuroScope setup guide, opened from the incorrect EuroScope version popup until Core sends euroscope.setup_url
@@ -67,12 +70,16 @@ enum {
     KWIQ_ITEM_EVENT_ROUTE = 1001,
     KWIQ_ITEM_EVENT_FLAG  = 1002,
     KWIQ_ITEM_EVENT_SLOT  = 1003,
-    KWIQ_ITEM_FPC         = 1004,
+    KWIQ_ITEM_FPC         = 1004,   // flight plan check (VFPC)
     KWIQ_ITEM_SECTOR      = 1005,   // sector indicator of the position that tracks the aircraft
     KWIQ_ITEM_RDF         = 1006,   // RDF state: "!" while the aircraft transmits
+    KWIQ_ITEM_SRD         = 1007,   // route and level against the SRD (1006 is RDF state)
+    KWIQ_ITEM_FPC_FAILED  = 1008,   // the flight plan check, only when it fails
+    KWIQ_ITEM_LAST        = KWIQ_ITEM_FPC_FAILED,
     KWIQ_FUNC_EVENT_ROUTES = 2001,   // "Open event routes window"
     KWIQ_FUNC_FPC_EXPLAIN  = 2002,   // "Explain FPC result"
     KWIQ_FUNC_SRD_SEARCH   = 2003,   // "Open SRD search window"
+    KWIQ_FUNC_SRD_EXPLAIN  = 2010,   // "Explain SRD result"
     // the KWIQ button on the radar screen and its menu
     KWIQ_OBJ_BUTTON        = 2100,
     KWIQ_MENU_KEY          = 2101,
@@ -658,6 +665,7 @@ static std::string EuroScopeVersion() {
 struct UiCfg {
     std::string ok = "OK", chk = "CHK", ev = "EV";
     COLORREF cOk = RGB(0, 190, 0), cBad = RGB(230, 30, 30), cEv = RGB(0, 170, 255), cSector = RGB(255, 255, 255);
+    COLORREF cWarn = RGB(220, 220, 0);                               // FPC: only a forbidden level (VFPC's yellow)
     std::map<std::string, COLORREF> cStates;                         // sector indicator per tag state (SectorColourName)
     // outdated sector file alert
     bool alertOn = true;
@@ -686,10 +694,13 @@ public:
         RegisterTagItemType("Event Flag",  KWIQ_ITEM_EVENT_FLAG);
         RegisterTagItemType("Event Slot",  KWIQ_ITEM_EVENT_SLOT);
         RegisterTagItemType("FPC",         KWIQ_ITEM_FPC);
+        RegisterTagItemType("FPC (if failed)", KWIQ_ITEM_FPC_FAILED);
+        RegisterTagItemType("SRD",         KWIQ_ITEM_SRD);
         RegisterTagItemType("Sector Indicator", KWIQ_ITEM_SECTOR);
         RegisterTagItemType("RDF state",   KWIQ_ITEM_RDF);
         RegisterTagItemFunction("Open event routes window", KWIQ_FUNC_EVENT_ROUTES);
         RegisterTagItemFunction("Explain FPC result",       KWIQ_FUNC_FPC_EXPLAIN);
+        RegisterTagItemFunction("Explain SRD result",       KWIQ_FUNC_SRD_EXPLAIN);
         RegisterTagItemFunction("Open SRD search window",   KWIQ_FUNC_SRD_SEARCH);
         kwiq_ui::gOnSearch = &SrdSearchThunk;
         apiKey_ = apikey::Load();
@@ -822,7 +833,8 @@ public:
         if (FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_LAST) { MenuAction(FunctionId, sItemString, Pt, Area); return; }
         switch (FunctionId) {
         case KWIQ_FUNC_EVENT_ROUTES: OpenRoutesWindow(Pt); return;
-        case KWIQ_FUNC_FPC_EXPLAIN:  ExplainSelected(); return;
+        case KWIQ_FUNC_FPC_EXPLAIN:  ExplainFpcSelected(); return;
+        case KWIQ_FUNC_SRD_EXPLAIN:  ExplainSrdSelected(); return;
         case KWIQ_FUNC_SRD_SEARCH:   OpenSrdWindow(Pt); return;
         }
         CVCHPlugin::OnFunctionCall(FunctionId, sItemString, Pt, Area);
@@ -833,31 +845,40 @@ public:
                               int* pColorCode, COLORREF* pRGB, double* pFontSize) override try {
         using namespace kwiq;
         if (reduced_) return;                                // no tag items at all, VCH's included
-        bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_RDF;
+        bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_LAST;
         if (ours && !enabled_) return;                       // plugin too old
         UiCfg ui;
         if (ours) { std::lock_guard<std::mutex> g(mu_); ui = ui_; }
-        if (ItemCode == KWIQ_ITEM_EVENT_ROUTE || ItemCode == KWIQ_ITEM_FPC) {
+        if (ItemCode == KWIQ_ITEM_EVENT_ROUTE || ItemCode == KWIQ_ITEM_SRD || ItemCode == KWIQ_ITEM_FPC ||
+            ItemCode == KWIQ_ITEM_FPC_FAILED) {
             if (!FlightPlan.IsValid()) return;
-            RouteResult ev; FpcResult fpc;
-            Checks(FlightPlan, ev, fpc);
-            const char* txt = nullptr; bool green = false;
+            const CacheEntry& e = Checks(FlightPlan);
+            std::string txt;
+            COLORREF colour = ui.cBad;
             if (ItemCode == KWIQ_ITEM_EVENT_ROUTE) {
-                if (ev == RouteResult::Ok) { txt = ui.ok.c_str(); green = true; }
-                else if (ev == RouteResult::Check) txt = ui.chk.c_str();
-            } else {
-                switch (fpc) {
-                case FpcResult::Ok:    txt = ui.ok.c_str(); green = true; break;
-                case FpcResult::Route: txt = "RTE"; break;
-                case FpcResult::Min:   txt = "MIN"; break;
-                case FpcResult::Max:   txt = "MAX"; break;
+                if (e.ev == RouteResult::Ok) { txt = ui.ok; colour = ui.cOk; }
+                else if (e.ev == RouteResult::Check) txt = ui.chk;
+            } else if (ItemCode == KWIQ_ITEM_SRD) {
+                switch (e.srd) {
+                case SrdResult::Ok:    txt = ui.ok; colour = ui.cOk; break;
+                case SrdResult::Route: txt = "RTE"; break;
+                case SrdResult::Min:   txt = "MIN"; break;
+                case SrdResult::Max:   txt = "MAX"; break;
                 default: break;
                 }
+            } else if (e.fpcChecked) {
+                // VFPC: VFR and passed in green, the first failure in red, a forbidden level alone in yellow
+                if (e.fpcCode.empty()) {
+                    if (ItemCode == KWIQ_ITEM_FPC) { txt = e.fpcVfr ? "VFR" : ui.ok; colour = ui.cOk; }
+                } else {
+                    txt = e.fpcCode;
+                    colour = e.fpcWarn ? ui.cWarn : ui.cBad;
+                }
             }
-            if (!txt) return;
-            strcpy_s(sItemString, 16, txt);
+            if (txt.empty()) return;
+            strncpy_s(sItemString, 16, txt.c_str(), _TRUNCATE);
             *pColorCode = EuroScopePlugIn::TAG_COLOR_RGB_DEFINED;
-            *pRGB = green ? ui.cOk : ui.cBad;
+            *pRGB = colour;
         }
         else if (ItemCode == KWIQ_ITEM_EVENT_FLAG || ItemCode == KWIQ_ITEM_EVENT_SLOT) {
             if (!FlightPlan.IsValid()) return;
@@ -987,7 +1008,8 @@ public:
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
-                std::to_string(sectors_.size()) + " | FIR exits " + std::to_string(firExits_.size()) + " | ";
+                std::to_string(sectors_.size()) + " | FIR exits " + std::to_string(firExits_.size()) +
+                " | FPC airports " + std::to_string(fpcRules_.size()) + " | ";
             s += ev_.active
                 ? ev_.name + " | event routes " + std::to_string(ev_.routes.size()) +
                   " | VATCAN code " + ev_.vatcanCode + " | slots " + std::to_string(CDataHandler::SlotCount()) +
@@ -1420,33 +1442,58 @@ private:
 
     struct CacheEntry {
         bool valid = false;
-        unsigned evGen = 0, srdGen = 0, exitGen = 0;
-        int rfl = 0;
-        std::string adep, ades, rte, today;
+        unsigned evGen = 0, srdGen = 0, exitGen = 0, fpcGen = 0;
+        int rfl = 0, filedRfl = 0;
+        char engine = 0, capability = 0;
+        std::string adep, ades, rte, sid, planType, today;
         kwiq::RouteResult ev = kwiq::RouteResult::None;
-        kwiq::FpcResult fpc = kwiq::FpcResult::None;
+        kwiq::SrdResult srd = kwiq::SrdResult::None;
+        bool fpcChecked = false, fpcVfr = false, fpcWarn = false;   // the flight plan check: empty code = passed
+        std::string fpcCode;
     };
 
     // Draw-path checks, cached per callsign: only recomputed when the flight plan, the UTC day
     // or the Core data changed, so a redraw costs a few string compares and no allocation.
-    void Checks(EuroScopePlugIn::CFlightPlan& fp, kwiq::RouteResult& ev, kwiq::FpcResult& fpc) {
+    // The entry is only read on the main thread, where it is also written.
+    const CacheEntry& Checks(EuroScopePlugIn::CFlightPlan& fp) {
         auto d = fp.GetFlightPlanData();
         std::string o = kwiq::Upper(d.GetOrigin()), a = kwiq::Upper(d.GetDestination()), r = d.GetRoute();
-        int rfl = fp.GetFinalAltitude();
+        std::string sid = d.GetSidName(), planType = d.GetPlanType();
+        int rfl = fp.GetFinalAltitude(), filedRfl = d.GetFinalAltitude();
+        char engine = d.GetEngineType(), capability = d.GetCapibilities();
         const std::string& today = TodayCached();
         std::string cs = fp.GetCallsign();
         std::lock_guard<std::mutex> g(mu_);
         if (cache_.size() > 5000) cache_.clear();
         CacheEntry& e = cache_[cs];
-        if (!(e.valid && e.evGen == evGen_ && e.srdGen == srdGen_ && e.exitGen == exitGen_ && e.rfl == rfl &&
-              e.today == today && e.adep == o && e.ades == a && e.rte == r)) {
+        if (!(e.valid && e.evGen == evGen_ && e.srdGen == srdGen_ && e.exitGen == exitGen_ && e.fpcGen == fpcGen_ &&
+              e.rfl == rfl && e.filedRfl == filedRfl && e.engine == engine && e.capability == capability &&
+              e.today == today && e.adep == o && e.ades == a && e.rte == r && e.sid == sid && e.planType == planType)) {
             auto toks = kwiq::NormaliseRoute(r);
             e.ev  = kwiq::CheckEventRoute(ev_, o, a, toks, today);
-            e.fpc = kwiq::CheckFpc(srd_, o, a, toks, rfl, FirExitLocked(fp, a));
-            e.evGen = evGen_; e.srdGen = srdGen_; e.exitGen = exitGen_; e.rfl = rfl; e.today = today;
-            e.adep = o; e.ades = a; e.rte = r; e.valid = true;
+            e.srd = kwiq::CheckSrd(srd_, o, a, toks, rfl, FirExitLocked(fp, a));
+            kwiq::fpc::Result f = kwiq::fpc::Check(fpcRules_, FpcFlight(fp));
+            e.fpcChecked = f.checked; e.fpcVfr = f.vfr; e.fpcWarn = f.WarningOnly();
+            e.fpcCode = f.fails.empty() ? std::string() : kwiq::fpc::Code(f.fails[0]);
+            e.evGen = evGen_; e.srdGen = srdGen_; e.exitGen = exitGen_; e.fpcGen = fpcGen_;
+            e.rfl = rfl; e.filedRfl = filedRfl; e.engine = engine; e.capability = capability; e.today = today;
+            e.adep = o; e.ades = a; e.rte = r; e.sid = sid; e.planType = planType; e.valid = true;
         }
-        ev = e.ev; fpc = e.fpc;
+        return e;
+    }
+    // What VFPC checks, from the flight plan as filed
+    static kwiq::fpc::Flight FpcFlight(EuroScopePlugIn::CFlightPlan& fp) {
+        auto d = fp.GetFlightPlanData();
+        kwiq::fpc::Flight f;
+        f.origin = d.GetOrigin();
+        f.destination = d.GetDestination();
+        f.route = d.GetRoute();
+        f.sid = d.GetSidName();
+        f.rflFt = d.GetFinalAltitude();
+        f.engine = d.GetEngineType();
+        f.capability = d.GetCapibilities();
+        f.vfr = std::strcmp(d.GetPlanType(), "V") == 0;
+        return f;
     }
     // ---- FIR exit (UK Controller Plugin: CachedAircraftFirExitGenerator) ----------------------
     // Where a flight leaves the vACC's airspace, from EuroScope's extracted route and Core's exit points.
@@ -1496,7 +1543,7 @@ private:
         }
         kwiq_ui::ShowSrd(adep, ades, lvl);                   // modal, as UKCP's: returns once it is closed
     }
-    void ExplainSelected() {
+    void ExplainSrdSelected() {
         auto fp = FlightPlanSelectASEL();
         if (!fp.IsValid()) return;
         auto d = fp.GetFlightPlanData();
@@ -1504,8 +1551,20 @@ private:
         {
             std::lock_guard<std::mutex> g(mu_);
             std::string ades = kwiq::Upper(d.GetDestination());
-            msg = kwiq::ExplainFpc(srd_, kwiq::Upper(d.GetOrigin()), ades, d.GetRoute(), fp.GetFinalAltitude(),
-                                   FirExitLocked(fp, ades));
+            msg = "SRD: " + kwiq::ExplainSrd(srd_, kwiq::Upper(d.GetOrigin()), ades, d.GetRoute(), fp.GetFinalAltitude(),
+                                             FirExitLocked(fp, ades));
+        }
+        DisplayUserMessage("KWIQ Controller Plugin", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
+    }
+    // VFPC checkFPDetail
+    void ExplainFpcSelected() {
+        auto fp = FlightPlanSelectASEL();
+        if (!fp.IsValid()) return;
+        kwiq::fpc::Flight f = FpcFlight(fp);
+        std::string msg;
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            msg = "FPC: " + kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
         }
         DisplayUserMessage("KWIQ Controller Plugin", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
     }
@@ -1609,6 +1668,7 @@ private:
         u.cBad = (COLORREF)ParseColour(c.Get("ui.colour_bad"), u.cBad);
         u.cEv = (COLORREF)ParseColour(c.Get("ui.colour_event"), u.cEv);
         u.cSector = (COLORREF)ParseColour(c.Get("ui.colour_sector"), u.cSector);
+        u.cWarn = (COLORREF)ParseColour(c.Get("ui.colour_warn"), u.cWarn);
         for (int i = 0; i < 8; i++) {
             std::string n = SectorColourName(i);
             unsigned long v = ParseColour(c.Get("ui.colour_sector_" + n), 0xFFFFFFFFul);
@@ -1825,6 +1885,16 @@ private:
                     firExits_ = std::move(m); exitGen_++;
                 } else fail("FIR exits", exitErr);
             }
+            if (doSrd) {                               // flight plan check rules, refreshed with the SRD
+                std::string fpcErr;
+                bool ok = kwiq_net::HttpGet(CORE_FPC_URL, body, fpcErr);
+                if (ok || fpcErr == "HTTP 404") {      // 404: Core has none yet, so no checks
+                    ClearError("FPC");
+                    fpc::Rules rules = ok ? fpc::ParseRules(body) : fpc::Rules{};
+                    std::lock_guard<std::mutex> g(mu_);
+                    fpcRules_ = std::move(rules); fpcGen_++;
+                } else fail("FPC", fpcErr);
+            }
         } catch (...) {}
         busy_ = false;
     }
@@ -1884,8 +1954,9 @@ private:
     kwiq::SrdData srd_;
     kwiq::SectorMap sectors_;
     kwiq::FirExits firExits_;
+    kwiq::fpc::Rules fpcRules_;
     std::string domesticPrefixes_ = "OK,OR";                        // Core's srd.domestic_prefixes
-    unsigned evGen_ = 1, srdGen_ = 1, exitGen_ = 1;
+    unsigned evGen_ = 1, srdGen_ = 1, exitGen_ = 1, fpcGen_ = 1;
     std::unordered_map<std::string, CacheEntry> cache_;
     std::vector<std::pair<std::string, bool>> pending_;
     UiCfg ui_;
