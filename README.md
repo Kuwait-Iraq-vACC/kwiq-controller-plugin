@@ -86,6 +86,21 @@ As EuroScope starts, the plugin reads the version of the running EuroScope from 
 ## Sector file version check
 OKAC and ORBB are released separately, so Core holds a current AIRAC for each (`sectorfile.airac.okac` and `sectorfile.airac.orbb`, e.g. `2610/02`), filled by `php artisan sectorfile:sync` from `AIRAC_VERSION.txt` in each package's repository, falling back to the tag of its latest release. The plugin compares the loaded sector file with its own package's version: the package is taken from the sector file's path (the OKAC or ORBB folder or file nearest it), otherwise from the controller's callsign (OR... is ORBB, OK... is OKAC). The plugin reads the local version only from `AIRAC_VERSION.txt`, which the packages keep in `OKAC\Plugins` and `ORBB\Plugins`: it looks in the folder given with `.kwiq sectorfile` (or that file's folder), otherwise in the plugin's folder and its three parents, each with its `Plugins` folder. Without that file the version is not checked and no alert is shown. "2610/2" and "2610/02" are treated as equal.
 
+## FPC and FIR exit points
+The FPC item checks the filed route and level against the SRD rows for the flight:
+1. Rows for its departure and destination airports, if there are any.
+2. For a flight whose destination is outside the vACC's airspace (not `srd.domestic_prefixes`, default `OK,OR`), rows from its departure airport to the point where it leaves the airspace, as the UK Controller Plugin does. If there are none for that point, rows to the point where it leaves OKAC for ORBB or the other way round.
+3. Otherwise, en-route rows whose two ends are both on the filed route.
+
+Where a flight leaves the airspace comes from Core's FIR exit points, `/api/plugin/fir-exits`, one line per exit cone: `EXIT|<point>|<from heading>|<to heading>|<internal 0 or 1>`. A point can have several cones, one per direction (a point on the OKAC/ORBB boundary is crossed both ways), so the same point on several lines is several cones, each with its own internal flag; identical lines count once. A route leaves at a point if its track from there to the next point is inside any of its cones, and if two of that point's cones overlap at that track, the external one is used. An example is `EXIT|ROTAP|300|060|0`. A flight leaves at the first listed point on its route (EuroScope's extracted route) whose track to the next point lies in one of that point's exit cones, each from one heading clockwise to the other. Internal points are on the OKAC and ORBB boundary, and count only before the flight leaves the vACC's airspace. With no exit points in Core (or a 404), only steps 1 and 3 apply.
+
+**Explain FPC result** names the exit point it used, and **Open SRD search window** fills in the exit point as the destination for such a flight. `.kwiq status` shows how many exit points Core sent (distinct points, not cones).
+
+## SRD search window
+**Open SRD search window** (on any tag item, or SRD Search in the KWIQ button's menu) is laid out like the UK Controller Plugin's SRD Search dialog. Enter the **Origin Fix or Airfield** and **Destination Fix or Airfield** (both required) and, optionally, the **Cruising Altitude or Level** (`350` is FL350, `35000` is feet), then **Search** or press Enter. Opened from an aircraft, it is filled in with the aircraft's departure, its destination (or its FIR exit point when it leaves the vACC's airspace) and its requested level, and searched straight away.
+
+**Search Results** lists every matching route: **Min** (`MC` when there is no minimum), **Max** (`-` when there is no limit), **FRA** (whether the route has Free Route Airspace, `<FRA>`, in it) and the **Route String**. Click a route to see its **Notes**, then **Copy Route String To Clipboard**. Tab moves between the boxes and Esc or **Close** closes the window. EuroScope keeps running while it is open.
+
 ## Tests
 `g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic && ./test_logic`
 
