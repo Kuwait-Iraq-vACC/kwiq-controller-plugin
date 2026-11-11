@@ -21,6 +21,8 @@
 #include "kwiq_logic.hpp"
 #include "VatsimAPI.h"
 #include "keylink.hpp"
+#define KWIQ_NO_WINHTTP
+#include "kwiq_win.hpp"           // api-settings.json and the folders the loader uses
 
 #define KWIQ_PLUGIN_NAME      "KWIQ Controller Plugin"
 #include "version.h"                // KWIQ_PLUGIN_VERSION
@@ -441,6 +443,12 @@ static void Shutdown() {
 
 class CKWIQPlugin;
 static CKWIQPlugin* gPlugin = nullptr;
+// How the loader starts the plugin (kwiq::StartMode). Reduced, after the controller declined an update:
+// only the outdated sector file alert, the EuroScope version check and a reminder in the chat run.
+static int gStartMode = (int)kwiq::StartMode::Full;
+static const char* const kReducedReminder =
+    "This version of the KWIQ Controller Plugin is out of date, so only the outdated sector file alert and the EuroScope "
+    "version check are working. Restart EuroScope and accept the update to use everything else.";
 
 // ---- Local sector file version -------------------------------------------------
 // EuroScope does not expose the sector file version to plugins, so it is read from disk, and only ever
@@ -472,8 +480,8 @@ static std::string ParentOf(const std::string& p) {
     size_t i = p.find_last_of("\\/");
     return i == std::string::npos ? std::string() : p.substr(0, i);
 }
-// Where the plugin is installed: KWIQPlugin.dll, the loader EuroScope loads (this file is kept in
-// %APPDATA%\KWIQ\plugin), or this file when it is loaded directly
+// Where the plugin is installed: KWIQPlugin.dll, the loader EuroScope loads from the sector file package
+// (this file is kept in %LOCALAPPDATA%\KWIQ\bin), or this file when it is loaded directly
 static std::string DllPath() {
     HMODULE m = GetModuleHandleA("KWIQPlugin.dll");
     if (!m)
@@ -487,8 +495,8 @@ static std::string DllDir() { return ParentOf(DllPath()); }
 
 // ---- alert sound lookup ----------------------------------------------------------------------
 // Packages look like  %APPDATA%\EuroScope\ORBB-2610_02\ORBB\Sounds\conflict_alert.wav, but the folder names
-// change per release and per vACC, so search instead of assuming: near the sector file first, then
-// near the plugin, then every package under %APPDATA%\EuroScope (newest wins).
+// change per release and per vACC, so search instead of assuming, but only in the controller's own package:
+// near the sector file first, then near KWIQPlugin.dll (which the package carries). Not found: a system sound.
 static bool FileExists(const std::string& p) {
     DWORD a = GetFileAttributesA(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
@@ -511,12 +519,6 @@ static std::string Probe(const std::string& dir, const std::string& file) {   //
         if (FileExists(sub + "\\Sounds\\" + file)) return sub + "\\Sounds\\" + file;
     return "";
 }
-static bool NewerThan(const std::string& a, const std::string& b) {
-    WIN32_FILE_ATTRIBUTE_DATA x, y;
-    if (!GetFileAttributesExA(a.c_str(), GetFileExInfoStandard, &x)) return false;
-    if (!GetFileAttributesExA(b.c_str(), GetFileExInfoStandard, &y)) return true;
-    return CompareFileTime(&x.ftLastWriteTime, &y.ftLastWriteTime) > 0;
-}
 static std::string FindSound(const std::string& file, const std::vector<std::string>& starts) {
     if (file.empty()) return "";
     for (const auto& s : starts) {
@@ -525,15 +527,6 @@ static std::string FindSound(const std::string& file, const std::vector<std::str
             std::string r = Probe(d, file);
             if (!r.empty()) return r;
         }
-    }
-    char app[MAX_PATH] = {};
-    if (GetEnvironmentVariableA("APPDATA", app, MAX_PATH)) {
-        std::string best;
-        for (const auto& pkg : SubDirs(std::string(app) + "\\EuroScope")) {
-            std::string r = Probe(pkg, file);
-            if (!r.empty() && (best.empty() || NewerThan(r, best))) best = r;
-        }
-        if (!best.empty()) return best;
     }
     return "";
 }
@@ -552,32 +545,11 @@ static kwiq::Airac Local(const std::string& userPath, std::string& src) {
 } // namespace sf
 
 // ---- personal API key ------------------------------------------------------------------------
-// Generated on myKWIQ and kept in %APPDATA%\KWIQ\plugin-key.txt, outside the EuroScope profile files,
-// so it is never shared along with a sector file package or someone's settings.
+// Generated on myKWIQ and kept in %LOCALAPPDATA%\KWIQ\settings\api-settings.json, as UKCP keeps its own,
+// outside the EuroScope profile files, so it is never shared along with a sector file package or settings.
 namespace apikey {
-static std::string Dir() {
-    char b[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableA("APPDATA", b, MAX_PATH);
-    return n && n < MAX_PATH ? std::string(b) + "\\KWIQ" : std::string();
-}
-static std::string Load() {
-    std::string d = Dir();
-    if (d.empty()) return "";
-    std::string k = kwiq::Trim(sf::ReadHead(d + "\\plugin-key.txt", 128));
-    return kwiq::IsApiKey(k) ? k : "";
-}
-static bool Save(const std::string& key) {
-    std::string d = Dir();
-    if (d.empty()) return false;
-    CreateDirectoryA(d.c_str(), nullptr);
-    std::string f = d + "\\plugin-key.txt";
-    if (key.empty()) { DeleteFileA(f.c_str()); return true; }
-    FILE* fp = nullptr;
-    if (fopen_s(&fp, f.c_str(), "wb") != 0 || !fp) return false;
-    bool ok = fwrite(key.data(), 1, key.size(), fp) == key.size();
-    fclose(fp);
-    return ok;
-}
+static std::string Load() { return kwiq_win::LoadApiKey(); }
+static bool Save(const std::string& key) { return kwiq_win::SaveApiKey(key); }
 } // namespace apikey
 
 // The running EuroScope's version from its .exe, e.g. "3.2.3.2"; empty if it cannot be read
@@ -652,6 +624,7 @@ public:
             return;
         }
         Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded", false);
+        if (reduced_) { Msg(kReducedReminder, true); return; }
         // EuroScope should load KWIQPlugin.dll, which updates and then loads this file; loaded directly,
         // nothing updates it
         if (!GetModuleHandleA("KWIQPlugin.dll"))
@@ -674,6 +647,7 @@ public:
     // Every EuroScope callback is a function-try-block: an exception must never reach EuroScope (#45)
     virtual void OnTimer(int Counter) override try {
         if (duplicate_) return;
+        if (reduced_) { ReducedTimer(); return; }
         CVCHPlugin::OnTimer(Counter);                       // VCH housekeeping
         CDataHandler::ApplyPending(this);                   // slot/feed results, main thread
         FlushMessages();
@@ -688,7 +662,6 @@ public:
             const char* bp = GetDataFromSettings("kwiq_button_at");
             int bx, by;
             if (bp && sscanf_s(bp, "%d,%d", &bx, &by) == 2 && bx >= 0 && by >= 0) { buttonX_ = bx; buttonY_ = by; }
-            DeleteFileA((sf::DllPath() + ".old").c_str());   // left over from a previous self-update (fails while still loaded)
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
         TickConnection(now);
@@ -715,7 +688,29 @@ public:
         worker_ = std::thread(&CKWIQPlugin::Refresh, this, core, srd);
     } catch (...) {}
 
+    // Reduced: Core's config (for the sector file version, the alert and the EuroScope versions), the outdated
+    // sector file alert, the EuroScope version check, and the reminder at every logon. Nothing else.
+    void ReducedTimer() {
+        FlushMessages();
+        std::time_t now = std::time(nullptr);
+        if (!settingsLoaded_) {
+            settingsLoaded_ = true;
+            const char* sp = GetDataFromSettings("kwiq_sectorfile_path");
+            if (sp && *sp) { std::lock_guard<std::mutex> g(mu_); sectorPath_ = sp; }
+        }
+        if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
+        TickConnection(now);
+        if (justConnected_) { justConnected_ = false; Msg(kReducedReminder, true); }
+        TickEuroScopeVersion(now);
+        if (busy_ || now - lastCore_ < coreEvery_) return;
+        if (worker_.joinable()) worker_.join();
+        lastCore_ = now;
+        busy_ = true;
+        worker_ = std::thread(&CKWIQPlugin::Refresh, this, true, false);
+    }
+
     virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override try {
+        if (reduced_) return;
         if (FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_HIDE) { MenuAction(FunctionId, sItemString, Pt, Area); return; }
         switch (FunctionId) {
         case KWIQ_FUNC_EVENT_ROUTES: OpenRoutesWindow(Pt); return;
@@ -729,8 +724,9 @@ public:
                               int ItemCode, int TagData, char sItemString[16],
                               int* pColorCode, COLORREF* pRGB, double* pFontSize) override try {
         using namespace kwiq;
+        if (reduced_) return;                                // no tag items at all, VCH's included
         bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_SECTOR;
-        if (ours && !enabled_) return;                       // Core kill switch / plugin too old
+        if (ours && !enabled_) return;                       // plugin too old
         UiCfg ui;
         if (ours) { std::lock_guard<std::mutex> g(mu_); ui = ui_; }
         if (ItemCode == KWIQ_ITEM_EVENT_ROUTE || ItemCode == KWIQ_ITEM_FPC) {
@@ -781,7 +777,8 @@ public:
     } catch (...) {}
 
     virtual bool OnCompileCommand(const char* sCommandLine) override try {
-        if (duplicate_ || !sCommandLine) return false;       // the copy that is in use answers
+        // the copy that is in use answers; reduced: no commands
+        if (duplicate_ || reduced_ || !sCommandLine) return false;
         // Arguments come from the trimmed line, so a leading space doesn't shift them (#46)
         const std::string line = kwiq::Trim(sCommandLine);
         std::string c = kwiq::Upper(line);
@@ -846,7 +843,7 @@ public:
         }
         if (c == ".KWIQ STATUS") {
             std::lock_guard<std::mutex> g(mu_);
-            std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED by Core") +
+            std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED (too old)") +
                 " | EuroScope " + (esVersion_.empty() ? std::string("?") : esVersion_) +
                 " | API key " + (apiKey_.empty() ? std::string("not set") : std::string("connected")) + WineNote() +
                 " | sector files OKAC " + (upstreamAirac_["OKAC"].empty() ? "?" : upstreamAirac_["OKAC"]) +
@@ -877,14 +874,14 @@ public:
         auto it = sectors_.find(kwiq::Upper(c.GetPositionId()));
         return it == sectors_.end() ? std::string() : it->second;
     }
-    bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_; }
+    bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_ && !reduced_; }
     bool Duplicate() const { return duplicate_; }
 
     // ---- the KWIQ button and its menu (main thread) ------------------------------------------
     // A small red button at the top centre of each radar screen; it can be dragged anywhere, and
     // ".kwiq button" (or Hide Button in its menu) hides it and brings it back.
     static constexpr int BUTTON_W = 44, BUTTON_H = 18;
-    bool ButtonShown() const { return buttonShown_ && !duplicate_; }
+    bool ButtonShown() const { return buttonShown_ && !duplicate_ && !reduced_; }
     RECT ButtonRect(const RECT& radar) const {
         // Top centre until it is dragged somewhere else; always kept inside the radar area
         int w = radar.right - radar.left, h = radar.bottom - radar.top;
@@ -1072,7 +1069,7 @@ private:
             Msg("That is not a KWIQ API key. Copy it from myKWIQ, under EuroScope Plugin; it starts with kwiq_", true);
             return;
         }
-        if (!apikey::Save(key)) { Msg("The API key could not be saved in %APPDATA%\\KWIQ.", true); return; }
+        if (!apikey::Save(key)) { Msg("The API key could not be saved in %LOCALAPPDATA%\\KWIQ\\settings.", true); return; }
         apiKey_ = key;
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
         { std::lock_guard<std::mutex> g(mu_); lastErr_.erase("API key"); srd_.version.clear(); }
@@ -1281,19 +1278,24 @@ private:
         u.alertA = (COLORREF)ParseColour(c.Get("alert.colour_a"), u.alertA);
         u.alertB = (COLORREF)ParseColour(c.Get("alert.colour_b"), u.alertB);
         { std::string f = c.Get("alert.sound_file", u.sound); size_t i = f.find_last_of("\\/"); u.sound = i == std::string::npos ? f : f.substr(i + 1); }
-        bool on = c.GetBool("plugin.enabled", true) && !tooOld;
+        // Core's kill switch (plugin.enabled = 0) only acts as EuroScope starts (the loader then does not load
+        // the plugin): a plugin that is already running keeps working until EuroScope closes
+        bool on = !tooOld;
         bool wasOn = enabled_.exchange(on);
         if (tooOld && wasOn) Notify("Plugin v" KWIQ_PLUGIN_VERSION " is too old (minimum " + minV + "), disabled." +
                                     (updUrl.empty() ? "" : " Update: " + updUrl), true);
-        else if (!on && wasOn) Notify("Disabled by the vACC (plugin.enabled = 0 in Core).", true);
         else if (on && !wasOn) Notify("Enabled again.", false);
+        bool killed = !c.GetBool("plugin.enabled", true);
+        if (killed && !killSwitchTold_.exchange(true))
+            Notify("The vACC has switched the plugin off. It keeps working until EuroScope closes, and will not start next time.", false);
+        else if (!killed) killSwitchTold_ = false;
 
         std::string motd = c.Get("plugin.message");
         {
             std::lock_guard<std::mutex> g(mu_);
             ui_ = u;
             latest_ = Trim(c.Get("plugin.latest_version"));
-            latestSha_ = Lower(Trim(c.Get("plugin.loader_sha256")));
+            latestSha_ = Lower(Trim(c.Get("plugin.core_sha256")));
             // OKAC and ORBB are released separately, each with its own version
             upstreamAirac_ = { { "OKAC", c.Get("sectorfile.airac.okac") }, { "ORBB", c.Get("sectorfile.airac.orbb") } };
             sectorUrl_ = { { "OKAC", c.Get("sectorfile.url.okac") }, { "ORBB", c.Get("sectorfile.url.orbb") } };
@@ -1407,12 +1409,12 @@ private:
                     keyRefused_ = false;
                     ApplyConfig(ParseConfig(body));
                 } else fail("Config", err);
-                if (kwiq_net::HttpGet(CORE_EVENT_URL, body, err)) {
+                if (!reduced_ && kwiq_net::HttpGet(CORE_EVENT_URL, body, err)) {
                     ClearError("Core");
                     EventData ev = ParseCoreEvent(body);
                     std::lock_guard<std::mutex> g(mu_);
                     ev_ = std::move(ev); evGen_++;
-                } else fail("Core", err);
+                } else if (!reduced_) fail("Core", err);
             }
 
             if (doSrd) {                               // cheap version check, full download only on change
@@ -1461,13 +1463,14 @@ private:
     std::time_t startedAt_ = 0, lastNameRead_ = 0;
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
+    const bool reduced_ = gStartMode == (int)kwiq::StartMode::Reduced;   // set by the loader before construction
     std::atomic<bool> keyRefused_{ false };
     std::string keyReason_;                                          // guarded by mu_: why Core last refused the key
     bool connected_ = false, soundPlayed_ = false, soundLooping_ = false, bannerWas_ = false;   // main thread only
     std::time_t connectedAt_ = 0, previewUntil_ = 0;                // main thread only
     static constexpr std::time_t PREVIEW_SECONDS = 15;
     static constexpr std::time_t STARTUP_SECONDS = 180;             // popups are only shown this soon after starting
-    std::atomic<bool> quit_{ false }, tooOld_{ false };
+    std::atomic<bool> quit_{ false }, tooOld_{ false }, killSwitchTold_{ false };
     std::time_t lastCore_ = 0, lastSrd_ = 0, lastSlotFetch_ = 0;   // main thread only
     long todayIdx_ = -1;                                            // main thread only
     std::string todayStr_;
@@ -1616,7 +1619,7 @@ static void NoticeThunk(int kind, int button) {
 }
 
 // Entry points: declared (with dllexport) in EuroScopePlugIn.h, so no extern "C" here. The loader
-// (KWIQPlugin.dll, loader.cpp) uses the KWIQCore* ones below instead, after any update.
+// (KWIQPlugin.dll, loader.cpp) uses the KWIQCore* ones below instead, after the updater has run.
 void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
     *ppPlugInInstance = gPlugin = new CKWIQPlugin();
 }
@@ -1626,8 +1629,14 @@ void __declspec(dllexport) EuroScopePlugInExit(void) {
     delete p;
 }
 
-extern "C" __declspec(dllexport) void KWIQCoreInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
+// The loader (v0.6 and later): mode is a kwiq::StartMode from the updater (Full or Reduced)
+extern "C" __declspec(dllexport) void KWIQCoreStart(EuroScopePlugIn::CPlugIn** ppPlugInInstance, int mode) {
+    gStartMode = mode == (int)kwiq::StartMode::Reduced ? mode : (int)kwiq::StartMode::Full;
     EuroScopePlugInInit(ppPlugInInstance);
+}
+// v0.5 loaders, which start the plugin in full
+extern "C" __declspec(dllexport) void KWIQCoreInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
+    KWIQCoreStart(ppPlugInInstance, (int)kwiq::StartMode::Full);
 }
 extern "C" __declspec(dllexport) void KWIQCoreExit() {
     EuroScopePlugInExit();

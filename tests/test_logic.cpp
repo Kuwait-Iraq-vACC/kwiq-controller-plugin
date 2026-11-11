@@ -212,6 +212,21 @@ int main() {
     CHECK(QueryValue("POST /?key=abc HTTP/1.1\r\n", "key") == "");
     CHECK(QueryValue("GET /favicon.ico HTTP/1.1\r\n", "key") == "");
 
+    // api-settings.json, as UKCP keeps its key
+    const std::string K = "kwiq_295d6ebdAbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    CHECK(ApiKeyFromSettingsJson(ApiSettingsJson(K)) == K);
+    CHECK(ApiKeyFromSettingsJson("{\"api-url\":\"https://x\",\"api-key\" : \" " + K + " \"}") == K);
+    CHECK(ApiKeyFromSettingsJson("{\"api-key\": \"not a key\"}") == "");
+    CHECK(ApiKeyFromSettingsJson("{}") == "" && ApiKeyFromSettingsJson("") == "" && ApiKeyFromSettingsJson("{\"api-key\": \"kwiq_") == "");
+    CHECK(ApiKeyFromSettingsJson("{\r\n    \"api-key\": \"" + K + "\"\r\n}\r\n") == K);           // CRLF, as Notepad saves it
+
+    // starting the plugin
+    CHECK(DecideStart(true, false, true, false) == StartMode::Full);
+    CHECK(DecideStart(true, false, true, true) == StartMode::Reduced);
+    CHECK(DecideStart(true, true, true, false) == StartMode::DontLoad);
+    CHECK(DecideStart(false, true, true, false) == StartMode::Full);       // Core unreachable: the switch is unknown
+    CHECK(DecideStart(false, false, false, false) == StartMode::DontLoad);
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
