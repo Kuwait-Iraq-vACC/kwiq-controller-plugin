@@ -3,6 +3,14 @@
   "version": "0.6.0",
   "dependencies": [
     "curl",
-    "nlohmann-json"
+    "nlohmann-json",
+    {
+      "name": "ixwebsocket",
+      "default-features": false,
+      "features": [
+        "mbedtls"
+      ]
+    },
+    "rapidjson"
   ]
 }
