@@ -1,6 +1,6 @@
 # KWIQ Controller Plugin
 
-Kuwait & Iraq vACC EuroScope plugin: VCH, event routes and slots, FPC and SRD search. Route data comes from Core (Laravel).
+Kuwait & Iraq vACC EuroScope plugin: VCH, event routes and slots, flight plan check (FPC), SRD check and SRD search. Route data comes from Core (Laravel).
 
 ## Build the DLL (GitHub Actions)
 1. Core's address is the only server compiled in: `CORE_BASE` in `KWIQPlugin.cpp` and `kCoreHost` in `kwiq_win.hpp`.
@@ -20,12 +20,14 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | KWIQ Controller Plugin / Event Route | green `OK` or red `CHK` on event days for event ADEP/ADES pairs |
 | ... / Event Flag | `EV` if the pilot has a VATCAN slot |
 | ... / Event Slot | the slot time |
-| ... / FPC | `OK`, `RTE`, `MIN` or `MAX` against the SRD |
+| ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV` |
+| ... / FPC (if failed) | the same, only when it fails |
+| ... / SRD | `OK`, `RTE`, `MIN` or `MAX` against the SRD |
 | ... / Sector Indicator | the alias of the position tracking the aircraft (also drawn above it) |
 | ... / RDF state | `!` while the aircraft transmits |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
 
-Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** (left button on FPC), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
+Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** (left button on FPC), **Explain SRD result** (left button on SRD), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
@@ -86,15 +88,15 @@ As EuroScope starts, the plugin reads the version of the running EuroScope from 
 ## Sector file version check
 OKAC and ORBB are released separately, so Core holds a current AIRAC for each (`sectorfile.airac.okac` and `sectorfile.airac.orbb`, e.g. `2610/02`), filled by `php artisan sectorfile:sync` from `AIRAC_VERSION.txt` in each package's repository, falling back to the tag of its latest release. The plugin compares the loaded sector file with its own package's version: the package is taken from the sector file's path (the OKAC or ORBB folder or file nearest it), otherwise from the controller's callsign (OR... is ORBB, OK... is OKAC). The plugin reads the local version only from `AIRAC_VERSION.txt`, which the packages keep in `OKAC\Plugins` and `ORBB\Plugins`: it looks in the folder given with `.kwiq sectorfile` (or that file's folder), otherwise in the plugin's folder and its three parents, each with its `Plugins` folder. Without that file the version is not checked and no alert is shown. "2610/2" and "2610/02" are treated as equal.
 
-## FPC and FIR exit points
-The FPC item checks the filed route and level against the SRD rows for the flight:
+## SRD check and FIR exit points
+The SRD item checks the filed route and level against the SRD rows for the flight:
 1. Rows for its departure and destination airports, if there are any.
 2. For a flight whose destination is outside the vACC's airspace (not `srd.domestic_prefixes`, default `OK,OR`), rows from its departure airport to the point where it leaves the airspace, as the UK Controller Plugin does. If there are none for that point, rows to the point where it leaves OKAC for ORBB or the other way round.
 3. Otherwise, en-route rows whose two ends are both on the filed route.
 
 Where a flight leaves the airspace comes from Core's FIR exit points, `/api/plugin/fir-exits`, one line per exit cone: `EXIT|<point>|<from heading>|<to heading>|<internal 0 or 1>`. A point can have several cones, one per direction (a point on the OKAC/ORBB boundary is crossed both ways), so the same point on several lines is several cones, each with its own internal flag; identical lines count once. A route leaves at a point if its track from there to the next point is inside any of its cones, and if two of that point's cones overlap at that track, the external one is used. An example is `EXIT|ROTAP|300|060|0`. A flight leaves at the first listed point on its route (EuroScope's extracted route) whose track to the next point lies in one of that point's exit cones, each from one heading clockwise to the other. Internal points are on the OKAC and ORBB boundary, and count only before the flight leaves the vACC's airspace. With no exit points in Core (or a 404), only steps 1 and 3 apply.
 
-**Explain FPC result** names the exit point it used, and **Open SRD search window** fills in the exit point as the destination for such a flight. `.kwiq status` shows how many exit points Core sent (distinct points, not cones).
+**Explain SRD result** names the exit point it used, and **Open SRD search window** fills in the exit point as the destination for such a flight. `.kwiq status` shows how many exit points Core sent (distinct points, not cones).
 
 ## Event Routes
 **Open event routes window** (left button on Event Route, or Event Routes in the KWIQ button's menu) opens the event's routes for today (UTC), as Core sends them. It's the same kind of dialog as SRD Search, with the same look: a standard Windows dialog, in front of EuroScope until it is closed (Close, Enter, Esc or the title bar's X). The title names the event and the date. The list shows each route's **Airports** (`OKBK -> ORBI`) and **Route String**; select one and use **Copy Route String To Clipboard**, which then says "Copied". With no event, or no routes today, the list says "No event routes for today (UTC)."
@@ -103,6 +105,25 @@ Where a flight leaves the airspace comes from Core's FIR exit points, `/api/plug
 **Open SRD search window** (on any tag item, or SRD Search in the KWIQ button's menu) opens the UK Controller Plugin's SRD Search dialog: a standard Windows dialog, opened as UKCP opens it, in front of EuroScope until it is closed (Close, Esc or the title bar's X), like EuroScope's own dialogues. Enter the **Origin Fix or Airfield** and **Destination Fix or Airfield** (both required) and, optionally, the **Cruising Altitude or Level** (`350` is FL350, `35000` is feet), then **Search** or press Enter. Opened from an aircraft, it is filled in with the aircraft's departure, its destination (or its FIR exit point when it leaves the vACC's airspace) and its requested level, and searched straight away.
 
 **Search Results** lists every matching route: **Min** (`MC` when there is no minimum), **Max** (`-` when there is no limit), **FRA** (whether the route has Free Route Airspace, `<FRA>`, in it) and the **Route String**. Click a route to see its **Notes**, then **Copy Route String To Clipboard**. Tab moves between the boxes and Esc or **Close** closes the window. EuroScope keeps running while it is open.
+
+## Flight plan check (FPC)
+The FPC item is VFPC (hpeter2/VFPC, from DrFreas/VFPC) built in, with the rules the vACC keeps in VFPC's `Sid.json` served by Core instead of a file. It is separate from the SRD check. Rules are per departure airport and per SID, by the SID's first waypoint (`SESRU` for SESRU1A). They are tried from top to bottom, and the first one the flight fits decides, so the narrowest rules go first.
+
+| Field | Kind | What it does | Fails as |
+|---|---|---|---|
+| `suffix` | filter | the rule is only for that SID suffix, e.g. `1A` | |
+| `destinations` | filter | only for these destinations; a prefix covers all of them (`OM`) | |
+| `airways` | filter | only if the route has one of these, an airway or a run of route elements (`NAMDI M860 NINVA`, DCT ignored) | |
+| `engine` | check | engine type one of `P`, `T`, `J`, `E` | `ENG` |
+| `direction` | check | `EVEN`, `ODD` or `ANY` cruising level | `E/O` |
+| `min_fl`, `max_fl` | check | lowest and highest flight level | `MIN`, `MAX` |
+| `forbidden_fls` | check | flight levels not allowed | `FLR`, yellow (`ui.colour_warn`) when it is the only failure |
+| `navigation` | check | equipment codes allowed, e.g. `RG` | `NAV` |
+
+No SID in the flight plan, a SID with no rules, or no rule that fits the flight is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked. `.kwiq status` shows how many airports have rules.
+
+Core serves the rules at `/api/plugin/fpc`, one line per rule in order (a 404 means none):
+`FPC|<airport>|<sid>|<suffix>|<direction>|<min_fl>|<max_fl>|<forbidden_fls>|<destinations>|<airways>|<engine>|<navigation>`. Lists are comma separated and an empty field is no restriction, e.g. `FPC|ORBI|BGD||EVEN|80|600|250,260||DELMI DCT RUKAM B411 MURIB||`. The existing `Sid.json` files (OKAC `OKAC/Plugins/VFPC/Sid.json`, ORBB `.data/VFPC/*.json`) map onto it field for field.
 
 ## Squawk assignment
 Squawks are allocated by Core, so two controllers never hand out the same code. Core picks the range from the requesting controller's FIR (the plugin sends the controller's own callsign), the departure, the destination and the flight rules; when to ask for a code follows the UK Controller Plugin (`squawk_logic.hpp`, see `NOTICE.md`). It is off until `squawk.enabled` is set to 1 in Core, and while Core has not sent its list of codes never to assign (the plugin has no list of its own, and says so once in the chat). As in UKCP it works on the live network and on sweatbox (Core keeps the two apart); through a proxy only what the controller asks for is done, nothing automatic.

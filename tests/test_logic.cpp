@@ -1,5 +1,6 @@
 // Logic tests: g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic && ./test_logic
 #include "kwiq_logic.hpp"
+#include "fpc_logic.hpp"
 #include "squawk_logic.hpp"
 using namespace kwiq;
 static int fails = 0;
@@ -99,7 +100,7 @@ int main() {
     CHECK(IsDate("2026-11-07") && !IsDate("2026-1-07") && IsDate(TodayUtc()));
     CHECK(DateOf(0) == "1970-01-01");
 
-    // SRD parse + FPC
+    // SRD parse + SRD check
     SrdData srd = ParseSrd(
         "VERSION|abc123\n"
         "SRD|OKBK|ORBI|10000|30000|DCT ABC UL123 XYZ|Jets only\n"
@@ -111,21 +112,21 @@ int main() {
     CHECK(srd.rows[0].minLvl == 10000 && srd.rows[0].maxLvl == 30000 && srd.rows[0].notes == "Jets only");
     CHECK(srd.rows[1].minLvl == 0 && srd.rows[1].maxLvl == 45000);
     auto F = [&](const char* r) { return NormaliseRoute(r); };
-    CHECK(CheckFpc(srd, "OKBK", "ORBI", F("ABC UL123 XYZ"), 25000) == FpcResult::Ok);
-    CHECK(CheckFpc(srd, "OKBK", "ORBI", F("ABC UL123 XYZ"), 35000) == FpcResult::Max);   // row0 max 30000
-    CHECK(CheckFpc(srd, "OKBK", "ORBI", F("ABC UL123 XYZ"), 5000)  == FpcResult::Min);
-    CHECK(CheckFpc(srd, "OKBK", "ORBI", F("QQQ"), 40000) == FpcResult::Ok);              // other row allows it
-    CHECK(CheckFpc(srd, "OKBK", "ORBI", F("ABC XYZ"), 25000) == FpcResult::Route);
-    CHECK(CheckFpc(srd, "OKBK", "ORBI", F("ABC UL123 XYZ"), 0) == FpcResult::Ok);        // unknown level: skip
-    CHECK(CheckFpc(srd, "OKBK", "OMDB", F("DEF GHI"), 25000) == FpcResult::None);
-    CHECK(CheckFpc(srd, "OKBK", "OMDB", F("ABC XYZ"), 25000) == FpcResult::Route);       // enroute row wants UL123
+    CHECK(CheckSrd(srd, "OKBK", "ORBI", F("ABC UL123 XYZ"), 25000) == SrdResult::Ok);
+    CHECK(CheckSrd(srd, "OKBK", "ORBI", F("ABC UL123 XYZ"), 35000) == SrdResult::Max);   // row0 max 30000
+    CHECK(CheckSrd(srd, "OKBK", "ORBI", F("ABC UL123 XYZ"), 5000)  == SrdResult::Min);
+    CHECK(CheckSrd(srd, "OKBK", "ORBI", F("QQQ"), 40000) == SrdResult::Ok);              // other row allows it
+    CHECK(CheckSrd(srd, "OKBK", "ORBI", F("ABC XYZ"), 25000) == SrdResult::Route);
+    CHECK(CheckSrd(srd, "OKBK", "ORBI", F("ABC UL123 XYZ"), 0) == SrdResult::Ok);        // unknown level: skip
+    CHECK(CheckSrd(srd, "OKBK", "OMDB", F("DEF GHI"), 25000) == SrdResult::None);
+    CHECK(CheckSrd(srd, "OKBK", "OMDB", F("ABC XYZ"), 25000) == SrdResult::Route);       // enroute row wants UL123
     // waypoint (enroute) row applies when both ends are on the filed route
-    CHECK(CheckFpc(srd, "OTHH", "OIII", F("ABC UL123 XYZ"), 25000) == FpcResult::Ok);
-    CHECK(CheckFpc(srd, "OTHH", "OIII", F("ABC UL123 XYZ"), 15000) == FpcResult::Min);
-    CHECK(CheckFpc(srd, "OTHH", "OIII", F("DEF UL999"), 25000) == FpcResult::None);
-    CHECK(ExplainFpc(srd, "OKBK", "ORBI", "ABC XYZ", 25000).find("does not match") != std::string::npos);
-    CHECK(ExplainFpc(srd, "OKBK", "ORBI", "ABC UL123 XYZ", 35000).find("FL100") != std::string::npos);
-    CHECK(ExplainFpc(srd, "OKBK", "ORBI", "ABC UL123 XYZ", 25000).find("conform") != std::string::npos);
+    CHECK(CheckSrd(srd, "OTHH", "OIII", F("ABC UL123 XYZ"), 25000) == SrdResult::Ok);
+    CHECK(CheckSrd(srd, "OTHH", "OIII", F("ABC UL123 XYZ"), 15000) == SrdResult::Min);
+    CHECK(CheckSrd(srd, "OTHH", "OIII", F("DEF UL999"), 25000) == SrdResult::None);
+    CHECK(ExplainSrd(srd, "OKBK", "ORBI", "ABC XYZ", 25000).find("does not match") != std::string::npos);
+    CHECK(ExplainSrd(srd, "OKBK", "ORBI", "ABC UL123 XYZ", 35000).find("FL100") != std::string::npos);
+    CHECK(ExplainSrd(srd, "OKBK", "ORBI", "ABC UL123 XYZ", 25000).find("conform") != std::string::npos);
     CHECK(ParseLevelFt("350") == 35000 && ParseLevelFt("FL350") == 35000 && ParseLevelFt("fl 350") == 35000 &&
           ParseLevelFt("35000") == 35000 && ParseLevelFt("") == 0 && ParseLevelFt("abc") == 0);
     CHECK(FlStr(35000) == "FL350" && FlStr(5000) == "FL050");
@@ -173,19 +174,79 @@ int main() {
     CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
     CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "SIDAD", "" }) == "SIDAD" && SrdEnd("LTBA", "OK,OR", {}) == "");
 
-    // FPC for a flight leaving the airspace: checked against ADEP to its FIR exit
+    // SRD check for a flight leaving the airspace: checked against ADEP to its FIR exit
     SrdData srdx = ParseSrd("SRD|OKBK|ROTAP|20000|41000|DCT ABC UL602 ROTAP|\n"
                             "SRD|OKBK|SIDAD||25000|DCT SIDAD|\n"
                             "SRD|OKBK|ORBI|||DCT QQQ|\n");
     CHECK(srdx.toPoint.size() == 2 && srdx.pair.size() == 1);
     auto toLtba = F("DCT SIDAD ABC UL602 ROTAP DCT LTBA");
-    CHECK(CheckFpc(srdx, "OKBK", "LTBA", toLtba, 35000, nx) == FpcResult::Ok);
-    CHECK(CheckFpc(srdx, "OKBK", "LTBA", toLtba, 45000, nx) == FpcResult::Max);
-    CHECK(CheckFpc(srdx, "OKBK", "LTBA", F("DCT SIDAD XYZ ROTAP"), 35000, nx) == FpcResult::Route);
-    CHECK(CheckFpc(srdx, "OKBK", "LTBA", F("DCT SIDAD"), 20000, AircraftExit{ "SIDAD", "" }) == FpcResult::Ok);   // only the internal exit known
-    CHECK(CheckFpc(srdx, "OKBK", "ORBI", F("QQQ"), 30000, nx) == FpcResult::Ok);                  // a pair row still wins
-    CHECK(ExplainFpc(srdx, "OKBK", "LTBA", "DCT SIDAD ABC UL602 ROTAP", 35000, nx).find("FIR exit ROTAP") != std::string::npos);
-    CHECK(ExplainFpc(srdx, "OKBK", "LTBA", "DCT SIDAD XYZ ROTAP", 35000, nx).find("does not match") != std::string::npos);
+    CHECK(CheckSrd(srdx, "OKBK", "LTBA", toLtba, 35000, nx) == SrdResult::Ok);
+    CHECK(CheckSrd(srdx, "OKBK", "LTBA", toLtba, 45000, nx) == SrdResult::Max);
+    CHECK(CheckSrd(srdx, "OKBK", "LTBA", F("DCT SIDAD XYZ ROTAP"), 35000, nx) == SrdResult::Route);
+    CHECK(CheckSrd(srdx, "OKBK", "LTBA", F("DCT SIDAD"), 20000, AircraftExit{ "SIDAD", "" }) == SrdResult::Ok);   // only the internal exit known
+    CHECK(CheckSrd(srdx, "OKBK", "ORBI", F("QQQ"), 30000, nx) == SrdResult::Ok);                  // a pair row still wins
+    CHECK(ExplainSrd(srdx, "OKBK", "LTBA", "DCT SIDAD ABC UL602 ROTAP", 35000, nx).find("FIR exit ROTAP") != std::string::npos);
+    CHECK(ExplainSrd(srdx, "OKBK", "LTBA", "DCT SIDAD XYZ ROTAP", 35000, nx).find("does not match") != std::string::npos);
+
+    // flight plan check (VFPC rules)
+    {
+        using namespace kwiq::fpc;
+        Rules rules = ParseRules(
+            "FPC|OKKK|SESRU||ODD|||| OMDB, OI |M677,G669||\r\n"
+            "FPC|OKKK|SESRU||ODD|||||M677,G669||\n"
+            "FPC|OKKK|BOXIK||ODD||270||OBBI|B416|J|\n"
+            "FPC|ORBI|BGD|1A|EVEN|80|600|250,260||DELMI DCT RUKAM B411 MURIB||RG\n"
+            "FPC|ORBI|BGD||ANY|240||||NOLDO P975 SIDAD||\n"
+            "FPC|XX|ABC||ODD|||||||\nFPC|ORBI|BGD|short\njunk\n");
+        CHECK(rules.size() == 2 && rules["OKKK"]["SESRU"].size() == 2 && rules["ORBI"]["BGD"].size() == 2);
+        CHECK(rules["OKKK"]["SESRU"][0].destinations.size() == 2 && rules["ORBI"]["BGD"][0].forbidden.size() == 2);
+        CHECK(rules["ORBI"]["BGD"][0].airways[0].size() == 4);    // DCT dropped
+
+        Flight f; f.origin = "OKKK"; f.destination = "OMDB"; f.sid = "SESRU1A"; f.route = "SESRU1A SESRU M677 XYZ";
+        f.rflFt = 35000; f.engine = 'J'; f.capability = 'L';
+        Result r = Check(rules, f);
+        CHECK(r.Passed() && r.sidPoint == "SESRU" && r.suffix == "1A");
+        CHECK(Explain(r, f).find("passed (destination OMDB, via M677, odd)") != std::string::npos);
+        Flight g = f; g.rflFt = 36000;
+        r = Check(rules, g);
+        CHECK(!r.Passed() && r.fails.size() == 1 && r.fails[0] == Fail::Direction && std::string(Code(r.fails[0])) == "E/O");
+        CHECK(Explain(r, g).find("FL360 is even, the SID needs odd") != std::string::npos);
+        g = f; g.sid = "";
+        CHECK(Check(rules, g).fails[0] == Fail::Sid);
+        g = f; g.sid = "SESRU";                                     // no number: not a SID
+        CHECK(Check(rules, g).fails[0] == Fail::Sid);
+        g = f; g.sid = "ABCDE1A";
+        CHECK(Check(rules, g).fails[0] == Fail::Sid);
+        g = f; g.destination = "EGLL"; g.route = "SESRU G669 XYZ";  // not a listed destination: the next rule
+        CHECK(Check(rules, g).Passed());
+        g = f; g.route = "SESRU UL999 XYZ";                         // no rule fits
+        r = Check(rules, g);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Sid && Explain(r, g).find("fits") != std::string::npos);
+        g = f; g.sid = "BOXIK1B"; g.destination = "OBBI"; g.route = "BOXIK1B BOXIK B416 OBBI"; g.rflFt = 29000;
+        r = Check(rules, g);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Max);
+        g.engine = 'P';
+        r = Check(rules, g);
+        CHECK(r.fails.size() == 2 && r.fails[0] == Fail::Engine && r.fails[1] == Fail::Max);
+
+        Flight b; b.origin = "ORBI"; b.destination = "LTBA"; b.sid = "BGD1A"; b.route = "BGD DELMI DCT RUKAM B411 MURIB";
+        b.rflFt = 26000; b.engine = 'J'; b.capability = 'R';
+        r = Check(rules, b);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Forbidden && r.WarningOnly());
+        b.capability = 'X';
+        r = Check(rules, b);
+        CHECK(r.fails.size() == 2 && r.fails[1] == Fail::Navigation && !r.WarningOnly());
+        b.sid = "BGD1B"; b.route = "BGD NOLDO P975 SIDAD"; b.rflFt = 23000; b.capability = 'R';   // 1A rule skipped
+        r = Check(rules, b);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Min);
+
+        g = f; g.vfr = true; g.sid = "";
+        r = Check(rules, g);
+        CHECK(r.Passed() && r.vfr && Explain(r, g).find("VFR") != std::string::npos);
+        g = f; g.origin = "OMDB";                                   // no rules for the airport: nothing shown
+        CHECK(!Check(rules, g).checked);
+        CHECK(ContainsRun({ "A", "B", "C" }, { "B", "C" }) && !ContainsRun({ "A", "B", "C" }, { "A", "C" }));
+    }
 
     // SRD search
     CHECK(SrdSearch(srd, "okbk", "orbi", 0).size() == 2);
