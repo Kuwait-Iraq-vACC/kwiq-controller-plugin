@@ -87,6 +87,12 @@ int main() {
     CHECK(CheckEventRoute(ev, "OTHH", "OKBK", "DCT", D) == RouteResult::None);
     CHECK(CheckEventRoute(ev, "OTHH", "OKBK", "DCT", D2) == RouteResult::Ok);
     CHECK(RoutesForDate(ev, D).size() == 2 && RoutesForDate(ev, D2).size() == 1);
+    CHECK(EventRouteAirports(RoutesForDate(ev, D)[0]) == RoutesForDate(ev, D)[0].adep + " -> " + RoutesForDate(ev, D)[0].ades);
+    {
+        EventRoute er;
+        er.adep = "OKBK"; er.ades = "ORBI";
+        CHECK(EventRouteAirports(er) == "OKBK -> ORBI");
+    }
     CHECK(!ParseCoreEvent("NONE\n").active);
     CHECK(ParseCoreEvent("EVENT|X|a b/../c").vatcanCode == "abc");
     CHECK(IsDate("2026-11-07") && !IsDate("2026-1-07") && IsDate(TodayUtc()));

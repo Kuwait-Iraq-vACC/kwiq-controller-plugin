@@ -17,6 +17,12 @@
 #define IDC_SRD_RESULTS_STATIC  1012
 #define IDC_SRD_NOTES_STATIC    1013
 
+// Event Routes (#61), laid out as IDD_SRD_SEARCH
+#define IDD_EVENT_ROUTES        102
+#define IDC_EVT_ROUTES          1021
+#define IDC_EVT_ROUTE_COPY      1022
+#define IDC_EVT_ROUTES_STATIC   1023
+
 // The KWIQ button's logo (#59), one image per size it is drawn at (kwiq_logo.ps1 makes them from kwiq_logo.png)
 #define IDR_KWIQ_LOGO_28        201
 #define IDR_KWIQ_LOGO_35        202
