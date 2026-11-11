@@ -752,7 +752,8 @@ public:
         if (instanceLock_) CloseHandle(instanceLock_);
     }
 
-    virtual void OnTimer(int Counter) override {
+    // Every EuroScope callback is a function-try-block: an exception must never reach EuroScope (#45)
+    virtual void OnTimer(int Counter) override try {
         if (duplicate_) return;
         CVCHPlugin::OnTimer(Counter);                       // VCH housekeeping
         CDataHandler::ApplyPending(this);                   // slot/feed results, main thread
@@ -793,9 +794,9 @@ public:
         if (srd)  lastSrd_  = now;
         busy_ = true;
         worker_ = std::thread(&CKWIQPlugin::Refresh, this, core, srd);
-    }
+    } catch (...) {}
 
-    virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override {
+    virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override try {
         if (FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_HIDE) { MenuAction(FunctionId, sItemString, Pt, Area); return; }
         switch (FunctionId) {
         case KWIQ_FUNC_EVENT_ROUTES: OpenRoutesWindow(Pt); return;
@@ -803,11 +804,11 @@ public:
         case KWIQ_FUNC_SRD_SEARCH:   OpenSrdWindow(Pt); return;
         }
         CVCHPlugin::OnFunctionCall(FunctionId, sItemString, Pt, Area);
-    }
+    } catch (...) {}
 
     virtual void OnGetTagItem(EuroScopePlugIn::CFlightPlan FlightPlan, EuroScopePlugIn::CRadarTarget RadarTarget,
                               int ItemCode, int TagData, char sItemString[16],
-                              int* pColorCode, COLORREF* pRGB, double* pFontSize) override {
+                              int* pColorCode, COLORREF* pRGB, double* pFontSize) override try {
         using namespace kwiq;
         bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_SECTOR;
         if (ours && !enabled_) return;                       // Core kill switch / plugin too old
@@ -858,11 +859,13 @@ public:
         else {
             CVCHPlugin::OnGetTagItem(FlightPlan, RadarTarget, ItemCode, TagData, sItemString, pColorCode, pRGB, pFontSize);
         }
-    }
+    } catch (...) {}
 
-    virtual bool OnCompileCommand(const char* sCommandLine) override {
-        if (duplicate_) return false;                        // the copy that is in use answers
-        std::string c = kwiq::Upper(kwiq::Trim(sCommandLine));
+    virtual bool OnCompileCommand(const char* sCommandLine) override try {
+        if (duplicate_ || !sCommandLine) return false;       // the copy that is in use answers
+        // Arguments come from the trimmed line, so a leading space doesn't shift them (#46)
+        const std::string line = kwiq::Trim(sCommandLine);
+        std::string c = kwiq::Upper(line);
         if (c == ".KWIQ REFRESH") {
             lastCore_ = lastSrd_ = lastSlotFetch_ = 0;
             { std::lock_guard<std::mutex> g(mu_); srd_.version.clear(); }   // force SRD re-download
@@ -888,7 +891,7 @@ public:
             return true;
         }
         if (c.compare(0, 16, ".KWIQ SECTORFILE") == 0) {
-            std::string path = kwiq::Trim(std::string(sCommandLine).substr(16));
+            std::string path = kwiq::Trim(line.substr(16));
             { std::lock_guard<std::mutex> g(mu_); sectorPath_ = path; }
             SaveDataToSettings("kwiq_sectorfile_path", "KWIQ sector file folder or file", path.c_str());
             Msg(path.empty() ? "Sector file location: automatic" : "Sector file location: " + path, false);
@@ -902,7 +905,7 @@ public:
             return true;
         }
         if (c == ".KWIQ KEY" || c.compare(0, 10, ".KWIQ KEY ") == 0) {
-            std::string key = kwiq::Trim(std::string(sCommandLine).substr(9));
+            std::string key = kwiq::Trim(line.substr(9));
             if (key.empty()) Msg(apiKey_.empty() ? "No API key has been entered. Generate one on myKWIQ, then use: .kwiq key <your key>"
                                                  : "An API key is connected.", false);
             else if (kwiq::Upper(key) == "CLEAR") SetApiKey("");
@@ -940,20 +943,19 @@ public:
             return true;
         }
         return CVCHPlugin::OnCompileCommand(sCommandLine);
-    }
+    } catch (...) { return false; }
 
-    // main thread: sector indicator of the position tracking an aircraft. The ID of the ESE position
-    // EuroScope identifies that controller as right now (by prefix, suffix and frequency, so a relief callsign
-    // or a controller covering another position gets the position actually worked), else Core's alias for
-    // the callsign. Empty if nobody tracks it or neither is known.
+    // main thread: sector indicator of the position tracking an aircraft: Core's alias for the ID of the ESE
+    // position EuroScope identifies that controller as right now (by prefix, suffix and frequency, so a relief
+    // callsign or a controller covering another position gets the position actually worked). Empty if nobody
+    // tracks it, EuroScope does not identify the controller, or Core does not list that position.
     std::string SectorFor(const char* trackerCallsign) {
         std::string cs = kwiq::Upper(trackerCallsign);
         EuroScopePlugIn::CController me = ControllerMyself();
         EuroScopePlugIn::CController c = me.IsValid() && kwiq::Upper(me.GetCallsign()) == cs ? me : ControllerSelect(trackerCallsign);
-        if (c.IsValid() && c.GetPositionIdentified() && c.GetPositionId() && *c.GetPositionId())
-            return kwiq::Upper(c.GetPositionId()).substr(0, 4);
+        if (!c.IsValid() || !c.GetPositionIdentified() || !c.GetPositionId() || !*c.GetPositionId()) return "";
         std::lock_guard<std::mutex> g(mu_);
-        auto it = sectors_.find(cs);
+        auto it = sectors_.find(kwiq::Upper(c.GetPositionId()));
         return it == sectors_.end() ? std::string() : it->second;
     }
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_; }
@@ -1323,7 +1325,7 @@ public:
         if (kind == kwiq_ui::NOTICE_ES_VERSION && button == 1) {
             std::string url;
             { std::lock_guard<std::mutex> g(mu_); url = esUrl_; }
-            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            if (kwiq::IsWebLink(url)) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
     }
 private:
@@ -1402,7 +1404,7 @@ private:
             motd_ = motd;
             esAccepted_ = c.Get("euroscope.versions");
             esUrl_ = Trim(c.Get("euroscope.setup_url", ES_SETUP_URL));
-            if (esUrl_.empty()) esUrl_ = ES_SETUP_URL;
+            if (!IsWebLink(esUrl_)) esUrl_ = ES_SETUP_URL;   // only a web page is ever opened (#44)
             esConfigured_ = true;
             if (domestic != domesticPrefixes_) { domesticPrefixes_ = domestic; exitGen_++; }
         }
@@ -1621,7 +1623,8 @@ public:
 
     virtual void OnAsrContentToBeClosed(void) override { delete this; }
 
-    virtual void OnRefresh(HDC hDC, int Phase) override {
+    // As in CKWIQPlugin, every callback catches everything (#45)
+    virtual void OnRefresh(HDC hDC, int Phase) override try {
         if (!gPlugin) return;
         if (Phase == EuroScopePlugIn::REFRESH_PHASE_AFTER_LISTS) {
             std::time_t now = std::time(nullptr);
@@ -1652,20 +1655,20 @@ public:
             TextOutA(hDC, p.x, p.y - 9, alias.c_str(), (int)alias.size());
         }
         RestoreDC(hDC, saved);
-    }
+    } catch (...) {}
 
-    virtual void OnClickScreenObject(int ObjectType, const char*, POINT, RECT Area, int) override {
+    virtual void OnClickScreenObject(int ObjectType, const char*, POINT, RECT Area, int) override try {
         if (ObjectType == KWIQ_OBJ_BUTTON && gPlugin) gPlugin->OpenMenu(Area);
-    }
-    virtual void OnMoveScreenObject(int ObjectType, const char*, POINT Pt, RECT, bool Released) override {
+    } catch (...) {}
+    virtual void OnMoveScreenObject(int ObjectType, const char*, POINT Pt, RECT, bool Released) override try {
         if (ObjectType != KWIQ_OBJ_BUTTON || !gPlugin) return;
         gPlugin->MoveButton(GetRadarArea(), Pt, Released);
         RequestRefresh();
-    }
+    } catch (...) {}
     // the menu and the key box opened from the button report back here
-    virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override {
+    virtual void OnFunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area) override try {
         if (gPlugin && FunctionId >= KWIQ_MENU_KEY && FunctionId <= KWIQ_MENU_HIDE) gPlugin->MenuAction(FunctionId, sItemString, Pt, Area);
-    }
+    } catch (...) {}
 
 private:
     // Red box with white OUTDATED SCT FILE, in the middle of the radar screen
@@ -1716,15 +1719,16 @@ private:
                                CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
 };
 
-EuroScopePlugIn::CRadarScreen* CKWIQPlugin::OnRadarScreenCreated(const char*, bool, bool, bool, bool) {
+EuroScopePlugIn::CRadarScreen* CKWIQPlugin::OnRadarScreenCreated(const char*, bool, bool, bool, bool) try {
     return new CKWIQRadar();
-}
+} catch (...) { return nullptr; }
 
+// Called from the windows' WndProcs, so nothing may escape into Windows either
 static void SrdSearchThunk(const std::string& adep, const std::string& ades, const std::string& lvl) {
-    if (gPlugin) gPlugin->RunSrdSearch(adep, ades, lvl);
+    try { if (gPlugin) gPlugin->RunSrdSearch(adep, ades, lvl); } catch (...) {}
 }
 static void NoticeThunk(int kind, int button) {
-    if (gPlugin) gPlugin->OnNotice(kind, button);
+    try { if (gPlugin) gPlugin->OnNotice(kind, button); } catch (...) {}
 }
 
 // Entry points: declared (with dllexport) in EuroScopePlugIn.h, so no extern "C" here. The loader
