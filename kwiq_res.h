@@ -16,3 +16,10 @@
 #define IDC_SRD_REQUIRED_STATIC 1011
 #define IDC_SRD_RESULTS_STATIC  1012
 #define IDC_SRD_NOTES_STATIC    1013
+
+// The KWIQ button's logo (#59), one image per size it is drawn at (kwiq_logo.ps1 makes them from kwiq_logo.png)
+#define IDR_KWIQ_LOGO_28        201
+#define IDR_KWIQ_LOGO_35        202
+#define IDR_KWIQ_LOGO_42        203
+#define IDR_KWIQ_LOGO_49        204
+#define IDR_KWIQ_LOGO_56        205
