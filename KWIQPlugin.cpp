@@ -8,6 +8,7 @@
 //   * FPC: VFPC's flight plan check (SID, direction, levels, ...), "Explain FPC result" (see fpc_logic.hpp)
 //   * RDF (Radio Direction Finder, GPL-3.0, Kingfu Chan) and its TrackAudio bridge are built in (rdf.cpp)
 //   * DiscordEuroScope (Discord Rich Presence, GPL-3.0, Kirollos Nashaat) is built in (discord.cpp)
+//   * Squawk assignment, codes allocated by Core (when to ask: the UK Controller Plugin's rules, see squawk_logic.hpp)
 //
 // All route data comes from Core (Laravel). License: GPL-3.0-or-later, see LICENSE and NOTICE.md.
 
@@ -15,6 +16,10 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <unordered_set>
 #include <map>
 #include <set>
 #include <array>
@@ -28,6 +33,7 @@
 #include "requestMenu.hpp"      // CVCHPlugin (VCH)
 #include "kwiq_logic.hpp"
 #include "fpc_logic.hpp"
+#include "squawk_logic.hpp"
 #include "VatsimAPI.h"
 #include "keylink.hpp"
 #include "rdf.hpp"                // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
@@ -59,6 +65,9 @@ static const char* CORE_METAR_URL       = CORE_BASE "/metar";
 static const char* CORE_NOTICES_URL     = CORE_BASE "/notifications";
 static const char* CORE_FIR_EXITS_URL   = CORE_BASE "/fir-exits";
 static const char* CORE_FPC_URL         = CORE_BASE "/fpc";
+static const char* CORE_SQUAWK_URL      = CORE_BASE "/squawk-assignment/";   // + callsign
+static const char* CORE_TOPDOWN_URL     = CORE_BASE "/topdown";        // shared with the QNH monitor and notifications
+static const char* CORE_SQUAWK_CODES_URL = CORE_BASE "/squawk/non-assignable";   // codes never assigned (no built-in list)
 // myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
 static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
 // EuroScope setup guide, opened from the incorrect EuroScope version popup until Core sends euroscope.setup_url
@@ -80,6 +89,10 @@ enum {
     KWIQ_FUNC_FPC_EXPLAIN  = 2002,   // "Explain FPC result"
     KWIQ_FUNC_SRD_SEARCH   = 2003,   // "Open SRD search window"
     KWIQ_FUNC_SRD_EXPLAIN  = 2010,   // "Explain SRD result"
+    KWIQ_FUNC_SQUAWK_MENU    = 2004,   // "Open squawk assignment menu"
+    KWIQ_FUNC_SQUAWK_ASSIGN  = 2005,   // "Force squawk recycle"
+    KWIQ_FUNC_SQUAWK_PICK    = 2007,   // a choice in the squawk assignment menu
+    KWIQ_FUNC_SQUAWK_MANUAL  = 2008,   // the code typed after Manual
     // the KWIQ button on the radar screen and its menu
     KWIQ_OBJ_BUTTON        = 2100,
     KWIQ_MENU_KEY          = 2101,
@@ -96,7 +109,8 @@ enum {
     KWIQ_MENU_BRIDGE       = 2112,   // TrackAudio's connection (a status row: a click resyncs or reconnects)
     KWIQ_MENU_DISCORD      = 2113,   // DiscordEuroScope on or off
     KWIQ_MENU_NOTICES      = 2114,   // procedure notifications window
-    KWIQ_MENU_LAST         = 2114
+    KWIQ_MENU_SQUAWK       = 2115,   // automatic squawk assignment on or off
+    KWIQ_MENU_LAST         = KWIQ_MENU_SQUAWK
 };
 
 // ---------------------------------------------------------------------------
@@ -702,6 +716,8 @@ public:
         RegisterTagItemFunction("Explain FPC result",       KWIQ_FUNC_FPC_EXPLAIN);
         RegisterTagItemFunction("Explain SRD result",       KWIQ_FUNC_SRD_EXPLAIN);
         RegisterTagItemFunction("Open SRD search window",   KWIQ_FUNC_SRD_SEARCH);
+        RegisterTagItemFunction("Open squawk assignment menu", KWIQ_FUNC_SQUAWK_MENU);
+        RegisterTagItemFunction("Force squawk recycle",        KWIQ_FUNC_SQUAWK_ASSIGN);
         kwiq_ui::gOnSearch = &SrdSearchThunk;
         apiKey_ = apikey::Load();
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
@@ -723,6 +739,7 @@ public:
         if (reduced_) { Msg(kReducedReminder, true); return; }
         std::string why;
         if (!rdf_.Start(why)) Msg(why, true);
+        sqWorker_ = std::thread(&CKWIQPlugin::SquawkWorker, this);
         // EuroScope should load KWIQPlugin.dll, which updates and then loads this file; loaded directly,
         // nothing updates it
         if (!GetModuleHandleA("KWIQPlugin.dll"))
@@ -730,6 +747,9 @@ public:
                 "and load KWIQPlugin.dll.", true);
     }
     virtual ~CKWIQPlugin() {
+        { std::lock_guard<std::mutex> g(sqMu_); sqQuit_ = true; }
+        sqCv_.notify_all();
+        if (sqWorker_.joinable()) sqWorker_.join();
         kwiq_ui::gOnSearch = nullptr;
         kwiq_ui::Shutdown();
         keyLink_.Stop();
@@ -770,9 +790,12 @@ public:
             // DiscordEuroScope on or off for this controller; the Configurator writes the same setting
             const char* ds = GetDataFromSettings("DiscordEuroScope");
             if (ds && *ds == '0') discord_.SetLocal(false);
+            const char* sq = GetDataFromSettings("kwiq_squawk_auto");
+            if (sq && *sq == '0') sqAuto_ = false;
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
         TickConnection(now);
+        SquawkTick(now);
         TickKeySetup(now);
         TickEuroScopeVersion(now);
         {
@@ -836,6 +859,10 @@ public:
         case KWIQ_FUNC_FPC_EXPLAIN:  ExplainFpcSelected(); return;
         case KWIQ_FUNC_SRD_EXPLAIN:  ExplainSrdSelected(); return;
         case KWIQ_FUNC_SRD_SEARCH:   OpenSrdWindow(Pt); return;
+        case KWIQ_FUNC_SQUAWK_MENU:    SquawkMenu(Area); return;
+        case KWIQ_FUNC_SQUAWK_ASSIGN:  SquawkForce(); return;
+        case KWIQ_FUNC_SQUAWK_PICK:    SquawkPick(sItemString ? sItemString : "", Area); return;
+        case KWIQ_FUNC_SQUAWK_MANUAL:  SquawkManual(sItemString ? kwiq::Trim(sItemString) : ""); return;
         }
         CVCHPlugin::OnFunctionCall(FunctionId, sItemString, Pt, Area);
     } catch (...) {}
@@ -968,6 +995,13 @@ public:
             ShowButton(!buttonShown_);
             return true;
         }
+        if (c == ".KWIQ SQUAWK") {
+            sqAuto_ = !sqAuto_;
+            SaveDataToSettings("kwiq_squawk_auto", "KWIQ automatic squawk assignment", sqAuto_ ? "1" : "0");
+            Msg(std::string("Automatic squawk assignment: ") + (sqAuto_ ? "on" : "off") +
+                (SquawkOn() ? "" : " (squawk assignment is " + SquawkOffWhy() + ")"), false);
+            return true;
+        }
         if (c == ".RDF DRAW ON" || c == ".RDF DRAW OFF" || c == ".RDF DRAW CORE") {
             SetRdfDraw(c == ".RDF DRAW CORE" ? -1 : c == ".RDF DRAW ON" ? 1 : 0);
             return true;
@@ -1009,7 +1043,8 @@ public:
                 " ORBB " + (upstreamAirac_["ORBB"].empty() ? "?" : upstreamAirac_["ORBB"]) +
                 " | SRD routes " + std::to_string(srd_.rows.size()) + " | sectors " +
                 std::to_string(sectors_.size()) + " | FIR exits " + std::to_string(firExits_.size()) +
-                " | FPC airports " + std::to_string(fpcRules_.size()) + " | ";
+                " | FPC airports " + std::to_string(fpcRules_.size()) + " | squawks " +
+                (!SquawkOn() ? SquawkOffWhy() : sqAuto_ ? "automatic" : "by hand") + " | ";
             s += ev_.active
                 ? ev_.name + " | event routes " + std::to_string(ev_.routes.size()) +
                   " | VATCAN code " + ev_.vatcanCode + " | slots " + std::to_string(CDataHandler::SlotCount()) +
@@ -1265,6 +1300,7 @@ public:
             AddPopupListElement(line("Notifications", unread ? (std::to_string(unread) + " unread").c_str() : "").c_str(), "", KWIQ_MENU_NOTICES);
         }
         AddPopupListElement(line("Slot Auto Refresh", autoRefresh_ ? "On" : "Off").c_str(), "", KWIQ_MENU_AUTOREFRESH);
+        AddPopupListElement(line("Auto Squawk", !sqEnabled_ ? "Off in Core" : !sqHaveCodes_ ? "No code list" : sqAuto_ ? "On" : "Off").c_str(), "", KWIQ_MENU_SQUAWK);
         AddPopupListElement("Event Routes", "", KWIQ_MENU_EVENT_ROUTES);
         AddPopupListElement("SRD Search", "", KWIQ_MENU_SRD);
         AddPopupListElement(line("Sector File", "Check").c_str(), "", KWIQ_MENU_SECTORFILE);
@@ -1289,6 +1325,7 @@ public:
         case KWIQ_MENU_DISCORD:      SetDiscord(!discord_.Local()); return;
         case KWIQ_MENU_NOTICES:      OpenNotices(); return;
         case KWIQ_MENU_AUTOREFRESH:  OnCompileCommand(".kwiq autorefresh"); return;
+        case KWIQ_MENU_SQUAWK:       OnCompileCommand(".kwiq squawk"); return;
         case KWIQ_MENU_EVENT_ROUTES: OpenRoutesWindow(pt); return;
         case KWIQ_MENU_SRD:          OpenSrdWindow(pt); return;
         case KWIQ_MENU_SECTORFILE:   OnCompileCommand(".kwiq version"); return;
@@ -1569,6 +1606,347 @@ private:
         DisplayUserMessage("KWIQ Controller Plugin", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
     }
 
+    // ---- squawk assignment (main thread) ------------------------------------------------------
+    // Adapted from the UK Controller Plugin (src/plugin/squawk, GPL-3.0); the rules are in squawk_logic.hpp.
+    // Core allocates the codes: domestic, VFR or international, from the route and flight rules. An aircraft
+    // that needs one is checked on every flight plan update and every 5 seconds; the request goes to Core on a
+    // worker thread and the answer is set on the next timer tick. Nothing happens until Core sets squawk.enabled.
+    struct SqJob {
+        std::string callsign, method, form, previous, network;
+        bool lookupFirst = false;                                   // use a code Core already holds for it
+        bool manual = false;                                        // the controller asked: say what went wrong
+    };
+    struct SqResult {
+        std::string callsign, squawk, error, previous;
+        bool manual = false, released = false;
+    };
+    static constexpr std::time_t SQ_RETRY_SECONDS = 60;              // after Core could not give an aircraft a code
+    // On with Core's squawk.enabled and its list of codes never to assign: there is no list built in
+    bool SquawkOn() const { return sqEnabled_ && sqHaveCodes_ && enabled_ && !duplicate_ && !reduced_; }
+    std::string SquawkOffWhy() const {
+        if (!sqEnabled_) return "off in Core";
+        if (!sqHaveCodes_) return "off: Core has not sent its list of codes never to assign";
+        return "off";
+    }
+    std::shared_ptr<const kwiq::squawk::CodeList> SquawkCodes() {
+        std::lock_guard<std::mutex> g(mu_);
+        return sqCodes_;
+    }
+
+    // UKCP Login: logged in on anything but no connection, playback or a proxy (so sweatbox counts)
+    static bool SquawkLoggedIn(int ct) {
+        return ct != EuroScopePlugIn::CONNECTION_TYPE_NO && ct != EuroScopePlugIn::CONNECTION_TYPE_PLAYBACK &&
+               ct != EuroScopePlugIn::CONNECTION_TYPE_VIA_PROXY;
+    }
+    // Connected as a controller; through a proxy only for what the controller asks for, nothing automatic
+    kwiq::squawk::User SquawkUser() {
+        kwiq::squawk::User u;
+        int ct = GetConnectionType();
+        EuroScopePlugIn::CController me = ControllerMyself();
+        if (ct != EuroScopePlugIn::CONNECTION_TYPE_NO && ct != EuroScopePlugIn::CONNECTION_TYPE_PLAYBACK &&
+            me.IsValid() && me.IsController()) {
+            u.controller = true;
+            u.callsign = kwiq::Upper(me.GetCallsign());
+        }
+        return u;
+    }
+    // Core keeps sweatbox codes apart from the live network's: the same callsign can be on both
+    std::string SquawkNetwork() {
+        return GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX ? "sweatbox" : "live";
+    }
+    std::vector<std::string> OnlineControllers() {
+        std::vector<std::string> v;
+        for (auto c = ControllerSelectFirst(); c.IsValid(); c = ControllerSelectNext(c))
+            if (c.IsController()) v.push_back(kwiq::Upper(c.GetCallsign()));
+        return v;
+    }
+    std::shared_ptr<const kwiq::squawk::TopDown> TopDownNow() {
+        std::lock_guard<std::mutex> g(mu_);
+        return sqTopDown_;
+    }
+    // Core's non-discrete code for the flight rules (squawk.non_discrete, squawk.non_discrete_vfr)
+    std::string NonDiscreteCode(bool vfr) {
+        std::lock_guard<std::mutex> g(mu_);
+        return vfr ? sqNonDiscreteVfr_ : sqNonDiscrete_;
+    }
+
+    // What the rules need to know about an aircraft; false if it has no radar target yet
+    bool SquawkFacts(EuroScopePlugIn::CFlightPlan& fp, const kwiq::squawk::User& u, const std::vector<std::string>& online,
+                     const kwiq::squawk::TopDown& td, kwiq::squawk::Aircraft& a) {
+        auto d = fp.GetFlightPlanData();
+        a.callsign = fp.GetCallsign();
+        a.origin = kwiq::Upper(d.GetOrigin());
+        a.destination = kwiq::Upper(d.GetDestination());
+        a.squawk = fp.GetControllerAssignedData().GetSquawk();
+        a.vfr = std::strcmp(d.GetPlanType(), "V") == 0;
+        const char* tracker = fp.GetTrackingControllerCallsign();
+        a.tracked = tracker && *tracker;
+        a.trackedByMe = fp.GetTrackingControllerIsMe();
+        a.fromOrigin = fp.GetDistanceFromOrigin();
+        a.deliveryByMe = kwiq::squawk::DeliveryByMe(td, a.origin, u.callsign, online);
+        EuroScopePlugIn::CRadarTarget rt = fp.GetCorrelatedRadarTarget();
+        if (!rt.IsValid()) return false;
+        EuroScopePlugIn::CRadarTargetPositionData pos = rt.GetPosition();
+        a.groundSpeed = pos.GetReportedGS();
+        a.altitude = pos.GetFlightLevel();
+        return true;
+    }
+    void SetSquawk(EuroScopePlugIn::CFlightPlan& fp, const std::string& code, bool byHand) {
+        fp.GetControllerAssignedData().SetSquawk(code.c_str());
+        auto it = sqStored_.find(fp.GetCallsign());
+        if (it != sqStored_.end()) { it->second.squawk = code; it->second.byHand = byHand; }
+    }
+    void SquawkQueue(SqJob job) {
+        { std::lock_guard<std::mutex> g(sqMu_); sqJobs_.push_back(std::move(job)); }
+        sqCv_.notify_one();
+    }
+    // Ask Core for a code; it picks the range from the departure, destination and flight rules
+    bool SquawkRequest(const kwiq::squawk::Aircraft& a, bool lookupFirst, bool manual) {
+        using namespace kwiq::squawk;
+        if (!UrlSafeCallsign(a.callsign) || !sqBusy_.insert(a.callsign).second) return false;   // one request at a time
+        SqJob job;
+        job.callsign = a.callsign;
+        job.method = "PUT";
+        job.network = SquawkNetwork();
+        job.lookupFirst = lookupFirst;
+        job.manual = manual;
+        job.form = AssignForm(a, SquawkUser().callsign);            // Core picks the range from the requester's FIR
+        SquawkQueue(std::move(job));
+        return true;
+    }
+    // Set a code by hand (non-discrete, manual) and give back the one Core held
+    void SquawkReplace(EuroScopePlugIn::CFlightPlan& fp, const std::string& code) {
+        kwiq::squawk::User u = SquawkUser();
+        kwiq::squawk::Aircraft a;
+        SquawkFacts(fp, u, {}, kwiq::squawk::TopDown{}, a);
+        if (!kwiq::squawk::ChangeAllowed(u, a)) {
+            Msg("You can only change the squawk of an aircraft you track or nobody tracks.", true);
+            return;
+        }
+        if (!kwiq::squawk::UrlSafeCallsign(a.callsign) || !sqBusy_.insert(a.callsign).second) return;
+        SqJob job;
+        job.callsign = a.callsign;
+        job.method = "DELETE";
+        job.network = SquawkNetwork();
+        job.previous = a.squawk;
+        job.manual = true;
+        SquawkStore(a.callsign, a.origin, a.destination);
+        SetSquawk(fp, code, true);
+        SquawkQueue(std::move(job));
+    }
+
+    // UKCP SquawkEventHandler::AttemptAssignment, then remember the plan for a reconnect
+    void SquawkAttempt(EuroScopePlugIn::CFlightPlan& fp, const kwiq::squawk::User& u, const std::vector<std::string>& online,
+                       const kwiq::squawk::TopDown& td, const kwiq::squawk::CodeList& codes, std::time_t now) {
+        using namespace kwiq::squawk;
+        Aircraft a;
+        bool facts = SquawkFacts(fp, u, online, td, a);
+        auto it = sqStored_.find(a.callsign);
+        const Stored* s = it == sqStored_.end() ? nullptr : &it->second;
+        bool others = a.tracked && !a.trackedByMe;                  // theirs to give a code
+        auto retry = sqRetryAt_.find(a.callsign);
+        bool waiting = retry != sqRetryAt_.end() && now < retry->second;
+        if (facts && !others && !waiting && sqLoggedIn_ && now - sqLoginAt_ >= LOGIN_DELAY_SECONDS) {
+            switch (Decide(u, a, s, codes)) {
+            case Action::Previous: SetSquawk(fp, s->squawk, s->byHand); break;
+            case Action::Assign:   SquawkRequest(a, !ForceNeeded(s, a), false); break;
+            case Action::None:     break;
+            }
+        }
+        SquawkStore(a.callsign, a.origin, a.destination);
+    }
+    void SquawkStore(const std::string& callsign, const std::string& origin, const std::string& destination) {
+        if (callsign.empty()) return;
+        kwiq::squawk::Stored& st = sqStored_[callsign];
+        if (st.origin != origin || st.destination != destination) st.byHand = false;   // a new plan: automatic again
+        st.origin = origin;
+        st.destination = destination;
+        st.expires = 0;
+    }
+
+    void SquawkTick(std::time_t now) {
+        bool in = SquawkLoggedIn(GetConnectionType());
+        if (in && !sqLoggedIn_) sqLoginAt_ = now;
+        sqLoggedIn_ = in;
+        SquawkApply(now);
+        if (now - sqLastPass_ < 5) return;
+        sqLastPass_ = now;
+        for (auto it = sqStored_.begin(); it != sqStored_.end();)
+            it = it->second.expires && it->second.expires < now ? sqStored_.erase(it) : std::next(it);
+        for (auto it = sqRetryAt_.begin(); it != sqRetryAt_.end();)
+            it = it->second <= now ? sqRetryAt_.erase(it) : std::next(it);
+        // Squawk assignment is on in Core but Core sent no list of codes never to assign: say so once
+        if (sqEnabled_ && sqCodesTried_ && !sqHaveCodes_ && !sqToldNoCodes_) {
+            sqToldNoCodes_ = true;
+            Msg("Squawk assignment is off: Core has not sent its list of codes never to assign.", true);
+        }
+        // EuroScope says nothing when the user assumes an aircraft, so look at them all
+        if (!SquawkOn() || !sqAuto_) return;
+        kwiq::squawk::User u = SquawkUser();
+        if (!u.controller) return;
+        auto codes = SquawkCodes();
+        if (!codes) return;
+        auto online = OnlineControllers();
+        auto td = TopDownNow();
+        for (auto fp = FlightPlanSelectFirst(); fp.IsValid(); fp = FlightPlanSelectNext(fp)) {
+            const char* tracker = fp.GetTrackingControllerCallsign();
+            if (kwiq::squawk::HasAssignedSquawk(*codes, fp.GetControllerAssignedData().GetSquawk()) ||
+                (tracker && *tracker && !fp.GetTrackingControllerIsMe())) continue;
+            SquawkAttempt(fp, u, online, *td, *codes, now);
+        }
+    }
+    // Core's answers, set on the main thread
+    void SquawkApply(std::time_t now) {
+        std::vector<SqResult> done;
+        { std::lock_guard<std::mutex> g(sqMu_); done.swap(sqDone_); }
+        for (auto& r : done) {
+            sqBusy_.erase(r.callsign);
+            EuroScopePlugIn::CFlightPlan fp = FlightPlanSelect(r.callsign.c_str());
+            if (r.released) {
+                // Core still holds the old code: put it back, so EuroScope and Core agree (UKCP does the same)
+                if (r.error.empty()) continue;
+                Msg("Core could not release the squawk of " + r.callsign + " (" + r.error + "), so it is back to " +
+                    r.previous + ".", true);
+                if (fp.IsValid() && !r.previous.empty()) SetSquawk(fp, r.previous, false);
+                continue;
+            }
+            if (!r.error.empty()) {
+                sqRetryAt_[r.callsign] = now + SQ_RETRY_SECONDS;
+                if (r.manual) Msg("Core could not assign a squawk to " + r.callsign + ": " + r.error, true);
+                else SetError("Squawk", "Core could not assign squawks: " + r.error);
+                continue;
+            }
+            ClearError("Squawk");
+            sqRetryAt_.erase(r.callsign);
+            if (fp.IsValid()) SetSquawk(fp, r.squawk, false);
+        }
+    }
+
+    // worker thread: one request to Core at a time, in order
+    void SquawkWorker() {
+        for (;;) {
+            SqJob job;
+            {
+                std::unique_lock<std::mutex> l(sqMu_);
+                sqCv_.wait(l, [this] { return sqQuit_ || !sqJobs_.empty(); });
+                if (sqQuit_) return;
+                job = std::move(sqJobs_.front());
+                sqJobs_.pop_front();
+            }
+            SqResult r = SquawkCall(job);
+            std::lock_guard<std::mutex> g(sqMu_);
+            sqDone_.push_back(std::move(r));
+        }
+    }
+    static std::string SquawkWhy(const std::string& body, const std::string& err) {
+        std::string m = kwiq::squawk::ParseError(body);
+        return m.empty() ? err : m;
+    }
+    SqResult SquawkCall(const SqJob& job) {
+        SqResult r;
+        r.callsign = job.callsign;
+        r.previous = job.previous;
+        r.manual = job.manual;
+        std::string url = CORE_SQUAWK_URL + job.callsign + "?network=" + job.network, body, err;
+        auto codes = SquawkCodes();                                 // Core's answer is checked against Core's own list
+        const kwiq::squawk::CodeList none;
+        const kwiq::squawk::CodeList& list = codes ? *codes : none;
+        if (job.method == "DELETE") {
+            r.released = true;
+            long code = kwiq_net::HttpSend("DELETE", url, "", body, err);
+            if (code != 404 && !err.empty()) r.error = SquawkWhy(body, err);   // 404: Core held no code for it
+            return r;
+        }
+        if (job.lookupFirst) {
+            long code = kwiq_net::HttpSend("GET", url, "", body, err);
+            if (code == 200) r.squawk = kwiq::squawk::ParseSquawk(body, list);
+            if (!r.squawk.empty()) return r;
+            if (code != 200 && code != 404) { r.error = SquawkWhy(body, err); return r; }
+        }
+        kwiq_net::HttpSend(job.method, url, job.form, body, err);
+        if (!err.empty()) r.error = SquawkWhy(body, err);
+        else if ((r.squawk = kwiq::squawk::ParseSquawk(body, list)).empty()) r.error = "Core sent no usable squawk";
+        return r;
+    }
+
+    // ---- squawk menu and functions (main thread) ---------------------------------------------
+    // UKCP SquawkAssignmentMenu, without the UK's local and circuit codes: Assign, Non-discrete, Manual
+    bool SquawkTarget(EuroScopePlugIn::CFlightPlan& fp) {
+        if (!SquawkOn()) { Msg("Squawk assignment is " + SquawkOffWhy() + ".", false); return false; }
+        if (!SquawkUser().controller) { Msg("Squawks can only be assigned when logged on as a controller.", false); return false; }
+        fp = FlightPlanSelectASEL();
+        return fp.IsValid();
+    }
+    void SquawkMenu(RECT area) {
+        EuroScopePlugIn::CFlightPlan fp;
+        if (!SquawkTarget(fp)) return;
+        const char* tracker = fp.GetTrackingControllerCallsign();
+        if (tracker && *tracker && !fp.GetTrackingControllerIsMe()) return;
+        bool vfr = std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0;
+        OpenPopupList(area, "Assign Squawk", 1);
+        AddPopupListElement("Assign", "", KWIQ_FUNC_SQUAWK_PICK);
+        AddPopupListElement("Non-discrete", NonDiscreteCode(vfr).c_str(), KWIQ_FUNC_SQUAWK_PICK);
+        AddPopupListElement("Manual", "", KWIQ_FUNC_SQUAWK_PICK);
+    }
+    void SquawkPick(const std::string& option, RECT area) {
+        EuroScopePlugIn::CFlightPlan fp;
+        if (option == "Assign") SquawkForce();
+        else if (!SquawkTarget(fp)) return;
+        else if (option == "Non-discrete")
+            SquawkReplace(fp, NonDiscreteCode(std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0));
+        else if (option == "Manual") {
+            RECT box = { area.left, area.top, area.left + 50, area.top + 25 };
+            OpenPopupEdit(box, KWIQ_FUNC_SQUAWK_MANUAL, fp.GetControllerAssignedData().GetSquawk());
+        }
+    }
+    void SquawkManual(const std::string& code) {
+        EuroScopePlugIn::CFlightPlan fp;
+        if (!SquawkTarget(fp)) return;
+        if (!kwiq::squawk::ValidSquawk(code)) { Msg("\"" + code + "\" is not a squawk: four digits, 0 to 7.", true); return; }
+        SquawkReplace(fp, code);
+    }
+    // A new code from Core whether or not the aircraft has one
+    void SquawkForce() {
+        EuroScopePlugIn::CFlightPlan fp;
+        if (!SquawkTarget(fp)) return;
+        kwiq::squawk::User u = SquawkUser();
+        kwiq::squawk::Aircraft a;
+        SquawkFacts(fp, u, {}, kwiq::squawk::TopDown{}, a);
+        if (!kwiq::squawk::ChangeAllowed(u, a)) {
+            Msg("You can only change the squawk of an aircraft you track or nobody tracks.", true);
+            return;
+        }
+        SquawkStore(a.callsign, a.origin, a.destination);
+        if (!SquawkRequest(a, false, true))
+            Msg("A squawk for " + a.callsign + " has already been asked for.", false);
+    }
+
+public:
+    virtual void OnFlightPlanFlightPlanDataUpdate(EuroScopePlugIn::CFlightPlan fp) override {
+        if (duplicate_ || !fp.IsValid()) return;
+        kwiq::squawk::User u = SquawkUser();
+        auto codes = SquawkCodes();
+        if (SquawkOn() && sqAuto_ && u.controller && codes) {
+            auto td = TopDownNow();
+            SquawkAttempt(fp, u, OnlineControllers(), *td, *codes, std::time(nullptr));
+            return;
+        }
+        auto d = fp.GetFlightPlanData();
+        SquawkStore(fp.GetCallsign(), kwiq::Upper(d.GetOrigin()), kwiq::Upper(d.GetDestination()));
+    }
+    // A code someone set: the one to give back if the pilot reconnects
+    virtual void OnFlightPlanControllerAssignedDataUpdate(EuroScopePlugIn::CFlightPlan fp, int type) override {
+        if (duplicate_ || type != EuroScopePlugIn::CTR_DATA_TYPE_SQUAWK || !fp.IsValid()) return;
+        auto it = sqStored_.find(fp.GetCallsign());
+        if (it != sqStored_.end()) it->second.squawk = fp.GetControllerAssignedData().GetSquawk();
+    }
+    virtual void OnFlightPlanDisconnect(EuroScopePlugIn::CFlightPlan fp) override {
+        if (duplicate_) return;
+        auto it = sqStored_.find(fp.GetCallsign());
+        if (it != sqStored_.end()) it->second.expires = std::time(nullptr) + kwiq::squawk::STORED_SECONDS;
+    }
+private:
+
     // ---- outdated sector file (main thread) --------------------------------------------------
     // Once logged on with an outdated sector file, a red OUTDATED SCT FILE box is drawn in the middle of
     // every radar screen until the sector file is up to date or the controller logs off. It flashes
@@ -1678,6 +2056,8 @@ private:
         srdEvery_   = c.GetInt("refresh.srd_s", 300, 60, 86400);
         slotsEvery_ = c.GetInt("refresh.slots_s", 60, 15, 3600);
         if (!sectorUserSet_) sectorDraw_ = c.GetBool("ui.sector_enabled", true);
+        sqEnabled_ = c.GetBool("squawk.enabled", false);
+        std::string nonDiscrete = Trim(c.Get("squawk.non_discrete", "2000")), nonDiscreteVfr = Trim(c.Get("squawk.non_discrete_vfr", "7000"));
 
         std::string minV = c.Get("plugin.min_version", "0.0.0"), updUrl = c.Get("plugin.update_url");
         bool tooOld = CompareVersions(KWIQ_PLUGIN_VERSION, minV) < 0;
@@ -1716,6 +2096,8 @@ private:
             esUrl_ = Trim(c.Get("euroscope.setup_url", ES_SETUP_URL));
             if (!IsWebLink(esUrl_)) esUrl_ = ES_SETUP_URL;   // only a web page is ever opened (#44)
             esConfigured_ = true;
+            sqNonDiscrete_ = squawk::ValidSquawk(nonDiscrete) ? nonDiscrete : "2000";
+            sqNonDiscreteVfr_ = squawk::ValidSquawk(nonDiscreteVfr) ? nonDiscreteVfr : "7000";
             if (domestic != domesticPrefixes_) { domesticPrefixes_ = domestic; exitGen_++; }
         }
         rdf_.SetEndpoint(c.Get("rdf.endpoint", "127.0.0.1:49080"));
@@ -1875,6 +2257,27 @@ private:
                     sectors_ = std::move(m);
                 } else fail("Sectors", err);
             }
+            if (doCore && sqEnabled_) {                // the codes Core never assigns, with the config; no list = squawks off
+                long code = kwiq_net::HttpSend("GET", CORE_SQUAWK_CODES_URL, "", body, err);
+                if (code == 200 || code == 404) {          // 404: Core has no list (yet)
+                    ClearError("Squawk codes");
+                    squawk::CodeList list = code == 200 ? squawk::ParseNonAssignable(body) : squawk::CodeList();
+                    std::shared_ptr<const squawk::CodeList> p;
+                    if (!list.empty()) p = std::make_shared<const squawk::CodeList>(std::move(list));
+                    sqHaveCodes_ = p != nullptr;
+                    std::lock_guard<std::mutex> g(mu_);
+                    sqCodes_ = std::move(p);
+                } else fail("Squawk codes", err);          // unreachable: keep the list from the last answer, if any
+                sqCodesTried_ = true;
+            }
+            if (doSrd && sqEnabled_) {                 // who gives departures their squawk, refreshed with the SRD
+                if (kwiq_net::HttpGet(CORE_TOPDOWN_URL, body, err)) {
+                    ClearError("Top-down");
+                    auto td = std::make_shared<const squawk::TopDown>(squawk::ParseTopDown(body));
+                    std::lock_guard<std::mutex> g(mu_);
+                    sqTopDown_ = std::move(td);
+                } else fail("Top-down", err);
+            }
             if (doSrd) {                               // FIR exit points, refreshed with the SRD
                 std::string exitErr;
                 bool ok = kwiq_net::HttpGet(CORE_FIR_EXITS_URL, body, exitErr);
@@ -1967,6 +2370,25 @@ private:
     std::string esAccepted_, esUrl_ = ES_SETUP_URL;                 // Core's euroscope.versions and euroscope.setup_url
     bool esConfigured_ = false;                                     // Core's config has arrived at least once
     std::map<std::string, std::string> lastErr_;
+    std::shared_ptr<const kwiq::squawk::TopDown> sqTopDown_ = std::make_shared<const kwiq::squawk::TopDown>();   // squawks' copy (#42: one parser for both)
+    std::string sqNonDiscrete_ = "2000", sqNonDiscreteVfr_ = "7000";   // Core's squawk.non_discrete and squawk.non_discrete_vfr
+    std::shared_ptr<const kwiq::squawk::CodeList> sqCodes_;         // Core's /squawk/non-assignable; null = no list, squawks off
+
+    // squawk assignment
+    std::atomic<bool> sqEnabled_{ false }, sqAuto_{ true };         // Core's squawk.enabled; the controller's .kwiq squawk
+    std::atomic<bool> sqHaveCodes_{ false }, sqCodesTried_{ false }; // Core's code list has arrived; it has been asked for
+    bool sqToldNoCodes_ = false;                                    // main thread only: said once that there is no list
+    std::unordered_map<std::string, kwiq::squawk::Stored> sqStored_;   // main thread only
+    std::unordered_set<std::string> sqBusy_;                        // main thread only: callsigns waiting for Core
+    std::unordered_map<std::string, std::time_t> sqRetryAt_;        // main thread only: not before, after Core failed
+    std::time_t sqLastPass_ = 0, sqLoginAt_ = 0;                    // main thread only
+    bool sqLoggedIn_ = false;                                       // main thread only: UKCP's idea of logged in
+    std::mutex sqMu_;                                               // guards the four below
+    std::condition_variable sqCv_;
+    std::deque<SqJob> sqJobs_;
+    std::vector<SqResult> sqDone_;
+    bool sqQuit_ = false;
+    std::thread sqWorker_;
 };
 
 // Radar screen overlay: draws the sector indicator above the symbol of every aircraft that is

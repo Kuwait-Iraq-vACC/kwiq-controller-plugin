@@ -27,11 +27,11 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | ... / RDF state | `!` while the aircraft transmits |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
 
-Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** (left button on FPC), **Explain SRD result** (left button on SRD), **Open SRD search window** (any item).
+Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** (left button on FPC), **Explain SRD result** (left button on SRD), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
-`.kwiq connect` (get your API key from myKWIQ), `.kwiq key <key>` (enter it by hand; `.kwiq key` says whether one is connected, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq sector` (sector indicators on the radar on or off), `.kwiq autorefresh` (slot auto refresh on or off), `.kwiq update` (says whether a newer version is waiting), `.kwiq alert` (preview the sector file alert), `.kwiq discord` (DiscordEuroScope on or off for yourself), `.kwiq qnh <ICAO>`, `.kwiq notifications`, `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or AIRAC_VERSION.txt>` (tell the plugin where your package is; empty = automatic), `.rdf draw on|off|core` (your own RDF switch; `core` = as Core says), `.rdf refresh` (switch the channels off and sync them again from TrackAudio), `.rdf reload` (reconnect to TrackAudio), plus VCH's own `.vch ...` commands.
+`.kwiq connect` (get your API key from myKWIQ), `.kwiq key <key>` (enter it by hand; `.kwiq key` says whether one is connected, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq sector` (sector indicators on the radar on or off), `.kwiq autorefresh` (slot auto refresh on or off), `.kwiq squawk` (automatic squawk assignment on or off), `.kwiq update` (says whether a newer version is waiting), `.kwiq alert` (preview the sector file alert), `.kwiq discord` (DiscordEuroScope on or off for yourself), `.kwiq qnh <ICAO>`, `.kwiq notifications`, `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or AIRAC_VERSION.txt>` (tell the plugin where your package is; empty = automatic), `.rdf draw on|off|core` (your own RDF switch; `core` = as Core says), `.rdf refresh` (switch the channels off and sync them again from TrackAudio), `.rdf reload` (reconnect to TrackAudio), plus VCH's own `.vch ...` commands.
 
 ## What Core controls
 Besides Core's address, only myKWIQ's Connect EuroScope page and the default EuroScope setup guide and changelog links are compiled in. `/api/plugin/latest` supplies the latest version, the checksums of the plugin and the updater, the kill switch and the changelog link. `/api/plugin/config` supplies: minimum plugin version, message of the day, refresh intervals, tag texts and colours, sector indicator colours/default, and the current sector file AIRAC. Sector aliases, RDF settings, the SRD and events have their own endpoints. All of it is edited in Filament (Plugin settings, Sector aliases, SRD routes, Plugin events).
@@ -124,6 +124,30 @@ No SID in the flight plan, a SID with no rules, or no rule that fits the flight 
 
 Core serves the rules at `/api/plugin/fpc`, one line per rule in order (a 404 means none):
 `FPC|<airport>|<sid>|<suffix>|<direction>|<min_fl>|<max_fl>|<forbidden_fls>|<destinations>|<airways>|<engine>|<navigation>`. Lists are comma separated and an empty field is no restriction, e.g. `FPC|ORBI|BGD||EVEN|80|600|250,260||DELMI DCT RUKAM B411 MURIB||`. The existing `Sid.json` files (OKAC `OKAC/Plugins/VFPC/Sid.json`, ORBB `.data/VFPC/*.json`) map onto it field for field.
+
+## Squawk assignment
+Squawks are allocated by Core, so two controllers never hand out the same code. Core picks the range from the requesting controller's FIR (the plugin sends the controller's own callsign), the departure, the destination and the flight rules; when to ask for a code follows the UK Controller Plugin (`squawk_logic.hpp`, see `NOTICE.md`). It is off until `squawk.enabled` is set to 1 in Core, and while Core has not sent its list of codes never to assign (the plugin has no list of its own, and says so once in the chat). As in UKCP it works on the live network and on sweatbox (Core keeps the two apart); through a proxy only what the controller asks for is done, nothing automatic.
+
+**Automatic**: checked on every flight plan update and every 5 seconds, not in the first 15 seconds after logging on, for aircraft with no code that nobody else tracks. Which codes count as none comes from Core: a code on its non-assignable list with "counts as assigned" off (default and non-discrete codes such as 1200, 2000, 2200 and 7000) is replaced; an emergency code (7500, 7600, 7700) counts as a code and is never replaced:
+- **Untracked, on the ground** (30 kt or less, within 7 nm of the departure airport): only from the controller who gives that airport's departures their squawk, the lowest position online in Core's top-down order for the airport (`TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR`). An airport with no top-down order in Core is covered only by its own DEL, GND, TWR and APP.
+- **Tracked by the user**: any aircraft with no code.
+- **Reconnects**: a pilot who reconnects within 10 minutes with the same departure and destination gets their previous code back.
+
+If Core cannot give a code, the error is shown once and that aircraft is not asked for again for a minute.
+
+**By hand**: **Open squawk assignment menu** offers Assign (a new code from Core, also **Force squawk recycle**), Non-discrete (`squawk.non_discrete`, default 2000, or `squawk.non_discrete_vfr`, default 7000, for VFR) and Manual (type a code). Setting a code by hand releases the one Core held, and the plugin leaves that aircraft alone until its departure or destination changes. Only for aircraft the user tracks or nobody tracks.
+
+**Core API**, all under `/api/plugin`, with the same `X-KWIQ-Key` and `X-KWIQ-Version` headers as the rest. Every request carries `?network=live` or `?network=sweatbox`, and Core keeps the two apart.
+
+| Request | Answer |
+|---|---|
+| `GET /squawk-assignment/<callsign>` | `SQUAWK\|<code>` if Core holds a code for it, else 404 |
+| `PUT /squawk-assignment/<callsign>`, form `origin=OKBK&destination=OMDB&rules=I` (or `V`)`&requester=OKBK_TWR` (the controller's own callsign) | `SQUAWK\|<code>`: a new code from the requester's FIR's range for that flight (replaces any it held), or `ERROR\|<message>` (requester in no FIR, every range full) |
+| `DELETE /squawk-assignment/<callsign>` | 2xx, or 404 if it held none |
+| `GET /squawk/non-assignable` | the codes Core never assigns, fetched with the config: `NONASSIGNABLE\|<first>\|<last>\|<category>\|<counts as assigned 0/1>\|<description>`, a single code with first = last. Kept in memory only; no list (unreachable on the first start, 404, or no valid rows) keeps squawks off |
+| `GET /topdown` | one `TOPDOWN\|<airport>\|<position>,<position>,...` line per airport, lowest position first (refreshed with the SRD) |
+
+Errors may carry `ERROR|<message>` in the body, which the plugin shows. A code Core answers with that is on its own non-assignable list is ignored. Config keys: `squawk.enabled` (default 0), `squawk.non_discrete` (default 2000), `squawk.non_discrete_vfr` (default 7000).
 
 ## Tests
 `g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic && ./test_logic`
