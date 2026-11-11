@@ -131,13 +131,6 @@ static HWND Child(const char* cls, const char* text, DWORD style, int x, int y, 
     return c;
 }
 
-static std::string LevelsText(const kwiq::SrdRoute& r) {
-    if (r.minLvl && r.maxLvl) return kwiq::FlStr(r.minLvl) + "-" + kwiq::FlStr(r.maxLvl);
-    if (r.minLvl) return kwiq::FlStr(r.minLvl) + "+";
-    if (r.maxLvl) return "<=" + kwiq::FlStr(r.maxLvl);
-    return "";
-}
-
 // SRD Search: the UK Controller Plugin's dialog (IDD_SRD_SEARCH in kwiq.rc, SrdSearchDialog.cpp), opened
 // the way UKCP opens it: DialogBoxParam, modal, owned by EuroScope's active window (#56). Origin and
 // destination are required; the results (Min, Max, FRA, Route String), the chosen route's notes, and Copy
