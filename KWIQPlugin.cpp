@@ -28,6 +28,7 @@
 #include <shellapi.h>       // ShellExecute
 #include <winver.h>         // GetFileVersionInfo (link version)
 #include <commctrl.h>       // the SRD search results list (link comctl32)
+#include "kwiq_res.h"         // kwiq.rc: the SRD Search dialog
 #include "requestMenu.hpp"      // CVCHPlugin (VCH)
 #include "kwiq_logic.hpp"
 #include "squawk_logic.hpp"
@@ -106,33 +107,16 @@ enum {
 };
 
 // ---------------------------------------------------------------------------
-// Windows (plain Win32, no MFC): event routes list (Copy button per row) and SRD search
+// Windows (plain Win32, no MFC): event routes list (Copy button per row), and the SRD Search dialog (kwiq.rc)
 // ---------------------------------------------------------------------------
 namespace kwiq_ui {
 
-static const char* const kClass = "KWIQPluginWnd";
-enum { ID_SEARCH = 2900, ID_SRD_COPY = 2901, ID_SRD_CLOSE = 2902, ID_SRD_LIST = 2903, ID_COPY_BASE = 3000,
-       MAX_ROWS = 24, SRD_MAX_RESULTS = 500 };
-static const int M = 10, LBL = 170, EDT = 460, BTN = 70, GAP = 6, ROWH = 24, ROWGAP = 6;
-static const int CW = M + LBL + GAP + EDT + GAP + BTN + M;   // client width
+enum { SRD_MAX_RESULTS = 500 };
+static const int M = 10, GAP = 6, ROWH = 24;                    // the Notifications window's margin, gap and row height
 
-struct Win {
-    HWND hwnd = nullptr;
-    std::vector<std::string> copy;
-    std::vector<HWND> btns, lbls, edits;
-    HWND eAdep = nullptr, eAdes = nullptr, eLvl = nullptr;
-    HWND list = nullptr, notes = nullptr, copyBtn = nullptr;       // SRD search
-    std::vector<kwiq::SrdRoute> results;
-    int selected = -1;
-};
-static Win gEvt, gSrd;
 static HMODULE gMod = nullptr;
-static bool gClassReg = false;
-static void (*gOnSearch)(const std::string&, const std::string&, const std::string&) = nullptr;
-
-static Win* WinOf(HWND h) { return (h && h == gEvt.hwnd) ? &gEvt : (h && h == gSrd.hwnd) ? &gSrd : nullptr; }
-static std::string TextOf(HWND h) { char b[256]; GetWindowTextA(h, b, sizeof b); return b; }
-static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows);
+// SRD Search: the routes for an origin, a destination and a level (the plugin's data from Core)
+static std::vector<kwiq::SrdRoute> (*gOnSearch)(const std::string&, const std::string&, const std::string&) = nullptr;
 
 static void CopyToClipboard(HWND owner, const std::string& text) {
     if (!OpenClipboard(owner)) return;
@@ -147,55 +131,6 @@ static void CopyToClipboard(HWND owner, const std::string& text) {
         } else GlobalFree(h);
     }
     CloseClipboard();
-}
-
-static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    switch (m) {
-    case WM_COMMAND: {
-        Win* win = WinOf(h);
-        if (!win || HIWORD(w) != BN_CLICKED) return 0;
-        int id = (int)LOWORD(w);
-        if (id == ID_SEARCH && win == &gSrd) {
-            std::string adep = kwiq::Trim(TextOf(win->eAdep)), ades = kwiq::Trim(TextOf(win->eAdes));
-            if (adep.empty() || ades.empty()) {               // both are required, as in UKCP
-                SetSrdResults({});
-                SetWindowTextA(win->notes, "Enter both the origin and the destination (a fix or an airfield).");
-            } else if (gOnSearch) gOnSearch(adep, ades, TextOf(win->eLvl));
-        } else if (id == ID_SRD_COPY && win == &gSrd) {
-            if (win->selected >= 0 && win->selected < (int)win->results.size()) {
-                CopyToClipboard(h, win->results[win->selected].rte);
-                SetWindowTextA(win->copyBtn, "Copied");
-            }
-        } else if (id == ID_SRD_CLOSE) {
-            DestroyWindow(h);
-        } else if (id >= ID_COPY_BASE && id - ID_COPY_BASE < (int)win->copy.size()) {
-            CopyToClipboard(h, win->copy[id - ID_COPY_BASE]);
-            for (HWND b : win->btns) SetWindowTextA(b, "Copy");
-            SetWindowTextA((HWND)l, "Copied");
-        }
-        return 0;
-    }
-    case WM_NOTIFY: {
-        // a route picked in the SRD search results: its notes, and it can be copied
-        NMHDR* nh = (NMHDR*)l;
-        if (h != gSrd.hwnd || nh->idFrom != ID_SRD_LIST || nh->code != LVN_ITEMCHANGED) return 0;
-        NMLISTVIEW* nl = (NMLISTVIEW*)l;
-        if (!(nl->uNewState & LVIS_SELECTED) || (nl->uOldState & LVIS_SELECTED)) return 0;
-        if (nl->iItem < 0 || nl->iItem >= (int)gSrd.results.size()) return 0;
-        gSrd.selected = nl->iItem;
-        SetWindowTextA(gSrd.notes, kwiq::SrdNotesText(gSrd.results[nl->iItem]).c_str());
-        SetWindowTextA(gSrd.copyBtn, "Copy Route String To Clipboard");
-        EnableWindow(gSrd.copyBtn, TRUE);
-        return 0;
-    }
-    case WM_CLOSE:
-        DestroyWindow(h);
-        return 0;
-    case WM_DESTROY:
-        if (Win* win = WinOf(h)) *win = Win();
-        return 0;
-    }
-    return DefWindowProcA(h, m, w, l);
 }
 
 // The work area of the screen EuroScope is on (its largest visible window), so windows open in the
@@ -233,74 +168,15 @@ static HWND Child(const char* cls, const char* text, DWORD style, int x, int y, 
     return c;
 }
 
-// Creates the popup, stores it in `win`, destroying any previous one of the same kind.
-static bool Make(Win& win, POINT, const std::string& title, int ch, int cw = CW) {
-    if (!gMod)
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)&WndProc, &gMod);
-    if (!gClassReg) {
-        WNDCLASSEXA wc; ZeroMemory(&wc, sizeof(wc));
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = WndProc;
-        wc.hInstance = gMod;
-        wc.hCursor = LoadCursorA(nullptr, MAKEINTRESOURCEA(32512)); // IDC_ARROW
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = kClass;
-        if (!RegisterClassExA(&wc)) return false;
-        gClassReg = true;
-    }
-    if (win.hwnd) DestroyWindow(win.hwnd);   // WM_DESTROY resets `win`
-
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
-    RECT rc = { 0, 0, cw, ch };
-    AdjustWindowRectEx(&rc, style, FALSE, ex);
-    int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
-    int x, y;
-    Centre(ww, wh, x, y);                    // in the middle of EuroScope's screen
-
-    HWND h = CreateWindowExA(ex, kClass, title.c_str(), style, x, y, ww, wh, nullptr, nullptr, gMod, nullptr);
-    if (!h) return false;
-    win = Win();
-    win.hwnd = h;
-    return true;
-}
-
-static void ShowEvent(POINT pt, const std::string& title, const std::vector<kwiq::EventRoute>& rows) {
-    int n = (int)(rows.size() < (size_t)MAX_ROWS ? rows.size() : (size_t)MAX_ROWS);
-    int ch = M + (n ? n * (ROWH + ROWGAP) - ROWGAP : ROWH) + M;
-    if (!Make(gEvt, pt, title, ch)) return;
-    HWND h = gEvt.hwnd;
-    if (n == 0) Child("STATIC", "No event routes for today (UTC).", SS_LEFT, M, M + 4, CW - 2 * M, ROWH, h);
-    for (int i = 0; i < n; i++) {
-        int ry = M + i * (ROWH + ROWGAP);
-        std::string lbl = rows[i].adep + " -> " + rows[i].ades;
-        Child("STATIC", lbl.c_str(), SS_LEFT, M, ry + 4, LBL, ROWH - 4, h);
-        Child("EDIT", rows[i].rte.c_str(), WS_BORDER | ES_READONLY | ES_AUTOHSCROLL, M + LBL + GAP, ry, EDT, ROWH, h);
-        gEvt.copy.push_back(rows[i].rte);
-        gEvt.btns.push_back(Child("BUTTON", "Copy", BS_PUSHBUTTON, M + LBL + GAP + EDT + GAP, ry, BTN, ROWH, h,
-                                  ID_COPY_BASE + i));
-    }
-    ShowWindow(h, SW_SHOW);
-}
-
-// SRD search, laid out as the UK Controller Plugin's SRD Search dialog (src/plugin/srd/SrdSearchDialog.cpp,
-// IDD_SRD_SEARCH): origin, destination and level, Search, the results (Min, Max, FRA, Route String), the
-// selected route's notes, Copy Route String To Clipboard and Close. Not modal, so EuroScope keeps running.
-static const int SRD_W = 600, SRD_H = 528;
-static WNDPROC gEditProc = nullptr;
-// In the three boxes: Enter searches, Tab moves on, Esc closes (what the dialog manager does for UKCP's)
-static LRESULT CALLBACK SrdEditProc(HWND e, UINT m, WPARAM w, LPARAM l) {
-    HWND parent = GetParent(e);
-    if (m == WM_KEYDOWN && w == VK_RETURN) { PostMessageA(parent, WM_COMMAND, MAKEWPARAM(ID_SEARCH, BN_CLICKED), 0); return 0; }
-    if (m == WM_KEYDOWN && w == VK_ESCAPE) { PostMessageA(parent, WM_CLOSE, 0, 0); return 0; }
-    if (m == WM_KEYDOWN && w == VK_TAB) {
-        HWND next = GetNextDlgTabItem(parent, e, GetKeyState(VK_SHIFT) < 0);
-        if (next) SetFocus(next);
-        return 0;
-    }
-    if (m == WM_CHAR && (w == '\r' || w == '\t' || w == 27)) return 0;   // no beep
-    return CallWindowProcA(gEditProc, e, m, w, l);
-}
+// SRD Search: the UK Controller Plugin's dialog (IDD_SRD_SEARCH in kwiq.rc, SrdSearchDialog.cpp), opened
+// the way UKCP opens it: DialogBoxParam, modal, owned by EuroScope's active window (#56). Origin and
+// destination are required; the results (Min, Max, FRA, Route String), the chosen route's notes, and Copy
+// Route String To Clipboard. Enter searches (Search is the default button), Esc or Close closes it.
+struct SrdDialog {
+    std::string adep, ades, lvl;                 // filled in from the flight plan, or empty
+    std::vector<kwiq::SrdRoute> results;
+};
+static std::string DlgText(HWND d, int id) { char b[256] = {}; GetDlgItemTextA(d, id, b, sizeof b); return kwiq::Trim(b); }
 static void AddColumn(HWND list, int i, const char* text, int width) {
     LVCOLUMNA c = {};
     c.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
@@ -318,70 +194,174 @@ static void SetCell(HWND list, int row, int col, const std::string& text) {
     it.pszText = (LPSTR)text.c_str();
     SendMessageA(list, col == 0 ? LVM_INSERTITEMA : LVM_SETITEMA, 0, (LPARAM)&it);
 }
-
-static void ShowSrd(POINT pt, const std::string& adep, const std::string& ades, const std::string& lvl) {
+// Every result; "No routes found" when there are none (as UKCP)
+static void SrdShowResults(HWND d, SrdDialog& s) {
+    HWND list = GetDlgItem(d, IDC_SRD_RESULTS);
+    SendMessageA(list, LVM_DELETEALLITEMS, 0, 0);
+    SetDlgItemTextA(d, IDC_SRD_NOTES, "");
+    SetDlgItemTextA(d, IDC_SRD_ROUTE_COPY, "Copy Route String To Clipboard");
+    EnableWindow(GetDlgItem(d, IDC_SRD_ROUTE_COPY), FALSE);
+    if (s.results.empty()) {
+        SetCell(list, 0, 0, "0");
+        SetCell(list, 0, 1, "0");
+        SetCell(list, 0, 2, "0");
+        SetCell(list, 0, 3, "No routes found");
+        return;
+    }
+    for (int i = 0; i < (int)s.results.size(); i++) {
+        SetCell(list, i, 0, kwiq::SrdMinText(s.results[i]));
+        SetCell(list, i, 1, kwiq::SrdMaxText(s.results[i]));
+        SetCell(list, i, 2, kwiq::HasFreeRoute(s.results[i].rte) ? "Yes" : "No");
+        SetCell(list, i, 3, s.results[i].rte);
+    }
+}
+static void SrdRunSearch(HWND d, SrdDialog& s) {
+    std::string adep = DlgText(d, IDC_SRD_ORIGIN), ades = DlgText(d, IDC_SRD_DESTINATION);
+    if (adep.empty() || ades.empty()) {                      // both are required, as in UKCP
+        s.results.clear();
+        SrdShowResults(d, s);
+        SetDlgItemTextA(d, IDC_SRD_NOTES, "Enter both the origin and the destination (a fix or an airfield).");
+        return;
+    }
+    s.results = gOnSearch ? gOnSearch(adep, ades, DlgText(d, IDC_SRD_CRUISE)) : std::vector<kwiq::SrdRoute>();
+    SrdShowResults(d, s);
+}
+// Called by Windows inside DialogBoxParam, so nothing may escape from it
+static INT_PTR CALLBACK SrdDialogProc(HWND d, UINT m, WPARAM w, LPARAM l) {
+    try {
+        SrdDialog* s = (SrdDialog*)GetWindowLongPtrW(d, DWLP_USER);
+        switch (m) {
+        case WM_INITDIALOG: {
+            s = (SrdDialog*)l;
+            SetWindowLongPtrW(d, DWLP_USER, (LONG_PTR)s);
+            HWND list = GetDlgItem(d, IDC_SRD_RESULTS);
+            SendMessageA(list, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
+            RECT cols = { 0, 0, 25, 0 };                         // UKCP's columns, in dialog units
+            MapDialogRect(d, &cols);
+            AddColumn(list, 0, "Min", cols.right);
+            AddColumn(list, 1, "Max", cols.right);
+            AddColumn(list, 2, "FRA", cols.right);
+            AddColumn(list, 3, "Route String", 900);
+            SetDlgItemTextA(d, IDC_SRD_ORIGIN, s->adep.c_str());
+            SetDlgItemTextA(d, IDC_SRD_DESTINATION, s->ades.c_str());
+            SetDlgItemTextA(d, IDC_SRD_CRUISE, s->lvl.c_str());
+            if (!s->adep.empty() && !s->ades.empty()) SrdRunSearch(d, *s);   // opened from a flight plan: search at once
+            SetFocus(GetDlgItem(d, s->adep.empty() ? IDC_SRD_ORIGIN : s->ades.empty() ? IDC_SRD_DESTINATION : IDC_SRD_CRUISE));
+            return FALSE;                                        // the focus is set
+        }
+        case WM_COMMAND:
+            if (!s) return FALSE;
+            switch (LOWORD(w)) {
+            case IDC_SRD_SEARCH: SrdRunSearch(d, *s); return TRUE;
+            case IDC_SRD_ROUTE_COPY: {
+                int i = (int)SendDlgItemMessageA(d, IDC_SRD_RESULTS, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
+                if (i >= 0 && i < (int)s->results.size()) {
+                    CopyToClipboard(d, s->results[i].rte);
+                    SetDlgItemTextA(d, IDC_SRD_ROUTE_COPY, "Copied");
+                }
+                return TRUE;
+            }
+            case IDOK: case IDCANCEL: EndDialog(d, 0); return TRUE;   // Close, Esc and the title bar's X
+            }
+            return FALSE;
+        case WM_NOTIFY: {
+            // a route picked in the results: its notes, and it can be copied
+            NMHDR* nh = (NMHDR*)l;
+            if (!s || nh->idFrom != IDC_SRD_RESULTS || nh->code != LVN_ITEMCHANGED) return FALSE;
+            NMLISTVIEW* nv = (NMLISTVIEW*)l;
+            if (!(nv->uNewState & LVIS_SELECTED) || (nv->uOldState & LVIS_SELECTED)) return FALSE;
+            if (nv->iItem < 0 || nv->iItem >= (int)s->results.size()) return FALSE;
+            SetDlgItemTextA(d, IDC_SRD_NOTES, kwiq::SrdNotesText(s->results[nv->iItem]).c_str());
+            SetDlgItemTextA(d, IDC_SRD_ROUTE_COPY, "Copy Route String To Clipboard");
+            EnableWindow(GetDlgItem(d, IDC_SRD_ROUTE_COPY), TRUE);
+            return TRUE;
+        }
+        }
+    } catch (...) {}
+    return FALSE;
+}
+// Before either dialog opens: the list view class, and this DLL (the dialogs are in its resources)
+static void PrepareDialog() {
     static bool commonControls = false;
     if (!commonControls) {
         INITCOMMONCONTROLSEX ic = { sizeof(ic), ICC_LISTVIEW_CLASSES };
         commonControls = InitCommonControlsEx(&ic) != FALSE;
     }
-    if (!Make(gSrd, pt, "SRD Search", SRD_H, SRD_W)) return;
-    HWND h = gSrd.hwnd;
-    const int L = 180, E = 130, EH = 22, W = SRD_W - 2 * M;
-    const DWORD edit = WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL;
-    Child("STATIC", "Origin Fix or Airfield*", SS_LEFT, M, 13, L, 16, h);
-    gSrd.eAdep = Child("EDIT", adep.c_str(), edit | ES_UPPERCASE, M + L, 10, E, EH, h);
-    Child("STATIC", "Destination Fix or Airfield*", SS_LEFT, M, 41, L, 16, h);
-    gSrd.eAdes = Child("EDIT", ades.c_str(), edit | ES_UPPERCASE, M + L, 38, E, EH, h);
-    Child("STATIC", "Cruising Altitude or Level", SS_LEFT, M, 69, L, 16, h);
-    gSrd.eLvl = Child("EDIT", lvl.c_str(), edit | ES_NUMBER, M + L, 66, E, EH, h);
-    Child("STATIC", "* Required Field", SS_LEFT, M + L + E + 60, 41, 140, 16, h);
-    Child("BUTTON", "Search", BS_DEFPUSHBUTTON | WS_TABSTOP, M + L, 96, 100, 26, h, ID_SEARCH);
-
-    Child("STATIC", "Search Results", SS_CENTER, M, 132, W, 16, h);
-    gSrd.list = Child(WC_LISTVIEWA, "", WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                      M, 150, W, 160, h, ID_SRD_LIST);
-    SendMessageA(gSrd.list, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
-    AddColumn(gSrd.list, 0, "Min", 50);
-    AddColumn(gSrd.list, 1, "Max", 50);
-    AddColumn(gSrd.list, 2, "FRA", 50);
-    AddColumn(gSrd.list, 3, "Route String", 900);
-
-    Child("STATIC", "Notes", SS_CENTER, M, 318, W, 16, h);
-    gSrd.notes = Child("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, M, 336, W, 146, h);
-    gSrd.copyBtn = Child("BUTTON", "Copy Route String To Clipboard", BS_PUSHBUTTON | WS_TABSTOP | WS_DISABLED,
-                         M, 492, 230, 26, h, ID_SRD_COPY);
-    Child("BUTTON", "Close", BS_PUSHBUTTON | WS_TABSTOP, SRD_W - M - 100, 492, 100, 26, h, ID_SRD_CLOSE);
-
-    for (HWND e : { gSrd.eAdep, gSrd.eAdes, gSrd.eLvl })
-        gEditProc = (WNDPROC)SetWindowLongPtrA(e, GWLP_WNDPROC, (LONG_PTR)&SrdEditProc);
-    ShowWindow(h, SW_SHOW);
-    SetForegroundWindow(h);
-    SetFocus(adep.empty() ? gSrd.eAdep : ades.empty() ? gSrd.eAdes : gSrd.eLvl);
+    if (!gMod)
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)&SrdDialogProc, &gMod);
+}
+static void ShowSrd(const std::string& adep, const std::string& ades, const std::string& lvl) {
+    PrepareDialog();
+    SrdDialog s{ adep, ades, lvl, {} };
+    DialogBoxParamW(gMod, MAKEINTRESOURCEW(IDD_SRD_SEARCH), GetActiveWindow(), SrdDialogProc, (LPARAM)&s);
 }
 
-// Every result; "No routes found" when there are none (as UKCP)
-static void SetSrdResults(const std::vector<kwiq::SrdRoute>& rows) {
-    if (!gSrd.hwnd) return;
-    SendMessageA(gSrd.list, LVM_DELETEALLITEMS, 0, 0);
-    gSrd.results = rows;
-    gSrd.selected = -1;
-    SetWindowTextA(gSrd.notes, "");
-    SetWindowTextA(gSrd.copyBtn, "Copy Route String To Clipboard");
-    EnableWindow(gSrd.copyBtn, FALSE);
-    if (rows.empty()) {
-        SetCell(gSrd.list, 0, 0, "0");
-        SetCell(gSrd.list, 0, 1, "0");
-        SetCell(gSrd.list, 0, 2, "0");
-        SetCell(gSrd.list, 0, 3, "No routes found");
-        return;
-    }
-    for (int i = 0; i < (int)rows.size(); i++) {
-        SetCell(gSrd.list, i, 0, kwiq::SrdMinText(rows[i]));
-        SetCell(gSrd.list, i, 1, kwiq::SrdMaxText(rows[i]));
-        SetCell(gSrd.list, i, 2, kwiq::HasFreeRoute(rows[i].rte) ? "Yes" : "No");
-        SetCell(gSrd.list, i, 3, rows[i].rte);
-    }
+// Event Routes (#61): the same kind of dialog as SRD Search (IDD_EVENT_ROUTES in kwiq.rc), opened the same way.
+// Today's routes for Core's event (Airports, Route String); the one selected is copied with Copy Route String
+// To Clipboard, which then says "Copied". With none, the list says so. Esc or Close closes it.
+struct EventRoutesDialog {
+    std::string title;                           // "KWIQ Event Routes - <event> - <date>Z"
+    std::vector<kwiq::EventRoute> rows;
+};
+static INT_PTR CALLBACK EventRoutesDialogProc(HWND d, UINT m, WPARAM w, LPARAM l) {
+    try {
+        EventRoutesDialog* s = (EventRoutesDialog*)GetWindowLongPtrW(d, DWLP_USER);
+        switch (m) {
+        case WM_INITDIALOG: {
+            s = (EventRoutesDialog*)l;
+            SetWindowLongPtrW(d, DWLP_USER, (LONG_PTR)s);
+            SetWindowTextA(d, s->title.c_str());
+            HWND list = GetDlgItem(d, IDC_EVT_ROUTES);
+            SendMessageA(list, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
+            RECT cols = { 0, 0, 70, 0 };                         // dialog units, as SRD Search's columns
+            MapDialogRect(d, &cols);
+            AddColumn(list, 0, "Airports", cols.right);
+            AddColumn(list, 1, "Route String", 900);
+            if (s->rows.empty()) {
+                SetCell(list, 0, 0, "");
+                SetCell(list, 0, 1, "No event routes for today (UTC).");
+            }
+            for (int i = 0; i < (int)s->rows.size(); i++) {
+                SetCell(list, i, 0, kwiq::EventRouteAirports(s->rows[i]));
+                SetCell(list, i, 1, s->rows[i].rte);
+            }
+            SetFocus(list);
+            return FALSE;                                        // the focus is set
+        }
+        case WM_COMMAND:
+            if (!s) return FALSE;
+            switch (LOWORD(w)) {
+            case IDC_EVT_ROUTE_COPY: {
+                int i = (int)SendDlgItemMessageA(d, IDC_EVT_ROUTES, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
+                if (i >= 0 && i < (int)s->rows.size()) {
+                    CopyToClipboard(d, s->rows[i].rte);
+                    SetDlgItemTextA(d, IDC_EVT_ROUTE_COPY, "Copied");
+                }
+                return TRUE;
+            }
+            case IDOK: case IDCANCEL: EndDialog(d, 0); return TRUE;   // Close, Enter, Esc and the title bar's X
+            }
+            return FALSE;
+        case WM_NOTIFY: {
+            // a route selected: it can be copied
+            NMHDR* nh = (NMHDR*)l;
+            if (!s || nh->idFrom != IDC_EVT_ROUTES || nh->code != LVN_ITEMCHANGED) return FALSE;
+            NMLISTVIEW* nv = (NMLISTVIEW*)l;
+            if (!(nv->uNewState & LVIS_SELECTED) || (nv->uOldState & LVIS_SELECTED)) return FALSE;
+            bool route = nv->iItem >= 0 && nv->iItem < (int)s->rows.size();
+            SetDlgItemTextA(d, IDC_EVT_ROUTE_COPY, "Copy Route String To Clipboard");
+            EnableWindow(GetDlgItem(d, IDC_EVT_ROUTE_COPY), route ? TRUE : FALSE);
+            return TRUE;
+        }
+        }
+    } catch (...) {}
+    return FALSE;
+}
+static void ShowEvent(const std::string& title, const std::vector<kwiq::EventRoute>& rows) {
+    PrepareDialog();
+    EventRoutesDialog s{ title, rows };
+    DialogBoxParamW(gMod, MAKEINTRESOURCEW(IDD_EVENT_ROUTES), GetActiveWindow(), EventRoutesDialogProc, (LPARAM)&s);
 }
 
 // ---- Message boxes ---------------------------------------------------------------------------------
@@ -557,9 +537,6 @@ static void Shutdown() {
     if (gNotices.hwnd) DestroyWindow(gNotices.hwnd);
     if (gNoticesReg && gMod) { UnregisterClassA(kNoticesClass, gMod); gNoticesReg = false; }
     gKeyBox.Close();                                     // its thread must end before the plugin does
-    if (gEvt.hwnd) DestroyWindow(gEvt.hwnd);
-    if (gSrd.hwnd) DestroyWindow(gSrd.hwnd);
-    if (gClassReg && gMod) { UnregisterClassA(kClass, gMod); gClassReg = false; }
 }
 
 } // namespace kwiq_ui
@@ -707,7 +684,7 @@ struct SfStatus {
     bool known = false, outdated = false;
     std::string package, local, upstream, url, sound;               // package = OKAC or ORBB; sound = resolved wav path or empty
 };
-static void SrdSearchThunk(const std::string& adep, const std::string& ades, const std::string& lvl);
+static std::vector<kwiq::SrdRoute> SrdSearchThunk(const std::string& adep, const std::string& ades, const std::string& lvl);
 
 class CKWIQPlugin : public CVCHPlugin {
 public:
@@ -1351,15 +1328,13 @@ public:
     virtual EuroScopePlugIn::CRadarScreen* OnRadarScreenCreated(const char* sDisplayName, bool NeedRadarContent,
                                                                 bool GeoReferenced, bool CanBeSaved, bool CanBeCreated) override;
 
-    // called from the SRD window's Search button (main thread)
-    void RunSrdSearch(const std::string& adep, const std::string& ades, const std::string& lvl) {
+    // called from the SRD Search dialog's Search button (main thread)
+    std::vector<kwiq::SrdRoute> RunSrdSearch(const std::string& adep, const std::string& ades, const std::string& lvl) {
         std::vector<kwiq::SrdRoute> rows;
-        {
-            std::lock_guard<std::mutex> g(mu_);
-            auto hits = kwiq::SrdSearch(srd_, adep, ades, kwiq::ParseLevelFt(lvl));
-            for (size_t i = 0; i < hits.size() && (int)i < kwiq_ui::SRD_MAX_RESULTS; i++) rows.push_back(srd_.rows[hits[i]]);
-        }
-        kwiq_ui::SetSrdResults(rows);
+        std::lock_guard<std::mutex> g(mu_);
+        auto hits = kwiq::SrdSearch(srd_, adep, ades, kwiq::ParseLevelFt(lvl));
+        for (size_t i = 0; i < hits.size() && (int)i < kwiq_ui::SRD_MAX_RESULTS; i++) rows.push_back(srd_.rows[hits[i]]);
+        return rows;
     }
 
 private:
@@ -1532,7 +1507,7 @@ private:
         return todayStr_;
     }
 
-    void OpenRoutesWindow(POINT pt) {
+    void OpenRoutesWindow(POINT) {
         std::string today = kwiq::TodayUtc(), name;
         std::vector<kwiq::EventRoute> rows;
         {
@@ -1540,9 +1515,9 @@ private:
             name = ev_.active ? ev_.name : "No active event";
             rows = kwiq::RoutesForDate(ev_, today);
         }
-        kwiq_ui::ShowEvent(pt, "KWIQ Event Routes - " + name + " - " + today + "Z", rows);
+        kwiq_ui::ShowEvent("KWIQ Event Routes - " + name + " - " + today + "Z", rows);
     }
-    void OpenSrdWindow(POINT pt) {
+    void OpenSrdWindow(POINT) {
         std::string adep, ades, lvl;
         auto fp = FlightPlanSelectASEL();
         if (fp.IsValid()) {
@@ -1556,8 +1531,7 @@ private:
             int rfl = fp.GetFinalAltitude();
             if (rfl > 0) lvl = std::to_string(rfl / 100);
         }
-        kwiq_ui::ShowSrd(pt, adep, ades, lvl);
-        if (!adep.empty() || !ades.empty()) RunSrdSearch(adep, ades, lvl);
+        kwiq_ui::ShowSrd(adep, ades, lvl);                   // modal, as UKCP's: returns once it is closed
     }
     void ExplainSelected() {
         auto fp = FlightPlanSelectASEL();
@@ -2510,9 +2484,9 @@ EuroScopePlugIn::CRadarScreen* CKWIQPlugin::OnRadarScreenCreated(const char*, bo
     return new CKWIQRadar();
 } catch (...) { return nullptr; }
 
-// Called from the windows' WndProcs, so nothing may escape into Windows either
-static void SrdSearchThunk(const std::string& adep, const std::string& ades, const std::string& lvl) {
-    try { if (gPlugin) gPlugin->RunSrdSearch(adep, ades, lvl); } catch (...) {}
+// Called from the SRD dialog's procedure, so nothing may escape into Windows either
+static std::vector<kwiq::SrdRoute> SrdSearchThunk(const std::string& adep, const std::string& ades, const std::string& lvl) {
+    try { return gPlugin ? gPlugin->RunSrdSearch(adep, ades, lvl) : std::vector<kwiq::SrdRoute>(); } catch (...) { return {}; }
 }
 
 // Entry points: declared (with dllexport) in EuroScopePlugIn.h, so no extern "C" here. The loader

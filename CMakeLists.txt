@@ -39,7 +39,7 @@ add_library(KWIQPluginCore SHARED
     KWIQPlugin.cpp
     VatsimAPI.cpp
     keylink.cpp          # receives the API key from myKWIQ
-    kwiq.rc              # the KWIQ button's logo (kwiq_res.h)
+    kwiq.rc              # the SRD Search and Event Routes dialogs, and the KWIQ button's logo (kwiq_res.h)
     rdf.cpp              # RDF and the TrackAudio bridge (KingfuChan/RDF)
     discord.cpp          # DiscordEuroScope (Kirollos/DiscordEuroScope)
     push.cpp             # Core's push events (Laravel Reverb)
@@ -62,7 +62,7 @@ target_link_libraries(KWIQPluginCore PRIVATE
     winmm                                         # PlaySound (sector file alert)
     ws2_32                                        # API key from myKWIQ (keylink.cpp)
     version                                       # GetFileVersionInfo (EuroScope version check)
-    comctl32                                      # the SRD search results list
+    comctl32                                      # the SRD search and event routes lists
 )
 set_target_properties(KWIQPluginCore PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginCore")
 
