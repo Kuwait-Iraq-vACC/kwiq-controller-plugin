@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <cctype>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -47,6 +48,29 @@ inline std::string SanitiseCode(const std::string& s) {
 inline bool AllDigits(const std::string& s, size_t from, size_t n) {
     if (from + n > s.size()) return false;
     for (size_t i = 0; i < n; i++) if (!std::isdigit((unsigned char)s[from + i])) return false;
+    return true;
+}
+// A whole number from Core's text, as atoi reads it (leading spaces, a sign, digits, anything after is
+// ignored), but clamped to the int range instead of undefined when it doesn't fit. No digits: def.
+inline int ToInt(const std::string& s, int def = 0) {
+    const char* p = s.c_str();
+    char* end = nullptr;
+    long long v = std::strtoll(p, &end, 10);                 // saturates at LLONG_MIN / LLONG_MAX
+    if (end == p) return def;
+    return v < INT_MIN ? INT_MIN : v > INT_MAX ? INT_MAX : (int)v;
+}
+// A web page to open in the browser: http:// or https://, a host, and no spaces, quotes or control
+// characters. Anything else from Core (a local path, another scheme) is never given to ShellExecute.
+inline bool IsWebLink(const std::string& url) {
+    auto starts = [&](const char* scheme) {
+        size_t n = std::char_traits<char>::length(scheme);
+        if (url.size() < n) return false;
+        for (size_t i = 0; i < n; i++) if (std::tolower((unsigned char)url[i]) != scheme[i]) return false;
+        return true;
+    };
+    size_t host = starts("https://") ? 8 : starts("http://") ? 7 : 0;
+    if (!host || url.size() == host || url[host] == '/') return false;
+    for (char c : url) if ((unsigned char)c <= ' ' || c == 0x7F || c == '"') return false;
     return true;
 }
 
@@ -202,7 +226,7 @@ inline SrdData ParseSrd(const std::string& body) {
             SrdRoute r;
             r.adep = Upper(Trim(f[1])); r.ades = Upper(Trim(f[2]));
             if (r.adep.empty() || r.ades.empty()) continue;
-            r.minLvl = std::atoi(f[3].c_str()); r.maxLvl = std::atoi(f[4].c_str());
+            r.minLvl = ToInt(f[3]); r.maxLvl = ToInt(f[4]);
             r.rte = Trim(f[5]);
             if (f.size() > 6) r.notes = Trim(f[6]);
             r.tokens = NormaliseRoute(r.rte);
@@ -222,7 +246,7 @@ inline int ParseLevelFt(const std::string& in) {
     std::string s = Upper(Trim(in)), d;
     for (char c : s) if (std::isdigit((unsigned char)c)) d += c;
     if (d.empty() || d.size() > 6) return 0;
-    int v = std::atoi(d.c_str());
+    int v = ToInt(d);
     return v < 1000 ? v * 100 : v;
 }
 
@@ -408,20 +432,20 @@ inline std::vector<size_t> SrdSearch(const SrdData& d, const std::string& adep, 
 
 
 // ---- Sector indicators -------------------------------------------------------
-// Core /api/plugin/sectors (plain text):  SECTOR|<position callsign>|<alias, max 4 chars>
-// The alias is what controllers see on the radar (e.g. ORBB_S_CTR -> SR, BGD_APP -> BGD); it is
-// independent of the id used in the ESE file. Any position Core lists gets one.
-using SectorMap = std::unordered_map<std::string, std::string>;   // callsign -> alias
+// Core /api/plugin/sectors (plain text):  SECTOR|<ESE position ID>|<alias, max 4 chars>
+// Only the positions Core lists get an indicator, and the alias is what controllers see on the radar
+// (e.g. BS -> SR for ORBB_S_CTR). The ID is the one in the ESE's [POSITIONS], as EuroScope gives it.
+using SectorMap = std::unordered_map<std::string, std::string>;   // ESE position ID -> alias
 
 inline SectorMap ParseSectors(const std::string& body) {
     SectorMap m;
     for (const auto& line : SplitChar(body, '\n')) {
         auto f = SplitChar(Trim(line), '|');
         if (f[0] != "SECTOR" || f.size() < 3) continue;
-        std::string cs = Upper(Trim(f[1])), alias = Upper(Trim(f[2]));
+        std::string id = Upper(Trim(f[1])), alias = Upper(Trim(f[2]));
         if (alias.size() > 4) alias.resize(4);
-        if (cs.empty() || alias.empty()) continue;
-        m[cs] = alias;
+        if (id.empty() || alias.empty()) continue;
+        m[id] = alias;
     }
     return m;
 }
@@ -458,7 +482,7 @@ struct PluginConfig {
     int GetInt(const std::string& k, int def, int lo, int hi) const {
         auto it = kv.find(k);
         if (it == kv.end() || it->second.empty()) return def;
-        int v = std::atoi(it->second.c_str());
+        int v = ToInt(it->second);
         return v < lo ? lo : (v > hi ? hi : v);
     }
 };
@@ -487,7 +511,7 @@ inline unsigned long ParseColour(const std::string& s, unsigned long def) {
 inline int CompareVersions(const std::string& a, const std::string& b) {
     auto pa = SplitChar(a, '.'), pb = SplitChar(b, '.');
     for (size_t i = 0; i < (std::max)(pa.size(), pb.size()); i++) {
-        int x = i < pa.size() ? std::atoi(pa[i].c_str()) : 0, y = i < pb.size() ? std::atoi(pb[i].c_str()) : 0;
+        int x = i < pa.size() ? ToInt(pa[i]) : 0, y = i < pb.size() ? ToInt(pb[i]) : 0;
         if (x != y) return x < y ? -1 : 1;
     }
     return 0;
@@ -590,7 +614,7 @@ inline std::string Sha256Hex(const std::string& data) {
     auto rotr = [](unsigned x, int n) { return (x >> n) | (x << (32 - n)); };
     std::string msg = data;
     unsigned long long bits = (unsigned long long)data.size() * 8;
-    msg.push_back((char)0x80);
+    msg.push_back('\x80');                                   // a char literal, so no truncating cast (C4310)
     while (msg.size() % 64 != 56) msg.push_back('\0');
     for (int i = 7; i >= 0; i--) msg.push_back((char)((bits >> (i * 8)) & 0xFF));
     for (size_t off = 0; off < msg.size(); off += 64) {

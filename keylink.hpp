@@ -29,6 +29,7 @@ public:
 
 private:
     void Loop();
+    void Serve(std::uintptr_t client);          // one request on an accepted socket
     std::thread thread_;
     std::atomic<bool> running_{ false }, stop_{ false };
     std::uintptr_t sock_ = ~(std::uintptr_t)0;
