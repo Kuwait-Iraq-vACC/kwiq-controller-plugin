@@ -96,8 +96,8 @@ Where a flight leaves the airspace comes from Core's FIR exit points, `/api/plug
 
 **Explain FPC result** names the exit point it used, and **Open SRD search window** fills in the exit point as the destination for such a flight. `.kwiq status` shows how many exit points Core sent (distinct points, not cones).
 
-## SRD search window
-**Open SRD search window** (on any tag item, or SRD Search in the KWIQ button's menu) is laid out like the UK Controller Plugin's SRD Search dialog. Enter the **Origin Fix or Airfield** and **Destination Fix or Airfield** (both required) and, optionally, the **Cruising Altitude or Level** (`350` is FL350, `35000` is feet), then **Search** or press Enter. Opened from an aircraft, it is filled in with the aircraft's departure, its destination (or its FIR exit point when it leaves the vACC's airspace) and its requested level, and searched straight away.
+## SRD Search
+**Open SRD search window** (on any tag item, or SRD Search in the KWIQ button's menu) opens the UK Controller Plugin's SRD Search dialog: a standard Windows dialog, opened as UKCP opens it, in front of EuroScope until it is closed (Close, Esc or the title bar's X), like EuroScope's own dialogues. Enter the **Origin Fix or Airfield** and **Destination Fix or Airfield** (both required) and, optionally, the **Cruising Altitude or Level** (`350` is FL350, `35000` is feet), then **Search** or press Enter. Opened from an aircraft, it is filled in with the aircraft's departure, its destination (or its FIR exit point when it leaves the vACC's airspace) and its requested level, and searched straight away.
 
 **Search Results** lists every matching route: **Min** (`MC` when there is no minimum), **Max** (`-` when there is no limit), **FRA** (whether the route has Free Route Airspace, `<FRA>`, in it) and the **Route String**. Click a route to see its **Notes**, then **Copy Route String To Clipboard**. Tab moves between the boxes and Esc or **Close** closes the window. EuroScope keeps running while it is open.
 
