@@ -315,6 +315,57 @@ int main() {
         CHECK(DiscordRadioCallsign(dc, "", "").empty() && DiscordRadioCallsign(dc, "ORBB", "124.400") == "Baghdad Control");
     }
 
+    // QNH monitor
+    CHECK(QnhFromMetar("OKBK 101250Z 32012KT CAVOK 24/M02 Q1012 NOSIG") == 1012);
+    CHECK(QnhFromMetar("ORBI 101250Z 29010KT 9999 FEW040 18/03 Q0979=") == 979);
+    CHECK(QnhFromMetar("KJFK 101251Z 31015KT 10SM FEW250 08/M06 A2992 RMK AO2 SLP132") == 1013);
+    CHECK(QnhFromMetar("OKBK 101250Z 32012KT CAVOK 24/M02 RMK Q1012") == -1 && QnhFromMetar("") == -1);
+    auto metars = ParseMetars("METAR|okbk|OKBK 101250Z Q1012\nMETAR|XX|bad\nJUNK\n");
+    CHECK(metars.size() == 1 && metars["OKBK"] == "OKBK 101250Z Q1012");
+    auto trl = ParseTrl("TRL|OR|14000|160,980,170\nTRL|OK|13000|150\nTRL|ORMM|14000|170,1000,180\nTRL|OX|1|1,2\n");
+    CHECK(trl.size() == 3);
+    CHECK(TrlFor(trl, "ORBI", 981) == 160 && TrlFor(trl, "ORBI", 980) == 160 && TrlFor(trl, "ORBI", 979) == 170);
+    CHECK(TrlFor(trl, "OKBK", 960) == 150 && TrlFor(trl, "ORMM", 1000) == 170 && TrlFor(trl, "ORMM", 999) == 180);
+    CHECK(TrlFor(trl, "OEJN", 1013) == 0 && TrlFor(trl, "ORBI", -1) == 0);
+    CHECK(QnhMessage("ORBI", 979, 981, 170, 160) == "ORBI QNH 979 (was 981) TRL FL170 - CHANGED from FL160");
+    CHECK(QnhMessage("ORBI", 1004, 1006, 160, 160) == "ORBI QNH 1004 (was 1006) TRL FL160");
+    CHECK(QnhMessage("OEJN", 1013, 0, 0, 0) == "OEJN QNH 1013");
+
+    // top-down
+    auto td = ParseTopDownOrders("TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR\nTOPDOWN|ORBI|ORBI_TWR,ORBI_APP,ORBB_S_CTR\n");
+    CHECK(CoveredByMe(td, "OKBK", "OKAC_CTR", {}) && !CoveredByMe(td, "OKBK", "OKAC_CTR", { "OKBK_N_TWR" }));
+    CHECK(CoveredByMe(td, "OKBK", "OKBK_1_TWR", { "OKAC_CTR" }) && !CoveredByMe(td, "ORBI", "OKAC_CTR", {}));
+    CHECK(CoveredByMe(td, "ORMM", "ORMM_TWR", {}) && !CoveredByMe(td, "ORMM", "ORBB_S_CTR", {}));     // no order: own positions
+    auto cov = AirportsCovered(td, "ORBB_S_CTR", { "ORBI_APP" });
+    CHECK(cov.empty());
+    cov = AirportsCovered(td, "ORBB_S_CTR", {});
+    CHECK(cov.size() == 1 && cov[0] == "ORBI");
+
+    // procedure notifications
+    auto notices = ParseNotices("NOTICE|12|OKBK, okkk|2026-11-01|0|Standard taxi routes|https://docs.kuwait-iraqvacc.net/x|Line 1\\nLine | 2\nNOTICE||OKBK|x|0|t|l|b\n");
+    CHECK(notices.size() == 1 && notices[0].id == "12" && notices[0].airports.size() == 2 && notices[0].airports[1] == "OKKK");
+    CHECK(!notices[0].read && notices[0].text == "Line 1\r\nLine | 2" && notices[0].link == "https://docs.kuwait-iraqvacc.net/x");
+    CHECK(NoticeRelevant(notices[0], { "OKBK" }) && !NoticeRelevant(notices[0], { "ORBI" }));
+    // notification IDs in Core's URL (#49)
+    CHECK(UrlEncode("12") == "12" && UrlEncode("a-b_c.d~e") == "a-b_c.d~e" && UrlEncode("").empty());
+    CHECK(UrlEncode("1/../x?y#z") == "1%2F..%2Fx%3Fy%23z" && UrlEncode("a b") == "a%20b" && UrlEncode("\xC3\xA9") == "%C3%A9");
+
+    // QNH monitor, top-down and notifications: empty, CRLF, short and malformed lines (#52)
+    CHECK(QnhFromMetar("OKBK Q101") == -1 && QnhFromMetar("OKBK QABCD A29.9") == -1 && QnhFromMetar("METAR OKBK Q1012\r\n") == 1012);
+    CHECK(ParseMetars("").empty() && ParseMetars("METAR|OKBK\r\nMETAR||x\r\n").empty() && ParseMetars("METAR|OKBK|OKBK Q1012\r\n").at("OKBK") == "OKBK Q1012");
+    CHECK(ParseTrl("").empty() && ParseTrl("TRL|OR|14000\r\nTRL||1|150\r\nTRL|OR|x|150,980\r\n").empty());
+    auto trl2 = ParseTrl("TRL|or|14000|160, 980 ,170\r\n");
+    CHECK(trl2.size() == 1 && trl2[0].prefix == "OR" && trl2[0].ta == 14000 && TrlFor(trl2, "orbi", 980) == 160 && TrlFor({}, "ORBI", 1013) == 0);
+    CHECK(QnhMessage("OKBK", 1012, 1012, 0, 150) == "OKBK QNH 1012");
+    CHECK(ParseTopDownOrders("").empty() && ParseTopDownOrders("TOPDOWN|OKBK\r\nTOPDOWN|OKB|OKB_TWR\r\nTOPDOWN|OKBK|TWR, \r\n").empty());
+    auto td2 = ParseTopDownOrders("TOPDOWN|okbk| okbk_twr ,OKAC_CTR\r\n");
+    CHECK(td2.size() == 1 && td2["OKBK"].size() == 2 && td2["OKBK"][0] == "OKBK_TWR");
+    CHECK(!TopDownPositionMatches("OKBK_TWR", "OKBK") && !TopDownPositionMatches("OKBK", "OKBK_TWR") && TopDownPositionMatches("okbk_twr", "OKBK_X_TWR"));
+    CHECK(!CoveredByMe(td2, "OKBK", "", {}) && !CoveredByMe(td2, "", "OKBK_TWR", {}) && AirportsCovered(td2, "", {}).empty());
+    CHECK(ParseNotices("").empty() && ParseNotices("NOTICE|1|OKBK|2026-11-01|0|t|l\r\n").empty());
+    auto n2 = ParseNotices("NOTICE| 7 |OKBK,,|2026-11-01|1|Title|https://x.net|end\\n\r\n");
+    CHECK(n2.size() == 1 && n2[0].id == "7" && n2[0].airports.size() == 1 && n2[0].read && n2[0].text == "end\r\n" && !NoticeRelevant(n2[0], {}));
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

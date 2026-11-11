@@ -6,7 +6,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 |---|---|---|---|
 | VCH, built in | `requestMenu.*`, `internet.*`, `usefulStuff.*`, `Constant.hpp`, `stdafx.h`, `targetver.h`, `Config.h` | https://github.com/DrFreas/VCH (Jan Fries), v0.8.6 | GPL-3.0 |
 | Slot detection | `VatsimAPI.h`, `VatsimAPI.cpp` | Adapted from the VATCAN Slots-Plugin, via https://github.com/frazerxyz/Slots-Plugin | See below |
-| KWIQ code | `KWIQPlugin.cpp`, `kwiq_logic.hpp`, `kwiq_win.hpp`, `loader.cpp`, `updater.cpp`, `keylink.*`, `version.h`, `tests/` | Kuwait & Iraq vACC | GPL-3.0-or-later |
+| KWIQ code | `KWIQPlugin.cpp`, `kwiq_logic.hpp`, `kwiq_win.hpp`, `loader.cpp`, `updater.cpp`, `keylink.*`, `push.*`, `version.h`, `tests/` | Kuwait & Iraq vACC | GPL-3.0-or-later |
 | Loader / updater design | `loader.cpp`, `updater.cpp`, `kwiq_win.hpp` | Follows the UK Controller Plugin's loader, updater and core layout (https://github.com/VATSIM-UK/uk-controller-plugin); written for this plugin, no UKCP code copied | GPL-3.0 |
 | libcurl (linked, from vcpkg) | - | https://curl.se (Daniel Stenberg and contributors) | curl licence (MIT style) |
 | JSON for Modern C++ (header only, from vcpkg) | - | https://github.com/nlohmann/json (Niels Lohmann) | MIT |
@@ -14,6 +14,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 | DiscordEuroScope | `discord.hpp`, `discord.cpp` | Adapted from https://github.com/Kirollos/DiscordEuroScope (Kirollos Nashaat), 1.3.0-rc1, commit 399a951 | GPL-3.0 |
 | discord-rpc | `libs/discord-rpc/` | https://github.com/multitheftauto/discord-rpc (Discord, Inc.; Multi Theft Auto's fork, commit b9b5699), Windows files only, unchanged | MIT (`libs/discord-rpc/LICENSE`) |
 | RapidJSON (header only, from vcpkg) | - | https://github.com/Tencent/rapidjson, used by discord-rpc | MIT |
+| Mbed TLS (linked, from vcpkg, for IXWebSocket) | - | https://github.com/Mbed-TLS/mbedtls | Apache-2.0 |
 | IXWebSocket (linked, from vcpkg) | - | https://github.com/machinezone/IXWebSocket | BSD-3-Clause |
 | zlib (linked, from vcpkg, for IXWebSocket) | - | https://zlib.net (Jean-loup Gailly and Mark Adler) | zlib |
 | EuroScope SDK | `libs/` | EuroScope plugin SDK (copy shipped in the VCH repo) | EuroScope SDK terms |

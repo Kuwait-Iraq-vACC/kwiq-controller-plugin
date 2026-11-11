@@ -14,6 +14,7 @@
 #include <thread>
 #include <atomic>
 #include <map>
+#include <set>
 #include <array>
 #include <cstring>
 #include <mmsystem.h>       // PlaySound (link winmm)
@@ -25,6 +26,7 @@
 #include "keylink.hpp"
 #include "rdf.hpp"                // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
 #include "discord.hpp"            // DiscordEuroScope (Kirollos/DiscordEuroScope), built in
+#include "push.hpp"               // Core's push events (Laravel Reverb), as UKCP gets its own
 #define KWIQ_NO_WINHTTP
 #include "kwiq_win.hpp"           // api-settings.json and the folders the loader uses
 
@@ -44,6 +46,10 @@ static const char* CORE_SRD_VERSION_URL = CORE_BASE "/srd/version";
 static const char* CORE_SECTORS_URL     = CORE_BASE "/sectors";
 static const char* CORE_RDF_URL         = CORE_BASE "/rdf";
 static const char* CORE_DISCORD_URL     = CORE_BASE "/discord";
+static const char* CORE_TOPDOWN_ORDERS_URL     = CORE_BASE "/topdown";
+static const char* CORE_TRL_URL         = CORE_BASE "/trl";
+static const char* CORE_METAR_URL       = CORE_BASE "/metar";
+static const char* CORE_NOTICES_URL     = CORE_BASE "/notifications";
 // myKWIQ page that hands the plugin its personal API key (see keylink.hpp)
 static const char* MYKWIQ_CONNECT_URL   = "https://my.kuwait-iraqvacc.net/plugin/connect";
 // EuroScope setup guide, opened from the incorrect EuroScope version popup until Core sends euroscope.setup_url
@@ -76,7 +82,8 @@ enum {
     KWIQ_MENU_HIDE         = 2111,
     KWIQ_MENU_BRIDGE       = 2112,   // TrackAudio's connection (a status row: a click resyncs or reconnects)
     KWIQ_MENU_DISCORD      = 2113,   // DiscordEuroScope on or off
-    KWIQ_MENU_LAST         = 2113
+    KWIQ_MENU_NOTICES      = 2114,   // procedure notifications window
+    KWIQ_MENU_LAST         = 2114
 };
 
 // ---------------------------------------------------------------------------
@@ -439,7 +446,119 @@ static void ShowEsVersion(const std::string& body) {
     ShowNotice(gEsVersion, NOTICE_ES_VERSION, "Incorrect EuroScope Version", body, IDI_WARNING, "OK", nullptr);
 }
 
+// ---- Procedure notifications window (KWIQ menu > Notifications) --------------------------------
+// The list on the left (unread first marked *), the selected one's text on the right, and Mark read /
+// Mark unread and Open link below. Read state is kept in Core per API key.
+static const char* const kNoticesClass = "KWIQNoticesWnd";
+static bool gNoticesReg = false;
+enum { NT_W = 720, NT_H = 420, NT_LIST = 250, ID_NT_LIST = 3500, ID_NT_READ = 3501, ID_NT_LINK = 3502, ID_NT_CLOSE = 3503 };
+struct NoticesWin {
+    HWND hwnd = nullptr, list = nullptr, title = nullptr, text = nullptr, bRead = nullptr, bLink = nullptr;
+    std::vector<kwiq::ProcedureNotice> items;
+    std::string selId;
+};
+static NoticesWin gNotices;
+static void (*gOnMarkRead)(const std::string& id, bool read) = nullptr;
+
+static void NoticesShowSelected() {
+    NoticesWin& w = gNotices;
+    int i = (int)SendMessageA(w.list, LB_GETCURSEL, 0, 0);
+    const kwiq::ProcedureNotice* n = i >= 0 && i < (int)w.items.size() ? &w.items[i] : nullptr;
+    w.selId = n ? n->id : "";
+    SetWindowTextA(w.title, n ? (n->title + (n->published.empty() ? "" : "   (" + n->published + ")")).c_str() : "No notification selected.");
+    SetWindowTextA(w.text, n ? n->text.c_str() : "");
+    SetWindowTextA(w.bRead, n && n->read ? "Mark unread" : "Mark read");
+    EnableWindow(w.bRead, n != nullptr);
+    EnableWindow(w.bLink, n && kwiq::IsWebLink(n->link));         // only a web page is ever opened (#44)
+}
+static void NoticesFill() {
+    NoticesWin& w = gNotices;
+    if (!w.hwnd) return;
+    SendMessageA(w.list, LB_RESETCONTENT, 0, 0);
+    int sel = w.items.empty() ? -1 : 0;
+    for (size_t i = 0; i < w.items.size(); i++) {
+        std::string row = std::string(w.items[i].read ? "   " : "*  ") + w.items[i].title;
+        SendMessageA(w.list, LB_ADDSTRING, 0, (LPARAM)row.c_str());
+        if (w.items[i].id == w.selId) sel = (int)i;
+    }
+    if (w.items.empty()) SendMessageA(w.list, LB_ADDSTRING, 0, (LPARAM)"   No notifications for your position.");
+    SendMessageA(w.list, LB_SETCURSEL, w.items.empty() ? -1 : sel, 0);
+    NoticesShowSelected();
+}
+static LRESULT CALLBACK NoticesProc(HWND h, UINT m, WPARAM wp, LPARAM l) {
+    NoticesWin& w = gNotices;
+    switch (m) {
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        if (id == ID_NT_LIST && HIWORD(wp) == LBN_SELCHANGE) NoticesShowSelected();
+        else if (id == ID_NT_CLOSE) DestroyWindow(h);
+        else if (HIWORD(wp) == BN_CLICKED) {
+            for (auto& n : w.items) {
+                if (n.id != w.selId) continue;
+                if (id == ID_NT_LINK && kwiq::IsWebLink(n.link)) ShellExecuteA(nullptr, "open", n.link.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                if (id == ID_NT_READ) {
+                    n.read = !n.read;                    // shown at once; Core is told in the background
+                    if (gOnMarkRead) gOnMarkRead(n.id, n.read);
+                    NoticesFill();
+                }
+                break;
+            }
+        }
+        return 0;
+    }
+    case WM_CLOSE: DestroyWindow(h); return 0;
+    case WM_DESTROY: if (h == w.hwnd) { w.hwnd = nullptr; w.list = w.title = w.text = w.bRead = w.bLink = nullptr; } return 0;
+    }
+    return DefWindowProcA(h, m, wp, l);
+}
+static void ShowNotices(const std::vector<kwiq::ProcedureNotice>& items) {
+    if (!gMod)
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)&NoticesProc, &gMod);
+    if (!gNoticesReg) {
+        WNDCLASSEXA wc; ZeroMemory(&wc, sizeof(wc));
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = NoticesProc;
+        wc.hInstance = gMod;
+        wc.hCursor = LoadCursorA(nullptr, MAKEINTRESOURCEA(32512));
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = kNoticesClass;
+        if (!RegisterClassExA(&wc)) return;
+        gNoticesReg = true;
+    }
+    gNotices.items = items;
+    if (gNotices.hwnd) { NoticesFill(); ShowWindow(gNotices.hwnd, SW_SHOW); SetForegroundWindow(gNotices.hwnd); return; }
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+    RECT rc = { 0, 0, NT_W, NT_H };
+    AdjustWindowRectEx(&rc, style, FALSE, ex);
+    int ww = rc.right - rc.left, wh = rc.bottom - rc.top, x, y;
+    Centre(ww, wh, x, y);
+    HWND h = CreateWindowExA(ex, kNoticesClass, "KWIQ Notifications", style, x, y, ww, wh, nullptr, nullptr, gMod, nullptr);
+    if (!h) return;
+    NoticesWin& w = gNotices;
+    w.hwnd = h;
+    int bottom = NT_H - M - ROWH;
+    w.list = Child("LISTBOX", "", WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, M, M, NT_LIST, bottom - 2 * M, h, ID_NT_LIST);
+    int tx = M + NT_LIST + M, tw = NT_W - tx - M;
+    w.title = Child("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, tx, M + 2, tw, ROWH - 4, h);
+    w.text = Child("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, tx, M + ROWH, tw, bottom - 2 * M - ROWH, h);
+    w.bRead = Child("BUTTON", "Mark read", BS_PUSHBUTTON, tx, bottom, 110, ROWH, h, ID_NT_READ);
+    w.bLink = Child("BUTTON", "Open link", BS_PUSHBUTTON, tx + 110 + GAP, bottom, 110, ROWH, h, ID_NT_LINK);
+    Child("BUTTON", "Close", BS_PUSHBUTTON, NT_W - M - 90, bottom, 90, ROWH, h, ID_NT_CLOSE);
+    NoticesFill();
+    ShowWindow(h, SW_SHOW);
+    SetForegroundWindow(h);
+}
+// New data from Core while the window is open: keep the selection, update the rest
+static void UpdateNotices(const std::vector<kwiq::ProcedureNotice>& items) {
+    if (!gNotices.hwnd) return;
+    gNotices.items = items;
+    NoticesFill();
+}
+
 static void Shutdown() {
+    if (gNotices.hwnd) DestroyWindow(gNotices.hwnd);
+    if (gNoticesReg && gMod) { UnregisterClassA(kNoticesClass, gMod); gNoticesReg = false; }
     if (gKey.hwnd) DestroyWindow(gKey.hwnd);
     if (gInfo.hwnd) DestroyWindow(gInfo.hwnd);
     if (gEsVersion.hwnd) DestroyWindow(gEsVersion.hwnd);
@@ -654,6 +773,9 @@ public:
         if (soundLooping_) PlaySoundA(nullptr, nullptr, 0);
         quit_ = true;                                        // aborts a running update download
         if (worker_.joinable()) worker_.join();
+        if (auxWorker_.joinable()) auxWorker_.join();
+        if (markWorker_.joinable()) markWorker_.join();
+        kwiq_ui::gOnMarkRead = nullptr;
         CDataHandler::Shutdown();
         kwiq_net::GlobalCleanup();
         if (instanceLock_) CloseHandle(instanceLock_);
@@ -697,6 +819,7 @@ public:
             { std::lock_guard<std::mutex> g(mu_); if (ev_.active && !kwiq::RoutesForDate(ev_, TodayCached()).empty()) eventName = ev_.name; }
             discord_.Tick(now, eventName);
         }
+        TickQnhAndNotices(now);
         CDataHandler::refreshInterval = slotsEvery_;
         std::string code;
         { std::lock_guard<std::mutex> g(mu_); code = ev_.active ? ev_.vatcanCode : ""; }
@@ -878,6 +1001,18 @@ public:
             else Msg(c == ".RDF RELOAD" ? "RDF: reconnecting to TrackAudio." : "RDF: channels synced again with TrackAudio.", false);
             return true;
         }
+        if (c.rfind(".KWIQ QNH", 0) == 0) {                // .kwiq qnh <ICAO>
+            std::string icao = kwiq::Trim(c.substr(9));
+            std::string metar;
+            int trl = 0, qnh = -1;
+            { std::lock_guard<std::mutex> g(mu_); auto it = metars_.find(icao); if (it != metars_.end()) metar = it->second; }
+            if (!metar.empty()) { qnh = kwiq::QnhFromMetar(metar); std::lock_guard<std::mutex> g(mu_); trl = kwiq::TrlFor(trl_, icao, qnh); }
+            if (!kwiq::IsAirportCode(icao)) Msg("Usage: .kwiq qnh <ICAO>", true);
+            else if (qnh < 0) Msg("No QNH for " + icao + (metar.empty() ? " from Core yet." : " in its METAR."), true);
+            else DisplayUserMessage("PRESSURE_MONITOR", "KWIQ", kwiq::QnhMessage(icao, qnh, 0, trl, 0).c_str(), true, true, true, false, false);
+            return true;
+        }
+        if (c == ".KWIQ NOTIFICATIONS") { OpenNotices(); return true; }
         if (c == ".KWIQ DISCORD") {
             SetDiscord(!discord_.Local());
             return true;
@@ -926,6 +1061,155 @@ public:
     bool Duplicate() const { return duplicate_; }
     // RDF on the radar screen (REFRESH_PHASE_AFTER_TAGS)
     void DrawRdf(EuroScopePlugIn::CRadarScreen* screen, HDC hDC) { if (!duplicate_ && !reduced_) rdf_.Draw(screen, hDC); }
+    // ---- QNH monitor and procedure notifications (#4) -------------------------------------------------
+    // The logged-on controller's callsign, and the other controllers online (for top-down)
+    bool Myself(std::string& me, std::vector<std::string>& online) {
+        EuroScopePlugIn::CController my = ControllerMyself();
+        if (!connected_ || !my.IsValid() || !my.IsController() || !my.GetCallsign()) return false;
+        me = my.GetCallsign();
+        for (auto c = ControllerSelectFirst(); c.IsValid(); c = ControllerSelectNext(c))
+            if (c.IsController() && c.GetCallsign() && me != c.GetCallsign()) online.push_back(c.GetCallsign());
+        return true;
+    }
+    std::vector<std::string> Covered() {
+        std::string me;
+        std::vector<std::string> online;
+        if (!Myself(me, online)) return {};
+        std::lock_guard<std::mutex> g(mu_);
+        return kwiq::AirportsCovered(topDown_, me, online);
+    }
+    // Logged on: the notifications for the airports the controller covers. Not logged on: all of them.
+    std::vector<kwiq::ProcedureNotice> NoticesForMe() {
+        std::vector<kwiq::ProcedureNotice> all;
+        { std::lock_guard<std::mutex> g(mu_); all = notices_; }
+        if (!connected_) return all;
+        std::vector<std::string> cov = Covered();
+        std::vector<kwiq::ProcedureNotice> out;
+        for (const auto& n : all) if (kwiq::NoticeRelevant(n, cov)) out.push_back(n);
+        return out;
+    }
+    void OpenNotices() {
+        // Called from the window's WndProc, so nothing may escape into Windows (#45)
+        kwiq_ui::gOnMarkRead = [](const std::string& id, bool read) { try { if (gPlugin) gPlugin->MarkRead(id, read); } catch (...) {} };
+        kwiq_ui::ShowNotices(NoticesForMe());
+        noticesDue_ = true;                                          // and fetch them again
+    }
+    // Mark read / Mark unread: shown at once, and Core is told (POST or DELETE /notifications/<id>/read)
+    void MarkRead(const std::string& id, bool read) {
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            for (auto& n : notices_) if (n.id == id) n.read = read;
+            pendingMarks_.emplace_back(id, read);
+        }
+        if (markBusy_) return;                                      // the running worker takes it
+        if (markWorker_.joinable()) markWorker_.join();
+        markBusy_ = true;
+        markWorker_ = std::thread([this]() {
+            try {                                                   // nothing may leave a thread's function (#48)
+                for (;;) {
+                    std::pair<std::string, bool> m;
+                    {
+                        std::lock_guard<std::mutex> g(mu_);
+                        if (pendingMarks_.empty() || quit_) { markBusy_ = false; return; }
+                        m = pendingMarks_.front();
+                        pendingMarks_.erase(pendingMarks_.begin());
+                    }
+                    std::string body, err;
+                    // The ID is percent-encoded, so whatever Core sends stays one path segment (#49)
+                    kwiq_net::HttpSend(m.second ? "POST" : "DELETE", std::string(CORE_NOTICES_URL) + "/" + kwiq::UrlEncode(m.first) + "/read",
+                                       "", body, err);
+                    if (!err.empty()) SetError("Notifications", err); else ClearError("Notifications");
+                }
+            } catch (...) {}
+            markBusy_ = false;                                      // the next Mark read starts a new worker
+        });
+    }
+    // METARs and notifications: fetched when Core pushes "updated", and polled as a fallback.
+    // A function-try-block: nothing may leave the thread's function, and auxBusy_ is reset either way (#48).
+    void AuxRefresh(bool metar, bool notices) try {
+        std::string body, err;
+        if (metar) {
+            if (kwiq_net::HttpGet(CORE_METAR_URL, body, err)) {
+                ClearError("METAR");
+                auto m = kwiq::ParseMetars(body);
+                { std::lock_guard<std::mutex> g(mu_); metars_ = std::move(m); }
+                metarsNew_ = true;
+            } else if (err != "HTTP 404") SetError("METAR", err);
+        }
+        if (notices) {
+            if (kwiq_net::HttpGet(CORE_NOTICES_URL, body, err)) {
+                ClearError("Notifications");
+                auto n = kwiq::ParseNotices(body);
+                { std::lock_guard<std::mutex> g(mu_); if (pendingMarks_.empty()) notices_ = std::move(n); }
+                noticesNew_ = true;
+            } else if (err != "HTTP 404") SetError("Notifications", err);
+        }
+        auxBusy_ = false;
+    } catch (...) {
+        auxBusy_ = false;
+    }
+    void TickQnhAndNotices(std::time_t now) {
+        for (const auto& e : push_.Take()) {
+            if (e.first == "metars") metarDue_ = true;
+            if (e.first == "notifications") noticesDue_ = true;
+        }
+        // While pushes come, a slow poll is only a safety net
+        if (now - lastMetar_ >= (push_.Connected() ? 600 : metarPoll_.load())) metarDue_ = true;
+        if (now - lastNotices_ >= 300) noticesDue_ = true;
+
+        std::string me;
+        std::vector<std::string> online;
+        bool on = Myself(me, online);
+        if (on && me != qnhCallsign_) { qnhSeen_.clear(); noticesTold_.clear(); qnhCallsign_ = me; noticesDue_ = true; metarDue_ = true; }
+        if (!on && !qnhCallsign_.empty()) { qnhSeen_.clear(); noticesTold_.clear(); qnhCallsign_.clear(); }
+
+        if ((metarDue_ || noticesDue_) && !auxBusy_) {
+            if (auxWorker_.joinable()) auxWorker_.join();
+            bool m = metarDue_, n = noticesDue_;
+            metarDue_ = noticesDue_ = false;
+            if (m) lastMetar_ = now;
+            if (n) lastNotices_ = now;
+            auxBusy_ = true;
+            auxWorker_ = std::thread(&CKWIQPlugin::AuxRefresh, this, m, n);
+        }
+
+        if (metarsNew_.exchange(false) && on) {
+            std::vector<std::string> cov;
+            std::map<std::string, std::string> metars;
+            std::vector<kwiq::TrlRule> trl;
+            { std::lock_guard<std::mutex> g(mu_); cov = kwiq::AirportsCovered(topDown_, me, online); metars = metars_; trl = trl_; }
+            for (const auto& icao : cov) {
+                auto it = metars.find(icao);
+                int q = it == metars.end() ? -1 : kwiq::QnhFromMetar(it->second);
+                if (q < 0) continue;
+                int t = kwiq::TrlFor(trl, icao, q);
+                auto seen = qnhSeen_.find(icao);
+                // Only changes during the session: the first QNH after logging on (or taking an airport) is noted
+                if (seen != qnhSeen_.end() && seen->second.first != q)
+                    DisplayUserMessage("PRESSURE_MONITOR", "KWIQ", kwiq::QnhMessage(icao, q, seen->second.first, t, seen->second.second).c_str(),
+                                       true, true, true, true, false);
+                qnhSeen_[icao] = { q, t };
+            }
+        }
+
+        if (noticesNew_.exchange(false)) {
+            std::vector<kwiq::ProcedureNotice> mine = NoticesForMe();
+            kwiq_ui::UpdateNotices(mine);
+            if (on) {
+                int fresh = 0, unread = 0;
+                for (const auto& n : mine) {
+                    if (n.read) continue;
+                    unread++;
+                    if (noticesTold_.insert(n.id).second) fresh++;
+                }
+                if (fresh)
+                    DisplayUserMessage("KWIQ_NOTIFICATIONS", "KWIQ", (std::to_string(unread) + " unread notification" + (unread == 1 ? "" : "s") +
+                                       " for the position you are controlling. Open them from the KWIQ button: Notifications.").c_str(),
+                                       true, true, true, true, false);
+            }
+        }
+    }
+
     // DiscordEuroScope on or off for this controller, kept as the DiscordEuroScope setting (the Configurator
     // writes it too). Core can still turn it off for everyone.
     void SetDiscord(bool on) {
@@ -985,6 +1269,11 @@ public:
         AddPopupListElement(line("RDF Drawing", rdf_.DrawOn() ? "On" : "Off").c_str(), "", KWIQ_MENU_RDF);
         AddPopupListElement(line("TrackAudio", kwiq::TrackAudioStateText(rdf_.TrackAudio())).c_str(), "", KWIQ_MENU_BRIDGE);
         AddPopupListElement(line("DiscordEuroScope", discord_.Local() ? "On" : "Off").c_str(), "", KWIQ_MENU_DISCORD);
+        {
+            int unread = 0;
+            for (const auto& n : NoticesForMe()) if (!n.read) unread++;
+            AddPopupListElement(line("Notifications", unread ? (std::to_string(unread) + " unread").c_str() : "").c_str(), "", KWIQ_MENU_NOTICES);
+        }
         AddPopupListElement(line("Slot Auto Refresh", autoRefresh_ ? "On" : "Off").c_str(), "", KWIQ_MENU_AUTOREFRESH);
         AddPopupListElement("Event Routes", "", KWIQ_MENU_EVENT_ROUTES);
         AddPopupListElement("SRD Search", "", KWIQ_MENU_SRD);
@@ -1008,6 +1297,7 @@ public:
         case KWIQ_MENU_RDF:          SetRdfDraw(rdf_.DrawOn() ? 0 : 1); return;
         case KWIQ_MENU_BRIDGE:       TrackAudioClicked(); return;
         case KWIQ_MENU_DISCORD:      SetDiscord(!discord_.Local()); return;
+        case KWIQ_MENU_NOTICES:      OpenNotices(); return;
         case KWIQ_MENU_AUTOREFRESH:  OnCompileCommand(".kwiq autorefresh"); return;
         case KWIQ_MENU_EVENT_ROUTES: OpenRoutesWindow(pt); return;
         case KWIQ_MENU_SRD:          OpenSrdWindow(pt); return;
@@ -1386,6 +1676,10 @@ private:
         }
         rdf_.SetEndpoint(c.Get("rdf.endpoint", "127.0.0.1:49080"));
         discordCoreOn_ = c.GetBool("discord.enabled", true);
+        // Core's push events (Laravel Reverb), and how often to poll METARs while they are not coming
+        push_.Configure(Trim(c.Get("push.host")), c.GetInt("push.port", 443, 1, 65535), c.GetBool("push.tls", true),
+                        Trim(c.Get("push.key")), { "metars", "notifications" });
+        metarPoll_ = c.GetInt("metar.poll_seconds", 60, 30, 3600);
         CheckSectorFile(false);
     }
 
@@ -1518,6 +1812,12 @@ private:
                     } else ClearError("SRD");
                 } else fail("SRD", err);
             }
+            if (doSrd && !reduced_) {                  // top-down orders and transition levels; none yet is fine
+                if (kwiq_net::HttpGet(CORE_TOPDOWN_ORDERS_URL, body, err)) { ClearError("Top-down"); auto td = ParseTopDownOrders(body); std::lock_guard<std::mutex> g(mu_); topDown_ = std::move(td); }
+                else if (err != "HTTP 404") fail("Top-down", err);
+                if (kwiq_net::HttpGet(CORE_TRL_URL, body, err)) { ClearError("TRL"); auto t = ParseTrl(body); std::lock_guard<std::mutex> g(mu_); trl_ = std::move(t); }
+                else if (err != "HTTP 404") fail("TRL", err);
+            }
             if (doSrd && !reduced_) {                  // RDF settings per callsign pattern; none yet is fine
                 if (kwiq_net::HttpGet(CORE_RDF_URL, body, err)) { ClearError("RDF"); rdf_.SetRows(ParseRdf(body)); }
                 else if (err == "HTTP 404") rdf_.SetRows({});
@@ -1549,6 +1849,21 @@ private:
     KwiqRdf rdf_{ this };                                           // RDF and the TrackAudio bridge
     KwiqDiscord discord_{ this };                                   // DiscordEuroScope
     std::atomic<bool> discordCoreOn_{ true };                       // discord.enabled in Core's config
+    // QNH monitor and procedure notifications (#4)
+    KwiqPush push_;
+    kwiq::TopDownOrders topDown_;                                   // mu_
+    std::vector<kwiq::TrlRule> trl_;                                // mu_
+    std::map<std::string, std::string> metars_;                     // mu_
+    std::vector<kwiq::ProcedureNotice> notices_;                    // mu_
+    std::vector<std::pair<std::string, bool>> pendingMarks_;        // mu_: read / unread, for Core
+    std::atomic<bool> metarsNew_{ false }, noticesNew_{ false }, auxBusy_{ false }, markBusy_{ false };
+    bool metarDue_ = true, noticesDue_ = true;                      // main thread
+    std::time_t lastMetar_ = 0, lastNotices_ = 0;
+    std::atomic<int> metarPoll_{ 60 };
+    std::map<std::string, std::pair<int, int>> qnhSeen_;            // main thread: ICAO -> QNH, TRL this session
+    std::set<std::string> noticesTold_;                             // main thread: unread notifications already announced
+    std::string qnhCallsign_;
+    std::thread auxWorker_, markWorker_;
     std::string keyPromptedFor_, keyToldFor_;                      // main thread only: the key problem last offered / told about
     bool justConnected_ = false;                                    // main thread only: logged on since the last key check
     std::string esVersion_;                                         // the running EuroScope's, read once at start
