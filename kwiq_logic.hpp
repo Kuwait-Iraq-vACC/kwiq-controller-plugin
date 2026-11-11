@@ -227,12 +227,14 @@ inline int ParseLevelFt(const std::string& in) {
 }
 
 // ---- FIR exit points (UK Controller Plugin: intention/FirExitPoint, ExitCone, CachedAircraftFirExitGenerator) ----
-// Core /api/plugin/fir-exits (plain text):  EXIT|<point>|<from heading>|<to heading>|<internal 0/1>
+// Core /api/plugin/fir-exits (plain text), one line per exit cone:  EXIT|<point>|<from heading>|<to heading>|<internal 0/1>
 // An aircraft leaves the airspace at a listed point when its track from that point to the next one on its
-// route lies in the point's exit cone (from..to, clockwise, degrees). Internal points are on the OKAC/ORBB
-// boundary; the others are where the vACC's airspace ends.
+// route lies in one of the point's exit cones (from..to, clockwise, degrees). A point can have several cones,
+// one per direction: a point on the OKAC/ORBB boundary is crossed both ways, so the same name on several lines
+// is several cones, each with its own internal flag. Internal cones are on the OKAC/ORBB boundary; the others
+// are where the vACC's airspace ends. Identical lines count once.
 struct FirExit { std::string point; int from = 0, to = 360; bool internal = false; };
-using FirExits = std::unordered_map<std::string, FirExit>;
+using FirExits = std::unordered_map<std::string, std::vector<FirExit>>;   // point -> its cones; size() = points
 
 inline FirExits ParseFirExits(const std::string& body) {
     FirExits m;
@@ -249,7 +251,10 @@ inline FirExits ParseFirExits(const std::string& body) {
         e.point = Upper(Trim(f[1]));
         if (e.point.empty() || !heading(f[2], e.from) || !heading(f[3], e.to)) continue;
         e.internal = f.size() > 4 && Trim(f[4]) == "1";
-        m[e.point] = e;
+        auto& cones = m[e.point];
+        bool same = false;
+        for (const auto& c : cones) same = same || (c.from == e.from && c.to == e.to && c.internal == e.internal);
+        if (!same) cones.push_back(e);
     }
     return m;
 }
@@ -260,14 +265,28 @@ inline bool InExitCone(const FirExit& e, int heading) {
 // A point on the route, with the track to the next one (-1 for the last point)
 struct RoutePoint { std::string name; int track = -1; };
 struct AircraftExit { std::string internal, external; };     // empty when it does not leave there
+// The cone of a point that a track leaves through, or nullptr. If two of its cones overlap at that track, an
+// external one wins: the flight leaves the vACC's airspace there.
+inline const FirExit* ExitConeFor(const std::vector<FirExit>& cones, int track) {
+    const FirExit* hit = nullptr;
+    for (const auto& c : cones) {
+        if (!InExitCone(c, track)) continue;
+        if (!c.internal) return &c;
+        if (!hit) hit = &c;
+    }
+    return hit;
+}
 // UKCP CachedAircraftFirExitGenerator::Generate: the first exit along the route; an internal one only counts
-// before the aircraft leaves the vACC's airspace
+// before the aircraft leaves the vACC's airspace. Each point is taken if the track is inside any of its cones,
+// with that cone's own internal flag.
 inline AircraftExit FindFirExit(const FirExits& exits, const std::vector<RoutePoint>& route) {
     AircraftExit out;
     for (const auto& p : route) {
         auto it = exits.find(Upper(p.name));
-        if (it == exits.end() || p.track < 0 || !InExitCone(it->second, p.track)) continue;
-        if (it->second.internal) { if (out.internal.empty()) out.internal = it->first; continue; }
+        if (it == exits.end() || p.track < 0) continue;
+        const FirExit* cone = ExitConeFor(it->second, p.track);
+        if (!cone) continue;
+        if (cone->internal) { if (out.internal.empty()) out.internal = it->first; continue; }
         out.external = it->first;
         break;
     }

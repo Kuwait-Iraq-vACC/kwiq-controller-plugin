@@ -67,9 +67,10 @@ int main() {
     // FIR exit points (UK Controller Plugin): the first listed point the route leaves the airspace at
     FirExits exits = ParseFirExits("EXIT|tasmi|090|180|0\r\nEXIT|ROTAP|300|060|0\nEXIT|SIDAD|315|045|1\n"
                                    "EXIT|BAD|400|10|0\nEXIT|ALSO|x|10|0\nnonsense\n");
-    CHECK(exits.size() == 3 && exits["TASMI"].from == 90 && exits["SIDAD"].internal && !exits["ROTAP"].internal);
-    CHECK(InExitCone(exits["TASMI"], 135) && !InExitCone(exits["TASMI"], 200));
-    CHECK(InExitCone(exits["ROTAP"], 350) && InExitCone(exits["ROTAP"], 30) && !InExitCone(exits["ROTAP"], 120));   // wraps north
+    CHECK(exits.size() == 3 && exits["TASMI"].size() == 1 && exits["TASMI"][0].from == 90 && exits["SIDAD"][0].internal &&
+          !exits["ROTAP"][0].internal);
+    CHECK(InExitCone(exits["TASMI"][0], 135) && !InExitCone(exits["TASMI"][0], 200));
+    CHECK(InExitCone(exits["ROTAP"][0], 350) && InExitCone(exits["ROTAP"][0], 30) && !InExitCone(exits["ROTAP"][0], 120));   // wraps north
     std::vector<RoutePoint> north = { { "OKBK", 0 }, { "SIDAD", 10 }, { "ABC", 5 }, { "ROTAP", 355 }, { "LTBA", -1 } };
     AircraftExit nx = FindFirExit(exits, north);
     CHECK(nx.internal == "SIDAD" && nx.external == "ROTAP");
@@ -77,6 +78,31 @@ int main() {
     CHECK(FindFirExit(exits, inbound).external.empty());
     std::vector<RoutePoint> last = { { "OKBK", 90 }, { "TASMI", -1 } };       // no next point: no track, no exit
     CHECK(FindFirExit(exits, last).external.empty());
+
+    // several cones per point: one per direction, each with its own internal flag
+    FirExits two = ParseFirExits("EXIT|BOUND|000|090|0\nEXIT|BOUND|180|270|1\n"     // NE out of the vACC, SW into ORBB
+                                 "EXIT|NORTH|330|030|0\nEXIT|NORTH|150|210|0\n"     // both ways, one cone wrapping north
+                                 "EXIT|DUP|090|180|0\nEXIT|DUP|090|180|0\nEXIT|dup|090|180|0\n"   // the same cone three times
+                                 "EXIT|DUP|090|180|1\n");                         // same headings, other flag: another cone
+    CHECK(two.size() == 3 && two["BOUND"].size() == 2 && two["NORTH"].size() == 2 && two["DUP"].size() == 2);
+    // two cones on one point: both directions match, a third doesn't
+    std::vector<RoutePoint> ne = { { "BOUND", 45 }, { "X", -1 } }, sw = { { "BOUND", 225 }, { "X", -1 } }, se = { { "BOUND", 135 }, { "X", -1 } };
+    CHECK(FindFirExit(two, ne).external == "BOUND" && FindFirExit(two, ne).internal.empty());   // the external cone
+    CHECK(FindFirExit(two, sw).internal == "BOUND" && FindFirExit(two, sw).external.empty());   // the internal cone
+    CHECK(FindFirExit(two, se).internal.empty() && FindFirExit(two, se).external.empty());
+    // a cone that wraps through north, next to an ordinary one on the same point
+    std::vector<RoutePoint> n350 = { { "NORTH", 350 }, { "X", -1 } }, n10 = { { "NORTH", 10 }, { "X", -1 } },
+                            s180 = { { "NORTH", 180 }, { "X", -1 } }, e90 = { { "NORTH", 90 }, { "X", -1 } };
+    CHECK(FindFirExit(two, n350).external == "NORTH" && FindFirExit(two, n10).external == "NORTH" &&
+          FindFirExit(two, s180).external == "NORTH" && FindFirExit(two, e90).external.empty());
+    // the same point internal in one cone and external in another: a later external exit still counts
+    std::vector<RoutePoint> via = { { "BOUND", 200 }, { "NORTH", 0 }, { "X", -1 } };
+    AircraftExit vx = FindFirExit(two, via);
+    CHECK(vx.internal == "BOUND" && vx.external == "NORTH");
+    // overlapping cones on one point (DUP, external and internal at the same headings): external wins
+    std::vector<RoutePoint> dup = { { "DUP", 135 }, { "X", -1 } };
+    CHECK(FindFirExit(two, dup).external == "DUP" && FindFirExit(two, dup).internal.empty());
+    CHECK(ExitConeFor(two["BOUND"], 135) == nullptr && ExitConeFor(two["BOUND"], 0) != nullptr && !ExitConeFor(two["BOUND"], 0)->internal);
     CHECK(Domestic("OKBK", "OK,OR") && Domestic("orbi", "OK, OR") && !Domestic("LTBA", "OK,OR"));
     CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
     CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "SIDAD", "" }) == "SIDAD" && SrdEnd("LTBA", "OK,OR", {}) == "");
