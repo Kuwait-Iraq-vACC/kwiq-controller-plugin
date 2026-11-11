@@ -39,6 +39,7 @@ add_library(KWIQPluginCore SHARED
     KWIQPlugin.cpp
     VatsimAPI.cpp
     keylink.cpp          # receives the API key from myKWIQ
+    kwiq.rc              # the KWIQ button's logo (kwiq_res.h)
     rdf.cpp              # RDF and the TrackAudio bridge (KingfuChan/RDF)
     discord.cpp          # DiscordEuroScope (Kirollos/DiscordEuroScope)
     push.cpp             # Core's push events (Laravel Reverb)
