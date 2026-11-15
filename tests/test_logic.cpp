@@ -478,6 +478,7 @@ int main() {
     CHECK(WildcardMatch("", "") && !WildcardMatch("", "A") && WildcardMatch("**", "abc") && WildcardMatch("a*c", "abbbc") && !WildcardMatch("a*c", "abcd"));
     CHECK(!VersionInText("").valid && !VersionInText("TrackAudio 1.2").valid && VersionInText("TrackAudio v1.3.0-beta.5").pre.size() == 2);
     CHECK(TrackAudioVersionOk("TrackAudio v1.3.0") && TrackAudioVersionOk("v1.3.0-beta.10") && !TrackAudioVersionOk("v1.3.0-alpha.9"));
+    CHECK(TrackAudioVersionOk("TrackAudio V1.3.0-Beta.5") && !TrackAudioVersionOk("TrackAudio v1.3.0-BETA.4"));   // any case
 
     // the KWIQ menu's TrackAudio row
     CHECK(TrackAudioStatus(false, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Off);       // RDF didn't start
@@ -677,8 +678,14 @@ int main() {
         CHECK(!UpdateAvailable("0.6.0+115.a1b2c3d", "0.6.0", std::string(64, 'a')) && !UpdateAvailable("0.6.0.42", "0.6.0", std::string(64, 'a')));
         CHECK(UpdateAvailable("0.5.0.115", "0.6.0", std::string(64, 'a')) && UpdateAvailable("0.7.0-rc.1", "0.7.0", std::string(64, 'a')));
         CHECK(UpdateAvailable("0", "0.6.0", std::string(64, 'a')) && !UpdateAvailable("0.6.0", "junk", std::string(64, 'a')));
-        CHECK(!UpdateAvailable("0.6.0-pr.66.115", "0.5.0", std::string(64, 'a')) && UpdateAvailable("0.6.0-pr.66.115", "0.6.0", std::string(64, 'a')));
-        CHECK(CompareVersions("0.6.0", "0.6.0") >= 0 && CompareVersions("0.5.9", "0.6.0") < 0);   // plugin.min_version
+        // a test build counts as the version it was built from for updates and the minimum, but still sorts below it
+        CHECK(!UpdateAvailable("0.6.0-pr.66.115", "0.5.0", std::string(64, 'a')) && !UpdateAvailable("0.6.0-pr.66.115", "0.6.0", std::string(64, 'a')));
+        CHECK(UpdateAvailable("0.6.0-pr.66.115", "0.6.1", std::string(64, 'a')) && !UpdateAvailable("0.6.0-dev.115", "0.6.0", std::string(64, 'a')));
+        CHECK(!UpdateAvailable("0.7.0-rc.1.pr.66.115", "0.7.0-rc.1", std::string(64, 'a')) && UpdateAvailable("0.7.0-rc.1.pr.66.115", "0.7.0", std::string(64, 'a')));
+        CHECK(CompareVersions("0.6.0-pr.66.115", "0.6.0") < 0 && RunningVersion("0.6.0-pr.66.115+115.a1b2c3d").pre.empty());
+        // plugin.min_version
+        CHECK(!BelowMinimum("0.6.0", "0.6.0") && BelowMinimum("0.5.9", "0.6.0") && !BelowMinimum("0.6.0-pr.66.115", "0.6.0"));
+        CHECK(BelowMinimum("0.6.0-pr.66.115", "0.6.1") && !BelowMinimum("0.6.0", "junk") && BelowMinimum("0.7.0-rc.1", "0.7.0"));
         // version.h's own version is SemVer
         CHECK(ParseVersion(KWIQ_VERSION).valid && ParseVersion(KWIQ_VERSION).numbers == 3);
         CHECK(VersionInText("TrackAudio v1.3.0-beta.5 (build 7)").valid && VersionInText("x1.3.0").valid == false);

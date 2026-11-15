@@ -44,6 +44,10 @@ if(KWIQ_BUILD_METADATA)
     string(APPEND KWIQ_BUILD_H "#define KWIQ_BUILD_METADATA \"${KWIQ_BUILD_METADATA}\"\n")
 endif()
 file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/kwiq_build.h CONTENT "${KWIQ_BUILD_H}" @ONLY)
+# Not kept in the cache: each configure takes only what it's given, so a build folder configured once by hand
+# with -DKWIQ_BUILD_VERSION doesn't keep that version
+unset(KWIQ_BUILD_VERSION CACHE)
+unset(KWIQ_BUILD_METADATA CACHE)
 
 # KWIQPluginCore.dll: the plugin itself
 add_library(KWIQPluginCore SHARED

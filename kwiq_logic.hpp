@@ -756,10 +756,24 @@ inline bool LooksLikeX86Dll(const std::string& d) {
     unsigned machine = u8(pe + 4) | (u8(pe + 5) << 8), chr = u8(pe + 22) | (u8(pe + 23) << 8);
     return machine == 0x014c && (chr & 0x2000) != 0;          // I386 + IMAGE_FILE_DLL
 }
+// The running plugin's version for the update check and plugin.min_version. A test build from build.yml
+// (<version>-pr.<number>.<run> or <version>-dev.<run>, or 0.7.0-rc.1.pr.66.115) counts as the version it was
+// built from, so a tester isn't asked to "update" to that release, or disabled by it as too old. It still
+// sorts below that release everywhere else.
+inline Version RunningVersion(const std::string& running) {
+    Version v = ParseVersion(running);
+    for (size_t i = 0; i < v.pre.size(); i++)
+        if (v.pre[i] == "pr" || v.pre[i] == "dev") { v.pre.resize(i); break; }
+    return v;
+}
 // True when Core advertises a newer plugin than the running one (by SemVer precedence, so build metadata
 // and an old fourth number never count) and gave a checksum to verify it with.
 inline bool UpdateAvailable(const std::string& running, const std::string& latest, const std::string& sha) {
-    return ParseVersion(latest).valid && sha.size() == 64 && CompareVersions(running, latest) < 0;
+    return ParseVersion(latest).valid && sha.size() == 64 && CompareVersions(RunningVersion(running), ParseVersion(latest)) < 0;
+}
+// True when the running plugin is older than Core's plugin.min_version
+inline bool BelowMinimum(const std::string& running, const std::string& minimum) {
+    return CompareVersions(RunningVersion(running), ParseVersion(minimum)) < 0;
 }
 
 // Personal API key from myKWIQ: "kwiq_" then 40 letters and digits. The first 8 after "kwiq_" are its ID.
@@ -877,9 +891,10 @@ inline RdfSettings RdfFor(const std::vector<RdfRow>& rows, const std::string& ca
 }
 
 // TrackAudio's version, from the text its HTTP endpoint answers with (e.g. "TrackAudio v1.3.0-beta.5").
-// RDF needs 1.3.0 Beta 5 or later, by SemVer precedence (CompareVersions). False if unreadable.
+// RDF needs 1.3.0 Beta 5 or later, by SemVer precedence (CompareVersions), ignoring case ("Beta" is "beta").
+// False if unreadable.
 inline bool TrackAudioVersionOk(const std::string& text) {
-    Version v = VersionInText(text);
+    Version v = VersionInText(Lower(text));
     return v.valid && CompareVersions(v, ParseVersion("1.3.0-beta.5")) >= 0;
 }
 
