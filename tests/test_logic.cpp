@@ -556,7 +556,7 @@ int main() {
     CHECK(TrlFor(trl, "ORBI", 981) == 160 && TrlFor(trl, "ORBI", 980) == 160 && TrlFor(trl, "ORBI", 979) == 170);
     CHECK(TrlFor(trl, "OKBK", 960) == 150 && TrlFor(trl, "ORMM", 1000) == 170 && TrlFor(trl, "ORMM", 999) == 180);
     CHECK(TrlFor(trl, "OEJN", 1013) == 0 && TrlFor(trl, "ORBI", -1) == 0);
-    CHECK(QnhMessage("ORBI", 979, 981, 170, 160) == "Pressure monitor: ORBI QNH now 979 (was 981) TRL FL170 - CHANGED from FL160");
+    CHECK(QnhMessage("ORBI", 979, 981, 170, 160) == "Pressure monitor: ORBI QNH now 979 (was 981) TRL FL170 (was FL160)");
     CHECK(QnhMessage("ORBI", 1004, 1006, 160, 160) == "Pressure monitor: ORBI QNH now 1004 (was 1006)");
     CHECK(QnhMessage("OKKK", 1019, 1018, 150, 150) == "Pressure monitor: OKKK QNH now 1019 (was 1018)");
     CHECK(QnhMessage("OEJN", 1013, 0, 0, 0) == "Pressure monitor: OEJN QNH now 1013");

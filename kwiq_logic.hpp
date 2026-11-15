@@ -1009,12 +1009,12 @@ inline int TrlFor(const std::vector<TrlRule>& rules, const std::string& icao, in
     return best->v.back();
 }
 // "Pressure monitor: OKKK QNH now 1019 (was 1018)", and the TRL only when it changed:
-// "Pressure monitor: ORBI QNH now 979 (was 981) TRL FL170 - CHANGED from FL160".
+// "Pressure monitor: ORBI QNH now 979 (was 981) TRL FL170 (was FL160)".
 // With no previous QNH (.kwiq qnh <ICAO>) the TRL is given as it stands.
 inline std::string QnhMessage(const std::string& icao, int qnh, int prevQnh, int trl, int prevTrl) {
     std::string m = "Pressure monitor: " + icao + " QNH now " + std::to_string(qnh);
     if (prevQnh > 0 && prevQnh != qnh) m += " (was " + std::to_string(prevQnh) + ")";
-    if (trl > 0 && prevTrl > 0 && prevTrl != trl) m += " TRL FL" + std::to_string(trl) + " - CHANGED from FL" + std::to_string(prevTrl);
+    if (trl > 0 && prevTrl > 0 && prevTrl != trl) m += " TRL FL" + std::to_string(trl) + " (was FL" + std::to_string(prevTrl) + ")";
     else if (trl > 0 && prevQnh <= 0) m += " TRL FL" + std::to_string(trl);
     return m;
 }
