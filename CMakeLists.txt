@@ -109,7 +109,7 @@ foreach(h IN LISTS KWIQ_HEADERS)
     list(APPEND KWIQ_HEADER_CHECKS ${CMAKE_CURRENT_BINARY_DIR}/header_check/${n}.cpp)
 endforeach()
 add_library(KWIQHeaderCheck OBJECT ${KWIQ_HEADER_CHECKS})
-target_include_directories(KWIQHeaderCheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(KWIQHeaderCheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)   # version.h as CI builds it
 target_include_directories(KWIQHeaderCheck SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libs)
 target_compile_definitions(KWIQHeaderCheck PRIVATE ${KWIQ_DEFINITIONS})
 target_compile_options(KWIQHeaderCheck PRIVATE /W4)

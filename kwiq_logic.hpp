@@ -522,12 +522,14 @@ inline unsigned long ParseColour(const std::string& s, unsigned long def) {
 // Leniency, on purpose:
 //   - a leading "v" is allowed (v1.3.0, as tags and TrackAudio write it)
 //   - fewer than three numbers count as zeros (0.6 is 0.6.0), as plugin.min_version was written before
-//   - a fourth number is ignored: 0.5 and early 0.6 builds were versioned <base>.<run> (0.5.0.115), which
-//     reads as 0.5.0. It never counts when comparing.
+//   - a fourth number is an old build number: 0.5 and 0.6 builds were versioned <base>.<run> (0.6.0.159).
+//     It compares after PATCH, as a number (0.6.0.100 < 0.6.0.159 < 0.6.1 < 0.7.0), and a missing one is 0,
+//     so Core's four-part plugin.latest_version and plugin.min_version keep working for those builds.
 // Anything else is not a version: it sorts below every version, and two of them compare equal.
 struct Version {
     bool valid = false;
     unsigned long long major = 0, minor = 0, patch = 0;
+    unsigned long long build = 0;                 // an old fourth number (0.6.0.159); 0 for a SemVer version
     int numbers = 0;                              // how many numbers the core had (1 to 4)
     std::vector<std::string> pre;                 // pre-release identifiers; empty for a release
 };
@@ -559,19 +561,21 @@ inline Version ParseVersion(const std::string& text) {
     for (const auto& n : nums) if (!NumericIdentifier(n) || n.size() > 18) return v;
     v.major = std::stoull(nums[0]);
     v.minor = nums.size() > 1 ? std::stoull(nums[1]) : 0;
-    v.patch = nums.size() > 2 ? std::stoull(nums[2]) : 0;    // nums[3], an old build number, is ignored
+    v.patch = nums.size() > 2 ? std::stoull(nums[2]) : 0;
+    v.build = nums.size() > 3 ? std::stoull(nums[3]) : 0;    // an old build number
     v.numbers = (int)nums.size();
     v.valid = true;
     return v;
 }
 // semver.org section 11: numeric identifiers compare as numbers and are lower than alphanumeric ones, which
 // compare in ASCII order; more identifiers is higher when all before are equal; a release is higher than any
-// of its pre-releases. Major, minor and patch compare as numbers. Build metadata is ignored.
+// of its pre-releases. Major, minor, patch and an old build number compare as numbers. Build metadata is ignored.
 inline int CompareVersions(const Version& a, const Version& b) {
     if (!a.valid || !b.valid) return a.valid == b.valid ? 0 : (a.valid ? 1 : -1);
     if (a.major != b.major) return a.major < b.major ? -1 : 1;
     if (a.minor != b.minor) return a.minor < b.minor ? -1 : 1;
     if (a.patch != b.patch) return a.patch < b.patch ? -1 : 1;
+    if (a.build != b.build) return a.build < b.build ? -1 : 1;
     if (a.pre.empty() != b.pre.empty()) return a.pre.empty() ? 1 : -1;
     for (size_t i = 0; i < a.pre.size() && i < b.pre.size(); i++) {
         const std::string& x = a.pre[i];
@@ -596,14 +600,18 @@ inline int CompareVersions(const std::string& a, const std::string& b) {
     return CompareVersions(ParseVersion(a), ParseVersion(b));
 }
 // The first version in a text, e.g. "TrackAudio v1.3.0-beta.5": from the first number that has at least
-// MAJOR.MINOR.PATCH up to the next space; not valid if there is none
+// MAJOR.MINOR.PATCH, as far as the characters a version can have go, less any trailing ".", "-" or "+"
+// (so "v1.3.0." and "\"v1.3.0\"" are read too); not valid if there is none
 inline Version VersionInText(const std::string& text) {
+    auto part = [](char c) { return std::isalnum((unsigned char)c) || c == '.' || c == '-' || c == '+'; };
     for (size_t i = 0; i < text.size(); i++) {
         if (!std::isdigit((unsigned char)text[i])) continue;
         char p = i ? text[i - 1] : ' ';                       // not inside a word or a number, but "v1.3.0" is fine
         if (std::isdigit((unsigned char)p) || p == '.' || (std::isalpha((unsigned char)p) && p != 'v' && p != 'V')) continue;
-        size_t end = text.find_first_of(" \t\r\n,;()[]", i);
-        Version v = ParseVersion(text.substr(i, end == std::string::npos ? std::string::npos : end - i));
+        size_t end = i;
+        while (end < text.size() && part(text[end])) end++;
+        while (end > i && (text[end - 1] == '.' || text[end - 1] == '-' || text[end - 1] == '+')) end--;
+        Version v = ParseVersion(text.substr(i, end - i));
         if (v.valid && v.numbers >= 3) return v;
     }
     return Version();
@@ -759,15 +767,17 @@ inline bool LooksLikeX86Dll(const std::string& d) {
 // The running plugin's version for the update check and plugin.min_version. A test build from build.yml
 // (<version>-pr.<number>.<run> or <version>-dev.<run>, or 0.7.0-rc.1.pr.66.115) counts as the version it was
 // built from, so a tester isn't asked to "update" to that release, or disabled by it as too old. It still
-// sorts below that release everywhere else.
+// sorts below that release everywhere else. Only those exact endings count (pr.<n>.<n>, dev.<n>), and build.yml
+// doesn't let version.h use "pr" or "dev" itself, so a real version is never mistaken for a test build.
 inline Version RunningVersion(const std::string& running) {
     Version v = ParseVersion(running);
-    for (size_t i = 0; i < v.pre.size(); i++)
-        if (v.pre[i] == "pr" || v.pre[i] == "dev") { v.pre.resize(i); break; }
+    size_t n = v.pre.size();
+    if (n >= 3 && v.pre[n - 3] == "pr" && NumericIdentifier(v.pre[n - 2]) && NumericIdentifier(v.pre[n - 1])) v.pre.resize(n - 3);
+    else if (n >= 2 && v.pre[n - 2] == "dev" && NumericIdentifier(v.pre[n - 1])) v.pre.resize(n - 2);
     return v;
 }
 // True when Core advertises a newer plugin than the running one (by SemVer precedence, so build metadata
-// and an old fourth number never count) and gave a checksum to verify it with.
+// never counts) and gave a checksum to verify it with.
 inline bool UpdateAvailable(const std::string& running, const std::string& latest, const std::string& sha) {
     return ParseVersion(latest).valid && sha.size() == 64 && CompareVersions(RunningVersion(running), ParseVersion(latest)) < 0;
 }
@@ -892,9 +902,19 @@ inline RdfSettings RdfFor(const std::vector<RdfRow>& rows, const std::string& ca
 
 // TrackAudio's version, from the text its HTTP endpoint answers with (e.g. "TrackAudio v1.3.0-beta.5").
 // RDF needs 1.3.0 Beta 5 or later, by SemVer precedence (CompareVersions), ignoring case ("Beta" is "beta").
-// False if unreadable.
+// A pre-release written without its dot ("beta4") reads as "beta.4", which SemVer would otherwise put above
+// "beta.5" (one identifier, "beta4", is higher than "beta"). False if unreadable.
 inline bool TrackAudioVersionOk(const std::string& text) {
     Version v = VersionInText(Lower(text));
+    std::vector<std::string> pre;
+    for (const std::string& id : v.pre) {
+        size_t d = 0;
+        while (d < id.size() && std::isalpha((unsigned char)id[d])) d++;
+        if (d && d < id.size() && AllDigits(id, d, id.size() - d)) {
+            pre.push_back(id.substr(0, d)); pre.push_back(id.substr(d));
+        } else pre.push_back(id);
+    }
+    v.pre = pre;
     return v.valid && CompareVersions(v, ParseVersion("1.3.0-beta.5")) >= 0;
 }
 

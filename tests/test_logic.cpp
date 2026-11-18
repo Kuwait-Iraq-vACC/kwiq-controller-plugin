@@ -479,6 +479,11 @@ int main() {
     CHECK(!VersionInText("").valid && !VersionInText("TrackAudio 1.2").valid && VersionInText("TrackAudio v1.3.0-beta.5").pre.size() == 2);
     CHECK(TrackAudioVersionOk("TrackAudio v1.3.0") && TrackAudioVersionOk("v1.3.0-beta.10") && !TrackAudioVersionOk("v1.3.0-alpha.9"));
     CHECK(TrackAudioVersionOk("TrackAudio V1.3.0-Beta.5") && !TrackAudioVersionOk("TrackAudio v1.3.0-BETA.4"));   // any case
+    // punctuation after the version, and pre-releases written without their dot
+    CHECK(TrackAudioVersionOk("TrackAudio v1.3.0.") && TrackAudioVersionOk("\"v1.3.0-beta.5\"") && TrackAudioVersionOk("TrackAudio v1.3.0-beta.5:"));
+    CHECK(VersionInText("TrackAudio v1.2.0.").valid && !TrackAudioVersionOk("TrackAudio v1.2.0.") && VersionInText("v1.3.0-").pre.empty());
+    CHECK(!TrackAudioVersionOk("TrackAudio v1.3.0-beta4") && !TrackAudioVersionOk("v1.3.0-beta1") && TrackAudioVersionOk("v1.3.0-beta5") && TrackAudioVersionOk("v1.3.0-rc1"));
+    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.2.0.", false) == TrackAudioState::TooOld);
 
     // the KWIQ menu's TrackAudio row
     CHECK(TrackAudioStatus(false, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Off);       // RDF didn't start
@@ -664,9 +669,13 @@ int main() {
         CHECK(CompareVersions("0.6.0+115", "0.6.0") == 0 && CompareVersions("0.6.0+115.a1b2c3d", "0.6.0+2.ffffff0") == 0);
         CHECK(CompareVersions("1.0.0-rc.1+build.5", "1.0.0-rc.1") == 0 && !ParseVersion("0.6.0+").valid && !ParseVersion("0.6.0+a..b").valid);
         CHECK(CompareVersions("0.6.0+115", "0.6.1") < 0);
-        // old four-part versions (<base>.<run>) read as the base: the fourth number is ignored
-        CHECK(CompareVersions("0.5.0.115", "0.5.0") == 0 && CompareVersions("0.5.0.115", "0.5.0.2") == 0 && CompareVersions("0.5.0.115", "0.6.0") < 0);
-        CHECK(CompareVersions("0.6.0.42", "0.6.0") == 0 && CompareVersions("0.6.0.999", "0.6.1") < 0 && ParseVersion("0.5.0.115").patch == 0);
+        // old four-part versions (<base>.<run>): the fourth number counts after patch, a missing one is 0
+        CHECK(CompareVersions("0.5.0.115", "0.5.0") > 0 && CompareVersions("0.5.0.115", "0.5.0.2") > 0 && CompareVersions("0.5.0.115", "0.6.0") < 0);
+        CHECK(CompareVersions("0.6.0.42", "0.6.0") > 0 && CompareVersions("0.6.0.999", "0.6.1") < 0 && ParseVersion("0.5.0.115").patch == 0);
+        CHECK(CompareVersions("0.6.0.159", "0.7.0") < 0 && CompareVersions("0.6.0.159", "0.7.0-rc.1") < 0 && ParseVersion("0.6.0.159").build == 159);
+        // Core's four-part latest and minimum still work for four-part builds
+        CHECK(UpdateAvailable("0.6.0.100", "0.6.0.159", std::string(64, 'a')) && !UpdateAvailable("0.6.0.159", "0.6.0.159", std::string(64, 'a')));
+        CHECK(BelowMinimum("0.6.0.120", "0.6.0.150") && !BelowMinimum("0.6.0.150", "0.6.0.150") && !BelowMinimum("0.7.0", "0.6.0.150"));
         // a leading v, and short versions as zeros
         CHECK(CompareVersions("v0.6.0", "0.6.0") == 0 && CompareVersions("0.6", "0.6.0") == 0 && CompareVersions("1", "1.0.0") == 0);
         // not versions: below every version, equal to each other
@@ -676,6 +685,7 @@ int main() {
         // what the plugin uses it for: updates, the minimum version
         CHECK(UpdateAvailable("0.6.0", "0.6.1", std::string(64, 'a')) && !UpdateAvailable("0.6.1", "0.6.1", std::string(64, 'a')));
         CHECK(!UpdateAvailable("0.6.0+115.a1b2c3d", "0.6.0", std::string(64, 'a')) && !UpdateAvailable("0.6.0.42", "0.6.0", std::string(64, 'a')));
+        CHECK(UpdateAvailable("0.6.0.159", "0.7.0", std::string(64, 'a')));   // the first SemVer release reaches 0.6 users
         CHECK(UpdateAvailable("0.5.0.115", "0.6.0", std::string(64, 'a')) && UpdateAvailable("0.7.0-rc.1", "0.7.0", std::string(64, 'a')));
         CHECK(UpdateAvailable("0", "0.6.0", std::string(64, 'a')) && !UpdateAvailable("0.6.0", "junk", std::string(64, 'a')));
         // a test build counts as the version it was built from for updates and the minimum, but still sorts below it
@@ -683,11 +693,16 @@ int main() {
         CHECK(UpdateAvailable("0.6.0-pr.66.115", "0.6.1", std::string(64, 'a')) && !UpdateAvailable("0.6.0-dev.115", "0.6.0", std::string(64, 'a')));
         CHECK(!UpdateAvailable("0.7.0-rc.1.pr.66.115", "0.7.0-rc.1", std::string(64, 'a')) && UpdateAvailable("0.7.0-rc.1.pr.66.115", "0.7.0", std::string(64, 'a')));
         CHECK(CompareVersions("0.6.0-pr.66.115", "0.6.0") < 0 && RunningVersion("0.6.0-pr.66.115+115.a1b2c3d").pre.empty());
+        // only build.yml's exact endings mark a test build
+        CHECK(RunningVersion("0.7.0-dev.115").pre.empty() && RunningVersion("0.7.0-rc.1.pr.66.115").pre.size() == 2);
+        CHECK(RunningVersion("0.7.0-pr.66").pre.size() == 2 && RunningVersion("0.7.0-dev.x").pre.size() == 2 && RunningVersion("0.7.0-dev").pre.size() == 1);
+        CHECK(RunningVersion("0.7.0-pr.1.2.rc.1").pre.size() == 5 && UpdateAvailable("0.7.0-dev.rc", "0.7.0", std::string(64, 'a')));
         // plugin.min_version
         CHECK(!BelowMinimum("0.6.0", "0.6.0") && BelowMinimum("0.5.9", "0.6.0") && !BelowMinimum("0.6.0-pr.66.115", "0.6.0"));
         CHECK(BelowMinimum("0.6.0-pr.66.115", "0.6.1") && !BelowMinimum("0.6.0", "junk") && BelowMinimum("0.7.0-rc.1", "0.7.0"));
         // version.h's own version is SemVer
         CHECK(ParseVersion(KWIQ_VERSION).valid && ParseVersion(KWIQ_VERSION).numbers == 3);
+        CHECK(RunningVersion(KWIQ_VERSION).pre.size() == ParseVersion(KWIQ_VERSION).pre.size());   // not read as a test build
         CHECK(VersionInText("TrackAudio v1.3.0-beta.5 (build 7)").valid && VersionInText("x1.3.0").valid == false);
     }
 

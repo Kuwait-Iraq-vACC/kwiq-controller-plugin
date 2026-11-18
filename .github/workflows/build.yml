@@ -2,9 +2,9 @@ name: build
 
 # Versions are Semantic Versioning (https://semver.org/). The version is KWIQ_VERSION in version.h,
 # changed by hand in the pull request that should make a release. Every build also carries build metadata,
-# <run>.<commit> (0.6.0+115.a1b2c3d), shown in .kwiq status and the log but never compared.
+# <run>.<commit> (0.7.0+115.a1b2c3d), shown in .kwiq status and the log but never compared.
 # main:          tested and built on every push. The version is published as a release, tagged v<version>,
-#                only if that tag doesn't exist yet: a release happens once per version, when version.h
+#                only if that version isn't released yet: a release happens once per version, when version.h
 #                changes it. Core offers releases to controllers. A release carries the three DLLs:
 #                KWIQPlugin.dll (the loader the packages ship), KWIQPluginUpdater.dll and
 #                KWIQPluginCore.dll (which Core mirrors for the updater).
@@ -12,7 +12,8 @@ name: build
 #                replaced on every push and removed when the pull request is closed. Each one is linked in
 #                a comment on the pull request. Core never offers pre-releases.
 # manual run on another branch: a test pre-release named after the branch, version <version>-dev.<run>.
-# A push or pull request is only released when it changes what goes into the DLL (sources, resources,
+#                A release that failed (or was left incomplete) is tried again by the next push or manual run.
+# A pull request is only released when it changes what goes into the DLL (sources, resources,
 # CMakeLists.txt, vcpkg.json, libs/). Anything else (tests, docs, workflows) is still tested and built,
 # but not released. A manual run always releases (on main, still only a version not yet released).
 on:
@@ -47,6 +48,9 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then echo "release=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # main releases once per version, and the release step skips a version already released, so every
+          # push goes on to it: that is also how a failed release is tried again
+          if [ "$GITHUB_EVENT_NAME" = push ]; then echo "release=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           # a pull request is compared as a whole, so it keeps its test build after a later test-only push
           if ! changed=$(git diff --name-only "$BASE" HEAD); then
             echo "Could not compare with $BASE, releasing anyway"; echo "release=true" >> "$GITHUB_OUTPUT"; exit 0
@@ -91,9 +95,15 @@ jobs:
           RUN: ${{ github.run_number }}
         run: |
           v=$(sed -n 's/^#define KWIQ_VERSION "\(.*\)"/\1/p' version.h)
-          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          # semver.org's own pattern: no leading zeros in numbers, including numeric pre-release identifiers
+          n='(0|[1-9][0-9]*)'; id='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^$n\\.$n\\.$n(-$id(\\.$id)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\$"
           [[ "$v" =~ $semver ]] || { echo "::error::KWIQ_VERSION in version.h is not a SemVer version: '$v'"; exit 1; }
           v=${v%%+*}
+          # pr and dev mark test builds (kwiq::RunningVersion), so version.h can't use them itself
+          if [[ "$v" == *-* && ".${v#*-}." =~ \.(pr|dev)\. ]]; then
+            echo "::error::KWIQ_VERSION in version.h can't use 'pr' or 'dev' in its pre-release: they mark test builds"; exit 1
+          fi
           pre=""
           if [ -n "$PR" ]; then pre="pr.$PR.$RUN"
           elif [ "$GITHUB_REF" != refs/heads/main ]; then pre="dev.$RUN"; fi
@@ -170,6 +180,8 @@ jobs:
       needs.changes.outputs.release == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.main.outputs.published }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -179,21 +191,35 @@ jobs:
         with:
           name: KWIQPlugin
 
-      # once per version: a version that is already released is not released again (bump version.h)
+      # Once per version: a version already released with all three DLLs is not released again (bump
+      # version.h). Anything less (an earlier run that failed, or a draft left behind) is replaced, so the
+      # next push or manual run tries again. The release is made as a draft and only published once all three
+      # DLLs are on it: the tag only appears then, and Core never sees a release without its files.
       - name: Release (main)
+        id: main
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         run: |
-          # only a 404 means the tag doesn't exist; any other error stops here rather than trying to release
-          if out=$(gh api "repos/$GH_REPO/git/ref/tags/v$VERSION" --silent 2>&1); then
-            echo "::notice::v$VERSION is already released, so nothing is published. Change KWIQ_VERSION in version.h to release."
-            exit 0
-          elif ! grep -q 'HTTP 404' <<< "$out"; then
-            echo "::error::Could not check whether v$VERSION is already released: $out"
-            exit 1
+          tag="v$VERSION"; files="KWIQPlugin.dll KWIQPluginUpdater.dll KWIQPluginCore.dll"
+          # only "release not found" means there is none; any other error stops here rather than release twice
+          if info=$(gh release view "$tag" --json isDraft,assets -q '[.isDraft, ([.assets[].name] | sort | join(" "))] | @tsv' 2>&1); then
+            IFS=$'\t' read -r draft names <<< "$info"
+            if [ "$draft" = false ] && [ "$names" = "$(tr ' ' '\n' <<< "$files" | LC_ALL=C sort | paste -sd ' ')" ]; then
+              echo "::notice::$tag is already released, so nothing is published. Change KWIQ_VERSION in version.h to release."
+              exit 0
+            fi
+            echo "::warning::$tag exists but is incomplete (draft: $draft, files: ${names:-none}), so it is made again"
+            gh release delete "$tag" --cleanup-tag --yes
+          elif ! grep -qi 'release not found' <<< "$info"; then
+            echo "::error::Could not check whether $tag is already released: $info"; exit 1
+          elif gh api "repos/$GH_REPO/git/ref/tags/$tag" --silent 2>/dev/null; then
+            # a tag with no release wasn't made here (drafts have no tag): leave it to a person
+            echo "::error::Tag $tag exists without a release. Delete the tag, or change KWIQ_VERSION in version.h."; exit 1
           fi
           # a pre-release version (0.7.0-rc.1) is published as a GitHub pre-release, which Core never offers
           case "$VERSION" in *-*) pre=--prerelease ;; *) pre= ;; esac
-          gh release create "v$VERSION" KWIQPlugin.dll KWIQPluginUpdater.dll KWIQPluginCore.dll $pre --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
+          gh release create "$tag" $files $pre --draft --target "$GITHUB_SHA" --title "KWIQ Controller Plugin $VERSION" --generate-notes
+          gh release edit "$tag" --draft=false
+          echo "published=true" >> "$GITHUB_OUTPUT"
 
       - name: Test pre-release (pull requests and other branches)
         if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
@@ -217,7 +243,7 @@ jobs:
     # every published release (pre-releases are never listed), and commits it to kwiq-documentation-site,
     # which deploys on every push. Needs DOCS_REPO_TOKEN: Contents read and write on that repository only.
     needs: release
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: needs.release.outputs.published == 'true'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
