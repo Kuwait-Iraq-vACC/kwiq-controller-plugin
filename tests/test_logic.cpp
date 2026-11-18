@@ -556,9 +556,11 @@ int main() {
     CHECK(TrlFor(trl, "ORBI", 981) == 160 && TrlFor(trl, "ORBI", 980) == 160 && TrlFor(trl, "ORBI", 979) == 170);
     CHECK(TrlFor(trl, "OKBK", 960) == 150 && TrlFor(trl, "ORMM", 1000) == 170 && TrlFor(trl, "ORMM", 999) == 180);
     CHECK(TrlFor(trl, "OEJN", 1013) == 0 && TrlFor(trl, "ORBI", -1) == 0);
-    CHECK(QnhMessage("ORBI", 979, 981, 170, 160) == "ORBI QNH 979 (was 981) TRL FL170 - CHANGED from FL160");
-    CHECK(QnhMessage("ORBI", 1004, 1006, 160, 160) == "ORBI QNH 1004 (was 1006) TRL FL160");
-    CHECK(QnhMessage("OEJN", 1013, 0, 0, 0) == "OEJN QNH 1013");
+    CHECK(QnhMessage("ORBI", 979, 981, 170, 160) == "Pressure monitor: ORBI QNH now 979 (was 981) TRL FL170 (was FL160)");
+    CHECK(QnhMessage("ORBI", 1004, 1006, 160, 160) == "Pressure monitor: ORBI QNH now 1004 (was 1006)");
+    CHECK(QnhMessage("OKKK", 1019, 1018, 150, 150) == "Pressure monitor: OKKK QNH now 1019 (was 1018)");
+    CHECK(QnhMessage("OEJN", 1013, 0, 0, 0) == "Pressure monitor: OEJN QNH now 1013");
+    CHECK(QnhMessage("OKBK", 1012, 0, 150, 0) == "Pressure monitor: OKBK QNH now 1012 TRL FL150");
 
     // top-down
     auto td = ParseTopDownOrders("TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR\nTOPDOWN|ORBI|ORBI_TWR,ORBI_APP,ORBB_S_CTR\n");
@@ -585,7 +587,7 @@ int main() {
     CHECK(ParseTrl("").empty() && ParseTrl("TRL|OR|14000\r\nTRL||1|150\r\nTRL|OR|x|150,980\r\n").empty());
     auto trl2 = ParseTrl("TRL|or|14000|160, 980 ,170\r\n");
     CHECK(trl2.size() == 1 && trl2[0].prefix == "OR" && trl2[0].ta == 14000 && TrlFor(trl2, "orbi", 980) == 160 && TrlFor({}, "ORBI", 1013) == 0);
-    CHECK(QnhMessage("OKBK", 1012, 1012, 0, 150) == "OKBK QNH 1012");
+    CHECK(QnhMessage("OKBK", 1012, 1012, 0, 150) == "Pressure monitor: OKBK QNH now 1012");
     CHECK(ParseTopDownOrders("").empty() && ParseTopDownOrders("TOPDOWN|OKBK\r\nTOPDOWN|OKB|OKB_TWR\r\nTOPDOWN|OKBK|TWR, \r\n").empty());
     auto td2 = ParseTopDownOrders("TOPDOWN|okbk| okbk_twr ,OKAC_CTR\r\n");
     CHECK(td2.size() == 1 && td2["OKBK"].size() == 2 && td2["OKBK"][0] == "OKBK_TWR");
