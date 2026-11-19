@@ -8,6 +8,7 @@
 //
 // Event Routes (#61): the same kind of dialog, with SRD Search's font, styles, margins, results list and
 // copy button: today's routes for Core's event, and Copy Route String To Clipboard for the one selected.
+// 369 wide, a little wider than SRD Search was, for the longer route strings.
 //
 // The KWIQ button's logo (#59): kwiq_logo.png scaled down by kwiq_logo.ps1 to each size the button is drawn
 // at, as 32-bit BMPs with alpha. Kept as RCDATA so the bytes are loaded exactly as written; KWIQPlugin.cpp
@@ -40,15 +41,15 @@ BEGIN
     PUSHBUTTON      "Copy Route String To Clipboard", IDC_SRD_ROUTE_COPY, 7, 351, 110, 14, WS_DISABLED
 END
 
-IDD_EVENT_ROUTES DIALOGEX 0, 0, 309, 193
+IDD_EVENT_ROUTES DIALOGEX 0, 0, 369, 193
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "KWIQ Event Routes"
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
     LTEXT           "Routes for Today (UTC)", IDC_EVT_ROUTES_STATIC, 7, 7, 120, 8
-    CONTROL         "", IDC_EVT_ROUTES, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 7, 18, 295, 150
+    CONTROL         "", IDC_EVT_ROUTES, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 7, 18, 355, 150
     PUSHBUTTON      "Copy Route String To Clipboard", IDC_EVT_ROUTE_COPY, 7, 172, 110, 14, WS_DISABLED
-    PUSHBUTTON      "Close", IDOK, 254, 172, 50, 14
+    PUSHBUTTON      "Close", IDOK, 314, 172, 50, 14
 END
 
 IDR_KWIQ_LOGO_28 RCDATA "kwiq_logo_28.bmp"
