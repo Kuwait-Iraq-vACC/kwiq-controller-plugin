@@ -3,7 +3,7 @@
 // SquawkGenerator, SquawkValidator; GPL-3.0). Core allocates the codes (from the requester's FIR, the route and
 // the flight rules); this only decides when to ask. No code is built in: which codes Core never assigns, and which
 // of those still count as a code the aircraft has, come from Core (GET /squawk/non-assignable).
-// Pure logic (no Windows / EuroScope dependencies), unit-tested in tests/test_logic.cpp.
+// Pure logic (no Windows / EuroScope dependencies), unit-tested in test/test_logic.cpp.
 // License: GPL-3.0-or-later
 #pragma once
 

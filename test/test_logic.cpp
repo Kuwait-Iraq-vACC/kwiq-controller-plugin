@@ -1,8 +1,8 @@
-// Logic tests: g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic && ./test_logic
+// Logic tests: g++ -std=c++17 -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic && ./test_logic
 #include "kwiq_logic.hpp"
 #include "version.h"
-#include "fpc_logic.hpp"
-#include "squawk_logic.hpp"
+#include "fpc/fpc_logic.hpp"
+#include "squawk/squawk_logic.hpp"
 using namespace kwiq;
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)

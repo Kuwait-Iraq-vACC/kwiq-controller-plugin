@@ -12,7 +12,7 @@
 //
 // All route data comes from Core (Laravel). License: GPL-3.0-or-later, see LICENSE and NOTICE.md.
 
-#include "stdafx.h"
+#include "vch/stdafx.h"
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -28,22 +28,22 @@
 #include <mmsystem.h>       // PlaySound (link winmm)
 #include <shellapi.h>       // ShellExecute
 #include <winver.h>         // GetFileVersionInfo (link version)
-#include "requestMenu.hpp"      // CVCHPlugin (VCH)
+#include "vch/requestMenu.hpp"   // CVCHPlugin (VCH)
 #include "kwiq_logic.hpp"
-#include "fpc_logic.hpp"
-#include "squawk_logic.hpp"
-#include "VatsimAPI.h"
-#include "keylink.hpp"
-#include "rdf.hpp"                // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
-#include "discord.hpp"            // DiscordEuroScope (Kirollos/DiscordEuroScope), built in
-#include "push.hpp"               // Core's push events (Laravel Reverb), as UKCP gets its own
-#include "kwiq_ui.hpp"            // the windows: SRD Search, Event Routes, the API key setup box, Notifications
+#include "fpc/fpc_logic.hpp"
+#include "squawk/squawk_logic.hpp"
+#include "slots/VatsimAPI.h"
+#include "keylink/keylink.hpp"
+#include "rdf/rdf.hpp"           // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
+#include "discord/discord.hpp"   // DiscordEuroScope (Kirollos/DiscordEuroScope), built in
+#include "push/push.hpp"         // Core's push events (Laravel Reverb), as UKCP gets its own
+#include "ui/kwiq_ui.hpp"        // the windows: SRD Search, Event Routes, the API key setup box, Notifications
 #define KWIQ_NO_WINHTTP
-#include "kwiq_win.hpp"           // api-settings.json and the folders the loader uses
-#include "kwiq_res.h"             // kwiq.rc: the KWIQ button's logo
+#include "kwiq_win.hpp"          // api-settings.json and the folders the loader uses
+#include "kwiq_res.h"            // kwiq.rc: the KWIQ button's logo
 
 #define KWIQ_PLUGIN_NAME      "KWIQ Controller Plugin"
-#include "version.h"                // KWIQ_PLUGIN_VERSION
+#include "version.h"             // KWIQ_PLUGIN_VERSION
 #define KWIQ_PLUGIN_AUTHOR    "Kuwait & Iraq vACC"
 #define KWIQ_PLUGIN_COPYRIGHT "GPL-3.0-or-later"
 

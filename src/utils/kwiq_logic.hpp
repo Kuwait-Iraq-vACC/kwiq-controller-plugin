@@ -1,5 +1,5 @@
 // kwiq_logic.hpp - pure logic for the KWIQ plugin (no Windows / EuroScope dependencies).
-// Route matching, event routes, SRD (shared by the SRD check and SRD search). Unit-tested in tests/test_logic.cpp.
+// Route matching, event routes, SRD (shared by the SRD check and SRD search). Unit-tested in test/test_logic.cpp.
 // License: GPL-3.0-or-later
 #pragma once
 
