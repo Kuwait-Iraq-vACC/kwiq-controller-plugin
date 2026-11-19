@@ -591,7 +591,7 @@ public:
             if (!metar.empty()) { qnh = kwiq::QnhFromMetar(metar); std::lock_guard<std::mutex> g(mu_); trl = kwiq::TrlFor(trl_, icao, qnh); }
             if (!kwiq::IsAirportCode(icao)) Msg("Usage: .kwiq qnh <ICAO>", true);
             else if (qnh < 0) Msg("No QNH for " + icao + (metar.empty() ? " from Core yet." : " in its METAR."), true);
-            else DisplayUserMessage("PRESSURE_MONITOR", "KWIQ", kwiq::QnhMessage(icao, qnh, 0, trl, 0).c_str(), true, true, true, false, false);
+            else DisplayUserMessage("PRESSURE_MONITOR", "", kwiq::QnhMessage(icao, qnh, 0, trl, 0).c_str(), true, true, true, false, false);
             return true;
         }
         if (c == ".KWIQ NOTIFICATIONS") { OpenNotices(); return true; }
@@ -765,7 +765,7 @@ public:
                 auto seen = qnhSeen_.find(icao);
                 // Only changes during the session: the first QNH after logging on (or taking an airport) is noted
                 if (seen != qnhSeen_.end() && seen->second.first != q)
-                    DisplayUserMessage("PRESSURE_MONITOR", "KWIQ", kwiq::QnhMessage(icao, q, seen->second.first, t, seen->second.second).c_str(),
+                    DisplayUserMessage("PRESSURE_MONITOR", "", kwiq::QnhMessage(icao, q, seen->second.first, t, seen->second.second).c_str(),
                                        true, true, true, true, false);
                 qnhSeen_[icao] = { q, t };
             }
