@@ -444,10 +444,6 @@ public:
         if (ours && !enabled_) return;                       // plugin too old
         UiCfg ui;
         if (ours) { std::lock_guard<std::mutex> g(mu_); ui = ui_; }
-        if (ItemCode == KWIQ_ITEM_FPC && FlightPlan.IsValid() && fpcIgnored_.count(FlightPlan.GetCallsign())) {
-            strncpy_s(sItemString, 16, "-", _TRUNCATE);       // ignored with the FPC menu: no result
-            return;
-        }
         if (ItemCode == KWIQ_ITEM_EVENT_ROUTE || ItemCode == KWIQ_ITEM_SRD || ItemCode == KWIQ_ITEM_FPC) {
             if (!FlightPlan.IsValid()) return;
             const CacheEntry& e = Checks(FlightPlan);
@@ -464,9 +460,11 @@ public:
                 case SrdResult::Max:   txt = "MAX"; break;
                 default: break;
                 }
-            } else if (e.fpcChecked) {
+            } else if (e.fpcVfr) { txt = "VFR"; colour = ui.cOk; }
+            else if (fpcDisabled_.count(FlightPlan.GetCallsign())) { txt = "-"; colour = RGB(128, 128, 128); }   // VFPC's grey
+            else if (e.fpcChecked) {
                 // VFPC: VFR and passed in green, the first failure in red, a forbidden level alone in yellow
-                if (e.fpcCode.empty()) { txt = e.fpcVfr ? "VFR" : ui.ok; colour = ui.cOk; }
+                if (e.fpcCode.empty()) { txt = ui.ok; colour = ui.cOk; }
                 else {
                     txt = e.fpcCode;
                     colour = e.fpcWarn ? ui.cWarn : ui.cBad;
@@ -1173,26 +1171,28 @@ private:
             std::lock_guard<std::mutex> g(mu_);
             msg = kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
         }
-        if (fpcIgnored_.count(fp.GetCallsign())) msg += " Ignored: the FPC item shows \"-\".";
+        if (fpcDisabled_.count(fp.GetCallsign())) msg += " Disabled for this flight: Enable in Open FPC menu to show it again.";
         // its own chat tab, "KWIQ FPC", opened when it is not open yet
         DisplayUserMessage("KWIQ FPC", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
     }
 
-    // VFPC's options menu: explain the result, or ignore the check for this flight (the FPC item then
-    // shows "-") until it is checked again or the flight plan disconnects
+    // VFPC's "Check FP" menu (analyzeFP.cpp OnFunctionCall): Show Checks explains the result; Disable
+    // turns the check off for this flight, so the FPC item shows a grey "-" (a VFR flight still shows VFR),
+    // and Enable turns it back on. A flight stays disabled until its flight plan disconnects, as in VFPC.
     void FpcMenu(RECT area) {
         auto fp = FlightPlanSelectASEL();
         if (!fp.IsValid()) return;
-        OpenPopupList(area, "FPC", 1);
-        AddPopupListElement("Explain", "", KWIQ_FUNC_FPC_PICK);
-        AddPopupListElement(fpcIgnored_.count(fp.GetCallsign()) ? "Check again" : "Ignore", "", KWIQ_FUNC_FPC_PICK);
+        OpenPopupList(area, "Check FP", 1);
+        AddPopupListElement("Show Checks", "", KWIQ_FUNC_FPC_PICK, false, EuroScopePlugIn::POPUP_ELEMENT_NO_CHECKBOX, false);
+        AddPopupListElement(fpcDisabled_.count(fp.GetCallsign()) ? "Enable" : "Disable", "", KWIQ_FUNC_FPC_PICK,
+                            false, EuroScopePlugIn::POPUP_ELEMENT_NO_CHECKBOX, false);
     }
     void FpcPick(const std::string& option) {
         auto fp = FlightPlanSelectASEL();
         if (!fp.IsValid()) return;
-        if (option == "Explain") ExplainFpcSelected();
-        else if (option == "Ignore") fpcIgnored_.insert(fp.GetCallsign());
-        else if (option == "Check again") fpcIgnored_.erase(fp.GetCallsign());
+        if (option == "Show Checks") ExplainFpcSelected();
+        else if (option == "Disable") fpcDisabled_.insert(fp.GetCallsign());
+        else if (option == "Enable") fpcDisabled_.erase(fp.GetCallsign());
     }
 
     // ---- squawk assignment (main thread) ------------------------------------------------------
@@ -1568,7 +1568,7 @@ public:
                                GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX);
     }
     virtual void OnFlightPlanDisconnect(EuroScopePlugIn::CFlightPlan fp) override {
-        fpcIgnored_.erase(fp.GetCallsign());
+        fpcDisabled_.erase(fp.GetCallsign());
         if (duplicate_) return;
         auto it = sqStored_.find(fp.GetCallsign());
         if (it != sqStored_.end()) it->second.expires = std::time(nullptr) + kwiq::squawk::STORED_SECONDS;
@@ -1961,7 +1961,7 @@ private:
     std::time_t lastMetar_ = 0, lastNotices_ = 0;
     std::atomic<int> metarPoll_{ 60 };
     std::map<std::string, std::pair<int, int>> qnhSeen_;            // main thread: ICAO -> QNH, TRL this session
-    std::set<std::string> fpcIgnored_;                              // main thread: callsigns whose FPC is ignored
+    std::set<std::string> fpcDisabled_;                             // main thread: callsigns whose FPC is disabled
     std::set<std::string> noticesTold_;                             // main thread: unread notifications already announced
     std::string qnhCallsign_;
     std::thread auxWorker_, markWorker_;
