@@ -873,14 +873,14 @@ public:
         AddPopupListElement("Status", "", KWIQ_MENU_STATUS);
         AddPopupListElement("Hide Button", "", KWIQ_MENU_HIDE, false, EuroScopePlugIn::POPUP_ELEMENT_NO_CHECKBOX, false, true);
     }
-    void MenuAction(int id, const char*, POINT pt, RECT) {
-        // EuroScope can report one choice to both the radar screen and the plugin: act on it once,
-        // or a switch would go off and straight back on
-        static int lastId = 0;
-        static DWORD lastAt = 0;
-        DWORD tick = GetTickCount();
-        if (id == lastId && tick - lastAt < 500) return;
-        lastId = id; lastAt = tick;
+    void MenuAction(int id, const char* item, POINT pt, RECT area) {
+        // EuroScope reports one choice to both the radar screen and the plugin: act on it once (kwiq::MenuOnce),
+        // also when it opened SRD Search or Event Routes, whose repeat comes once the window is closed
+        if (!menuOnce_.Begin(id, GetTickCount())) return;
+        struct Finish { kwiq::MenuOnce& m; ~Finish() { m.End(GetTickCount()); } } finish{ menuOnce_ };
+        MenuChoice(id, item, pt, area);
+    }
+    void MenuChoice(int id, const char*, POINT pt, RECT) {
         switch (id) {
         case KWIQ_MENU_KEY:          StartKeySetup(); return;
         case KWIQ_MENU_SECTORS:      OnCompileCommand(".kwiq sector"); return;
@@ -1914,6 +1914,7 @@ private:
     std::atomic<int> coreEvery_{ 60 }, srdEvery_{ 300 }, slotsEvery_{ 60 };
     bool settingsLoaded_ = false;                                   // main thread only
     bool buttonShown_ = true;                                       // main thread only
+    kwiq::MenuOnce menuOnce_;                                       // main thread only: each menu choice acts once
     enum class ButtonPlace { Default, Offset, TopLeft };            // main thread only: how buttonOffset_ is meant
     ButtonPlace buttonPlace_ = ButtonPlace::Default;
     kwiq::ButtonXY buttonOffset_;

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -1279,5 +1280,29 @@ inline void PremultiplyBgra(unsigned char* px, size_t count) {
         for (int c = 0; c < 3; c++) px[i * 4 + c] = (unsigned char)((px[i * 4 + c] * a + 127) / 255);
     }
 }
+
+
+// EuroScope reports one KWIQ menu choice to both the radar screen and the plugin: it must act once, or a switch
+// goes off and straight back on. The repeat comes as soon as the first report returns, and for SRD Search and
+// Event Routes that is when their window is closed, since they're modal. So a repeat is held back while the
+// first is still running and for 500 ms from when it finished, not from when it came in (`now` is GetTickCount).
+class MenuOnce {
+public:
+    static constexpr std::uint32_t kRepeatMs = 500;
+    bool Begin(int id, std::uint32_t now) {
+        if (running_) return false;
+        if (id == lastId_ && now - lastAt_ < kRepeatMs) return false;
+        running_ = true;
+        lastId_ = id;
+        lastAt_ = now;
+        return true;
+    }
+    void End(std::uint32_t now) { running_ = false; lastAt_ = now; }
+
+private:
+    bool running_ = false;
+    int lastId_ = 0;
+    std::uint32_t lastAt_ = 0;
+};
 
 } // namespace kwiq

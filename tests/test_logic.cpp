@@ -792,6 +792,26 @@ int main() {
         CHECK(px[8] == 100 && px[9] == 50 && px[10] == 25 && px[11] == 128);
     }
 
+    // One KWIQ menu choice acts once, though EuroScope reports it to both the radar screen and the plugin
+    {
+        MenuOnce m;
+        CHECK(m.Begin(2106, 1000)); m.End(1000);                     // a switch: the repeat comes at once
+        CHECK(!m.Begin(2106, 1000) && !m.Begin(2106, 1499));
+        CHECK(m.Begin(2106, 1500)); m.End(1500);                     // a new click
+        CHECK(m.Begin(2104, 1600)); m.End(1600);                     // another choice is never held back
+        // SRD Search is modal: the first report returns once the window is closed, 90 s later, and the repeat
+        // that follows must not open it again
+        CHECK(m.Begin(2106, 10000));
+        CHECK(!m.Begin(2106, 10200) && !m.Begin(2105, 50000));       // nothing while the window is open
+        m.End(100000);
+        CHECK(!m.Begin(2106, 100000) && !m.Begin(2106, 100499));
+        CHECK(m.Begin(2106, 100500)); m.End(100500);                 // opened again on purpose
+        // GetTickCount wraps after 49.7 days
+        MenuOnce w;
+        CHECK(w.Begin(2106, 0xFFFFFF00u)); w.End(0xFFFFFF00u);
+        CHECK(!w.Begin(2106, 0x00000010u) && w.Begin(2106, 0x00000200u));
+    }
+
     // Semantic Versioning (https://semver.org/): one comparison for the plugin and Core
     {
         // the whole ordering chain from semver.org section 11
