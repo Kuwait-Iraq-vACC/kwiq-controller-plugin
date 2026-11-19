@@ -143,11 +143,14 @@ Squawks are allocated by Core, so two controllers never hand out the same code. 
 **Automatic**: checked on every flight plan update and every 5 seconds, not in the first 15 seconds after logging on, for aircraft with no code that nobody else tracks. Which codes count as none comes from Core: a code on its non-assignable list with "counts as assigned" off (default and non-discrete codes such as 1200, 2000, 2200 and 7000) is replaced; an emergency code (7500, 7600, 7700) counts as a code and is never replaced:
 - **Untracked, on the ground** (30 kt or less, within 7 nm of the departure airport): only from the controller who gives that airport's departures their squawk, the lowest position online in Core's top-down order for the airport (`TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR`). An airport with no top-down order in Core is covered only by its own DEL, GND, TWR and APP.
 - **Tracked by the user**: any aircraft with no code.
-- **Reconnects**: a pilot who reconnects within 10 minutes with the same departure and destination gets their previous code back.
+- **Sweatbox**: aircraft spawn anywhere, often in the air, with 2000, so there any aircraft nobody tracks gets a code (the 2000 they spawn with is never taken as set by hand).
+- **Reconnects**: a pilot who reconnects within 10 minutes with the same departure, destination and flight rules: Core is asked first, and the code it still holds for them comes back. If it holds none, a code a controller set by hand comes back, otherwise they get a new one (so a code Core has since given to someone else is never handed back).
 
-If Core cannot give a code, the error is shown once and that aircraft is not asked for again for a minute.
+While Core is asked, the aircraft shows the holding code 7000, as in UKCP. It is never taken as a code: an aircraft showing it still needs one, and 7000 seen from another scope only means that scope is asking (so 7000 typed in EuroScope is not by hand; use **Conspicuity** in the menu). If Core gives nothing, a Recycle goes back to the code the aircraft had; otherwise 7000 stays and the aircraft is asked for again a minute later.
 
-**By hand**: **Open squawk assignment menu** offers Assign (a new code from Core, also **Force squawk recycle**), Non-discrete (`squawk.non_discrete`, default 2000, or `squawk.non_discrete_vfr`, default 7000, for VFR) and Manual (type a code). Setting a code by hand releases the one Core held, and the plugin leaves that aircraft alone until its departure or destination changes. Only for aircraft the user tracks or nobody tracks.
+When the departure, destination or flight rules change, the next code is a new one from Core (not one it holds for the old plan), even if the change was seen while nothing could be done. A code Core sends is only set if it is still wanted: not if someone else has started tracking the aircraft, or set a code, while Core was answering. If Core cannot give a code, the error is shown once and that aircraft is not asked for again for a minute.
+
+**By hand**: **Open squawk assignment menu** offers Recycle (a new code from Core, also **Force squawk recycle**), Conspicuity (by flight rules: `squawk.conspicuity`, default 2000, for IFR, `squawk.conspicuity_vfr`, default 7000, for VFR) and Manual (type a code). Setting a code from the menu releases the one Core held. A code set from the menu, typed in EuroScope, or set by a controller on another scope counts as by hand: the plugin leaves that aircraft alone (a 2000 typed in EuroScope is not replaced; on sweatbox it is) until its departure, destination or flight rules change. Only for aircraft the user tracks or nobody tracks.
 
 **Core API**, all under `/api/plugin`, with the same `X-KWIQ-Key` and `X-KWIQ-Version` headers as the rest. Every request carries `?network=live` or `?network=sweatbox`, and Core keeps the two apart.
 
@@ -159,7 +162,7 @@ If Core cannot give a code, the error is shown once and that aircraft is not ask
 | `GET /squawk/non-assignable` | the codes Core never assigns, fetched with the config: `NONASSIGNABLE\|<first>\|<last>\|<category>\|<counts as assigned 0/1>\|<description>`, a single code with first = last. Kept in memory only; no list (unreachable on the first start, 404, or no valid rows) keeps squawks off |
 | `GET /topdown` | one `TOPDOWN\|<airport>\|<position>,<position>,...` line per airport, lowest position first (refreshed with the SRD) |
 
-Errors may carry `ERROR|<message>` in the body, which the plugin shows. A code Core answers with that is on its own non-assignable list is ignored. Config keys: `squawk.enabled` (default 0), `squawk.non_discrete` (default 2000), `squawk.non_discrete_vfr` (default 7000).
+Errors may carry `ERROR|<message>` in the body, which the plugin shows. A code Core answers with that is on its own non-assignable list is ignored. Config keys: `squawk.enabled` (default 0), `squawk.conspicuity` (default 2000), `squawk.conspicuity_vfr` (default 7000); the old names `squawk.non_discrete` and `squawk.non_discrete_vfr` are still read when the new ones are not set.
 
 ## Tests
 `g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic && ./test_logic`
