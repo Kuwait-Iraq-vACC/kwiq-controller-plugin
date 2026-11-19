@@ -10,7 +10,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 | SRD Search dialog | `kwiq.rc`, `kwiq_res.h` | The UK Controller Plugin's `IDD_SRD_SEARCH` dialog template (`resource/UKControllerPlugin.rc`), https://github.com/VATSIM-UK/uk-controller-plugin; the Event Routes dialog (`IDD_EVENT_ROUTES`) is laid out from it | GPL-3.0 |
 | Flight plan check | `fpc_logic.hpp` | Adapted from VFPC, https://github.com/hpeter2/VFPC (from https://github.com/DrFreas/VFPC, Jan Fries): `analyzeFP.cpp` | GPL-3.0 |
 | Squawk assignment rules | `squawk_logic.hpp`, and the squawk section of `KWIQPlugin.cpp` | Adapted from the UK Controller Plugin, https://github.com/VATSIM-UK/uk-controller-plugin (`src/plugin/squawk`) | GPL-3.0 |
-| KWIQ code | `KWIQPlugin.cpp`, `kwiq_logic.hpp`, `kwiq_win.hpp`, `loader.cpp`, `updater.cpp`, `keylink.*`, `push.*`, `version.h`, `tests/` | Kuwait & Iraq vACC | GPL-3.0-or-later |
+| KWIQ code | `KWIQPlugin.cpp`, `kwiq_ui.*`, `kwiq_logic.hpp`, `kwiq_win.hpp`, `loader.cpp`, `updater.cpp`, `keylink.*`, `push.*`, `version.h`, `tests/` | Kuwait & Iraq vACC | GPL-3.0-or-later |
 | Loader / updater design | `loader.cpp`, `updater.cpp`, `kwiq_win.hpp` | Follows the UK Controller Plugin's loader, updater and core layout (https://github.com/VATSIM-UK/uk-controller-plugin); written for this plugin, no UKCP code copied | GPL-3.0 |
 | libcurl (linked, from vcpkg) | - | https://curl.se (Daniel Stenberg and contributors) | curl licence (MIT style) |
 | JSON for Modern C++ (header only, from vcpkg) | - | https://github.com/nlohmann/json (Niels Lohmann) | MIT |
