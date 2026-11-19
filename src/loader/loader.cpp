@@ -64,7 +64,7 @@ static std::string FirstTimeDownload(const std::string& updater) {
     return "";
 }
 
-void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
+static void LoaderInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
     std::string core = CorePath(), updater = UpdaterPath();
     if (core.empty() || !MakeDirs()) {
         LoaderError("The KWIQ Controller Plugin cannot be installed, because %LOCALAPPDATA%\\KWIQ cannot be created.");
@@ -120,6 +120,20 @@ void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlug
     DeleteFileA(core.c_str());                                       // installed again at the next start
     LoaderError("The plugin could not be loaded from " + core + ".\r\n\r\nIt will be installed again the next time EuroScope starts.");
     Inactive(ppPlugInInstance, "The plugin could not be loaded. It will be installed again the next time EuroScope starts.");
+}
+
+// EuroScope's entry point: nothing may escape into EuroScope. If anything throws before the plugin is loaded,
+// the inactive stand-in says so.
+void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
+    *ppPlugInInstance = nullptr;
+    try {
+        LoaderInit(ppPlugInInstance);
+    } catch (...) {
+        if (!*ppPlugInInstance) {
+            try { Inactive(ppPlugInInstance, "The KWIQ Controller Plugin could not start. It will try again the next time EuroScope starts."); }
+            catch (...) {}
+        }
+    }
 }
 
 void __declspec(dllexport) EuroScopePlugInExit(void) {
