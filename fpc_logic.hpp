@@ -12,10 +12,11 @@ namespace kwiq::fpc {
 // ---- rules -----------------------------------------------------------------------------------
 // Core /api/plugin/fpc (plain text), one line per Sid.json condition, in Sid.json's order:
 //   FPC|<airport>|<sid>|<suffix>|<direction>|<min_fl>|<max_fl>|<forbidden_fls>|<destinations>|<airways>|<engine>|<navigation>
-// <sid> is the SID's first waypoint (SESRU for SESRU1A); lists are comma separated; empty = no restriction.
+// <sid> is the SID's first waypoint (SESRU for SESRU1A), or the aerodrome's VOR (ORBB keys every airport's rules on
+// it: BGD, BSR, ...); lists are comma separated; empty = no restriction.
 // Filters (the condition is only for flights that fit): suffix, destinations (prefixes, OM = any OM..), airways
-// (an airway or a run of route elements, e.g. "NAMDI M860 NINVA"). Checks: engine, direction, min_fl, max_fl,
-// forbidden_fls, navigation.
+// (an airway or a run of route elements, e.g. "NAMDI M860 NINVA"; "DCT" = the route has a DCT in it). Checks:
+// engine, direction, min_fl, max_fl, forbidden_fls, navigation.
 struct Condition {
     std::string suffix;                                 // e.g. 1A
     std::string direction = "ANY";                      // EVEN, ODD or ANY
@@ -25,8 +26,11 @@ struct Condition {
     std::vector<std::vector<std::string>> airways;      // each one normalised, as route elements
     std::string navigation;                             // allowed equipment codes, e.g. "LGZ"; empty = any
 };
-using SidRules = std::unordered_map<std::string, std::vector<Condition>>;   // SID first waypoint -> conditions
-using Rules = std::unordered_map<std::string, SidRules>;                    // departure airport -> SIDs
+struct AirportRules {
+    std::unordered_map<std::string, std::vector<Condition>> sids;           // SID first waypoint (or VOR) -> conditions
+    std::vector<std::string> order;                                         // the keys of `sids`, in Core's order
+};
+using Rules = std::unordered_map<std::string, AirportRules>;                // departure airport -> its rules
 
 inline std::vector<std::string> SplitList(const std::string& s) {
     std::vector<std::string> out;
@@ -52,12 +56,15 @@ inline Rules ParseRules(const std::string& body) {
         for (const auto& fl : SplitList(f[7])) c.forbidden.push_back(std::atoi(fl.c_str()));
         c.destinations = SplitList(f[8]);
         for (const auto& a : SplitList(f[9])) {
-            auto toks = NormaliseRoute(a);
+            auto toks = a == "DCT" ? std::vector<std::string>{ "DCT" } : NormaliseRoute(a);   // DCT alone is an option
             if (!toks.empty()) c.airways.push_back(toks);
         }
         c.engines = SplitList(f[10]);
         c.navigation = Upper(Trim(f[11]));
-        r[apt][sid].push_back(std::move(c));
+        auto& ar = r[apt];
+        auto& conds = ar.sids[sid];
+        if (conds.empty()) ar.order.push_back(sid);
+        conds.push_back(std::move(c));
     }
     return r;
 }
@@ -87,7 +94,9 @@ inline const char* Code(Fail f) {
 struct Result {
     bool checked = false;                               // the departure airport has rules (VFR: always)
     bool vfr = false;
-    std::string sidPoint, suffix;
+    std::string sidPoint, suffix;                       // sidPoint: whose rules were used
+    bool byRoute = false;                               // the SID had no rules (or there was none): found by the route
+    bool noSid = false;                                 // the flight plan has no SID set yet
     std::vector<Fail> fails;
     std::vector<std::string> notes;                     // what was checked, for Explain FPC result
     bool Passed() const { return checked && fails.empty(); }
@@ -103,72 +112,132 @@ inline bool ContainsRun(const std::vector<std::string>& filed, const std::vector
     return false;
 }
 
+// The cruising level's direction. Up to FL410 every 2,000 ft alternates (FL350 odd, FL360 even); above FL410 the
+// levels are 4,000 ft apart: FL410, 450, 490 odd, FL430, 470, 510 even. (VFPC's (RFL / 1000) % 2 calls FL430 odd.)
+inline bool EvenLevel(int rflFt) {
+    int fl = rflFt / 100;
+    if (fl > 410) return ((fl - 410) / 20) % 2 == 1;
+    return (rflFt / 1000) % 2 == 0;
+}
+
+// Does the condition's filters fit the flight? Fills viaDest and viaAirway for Explain.
+inline bool Fits(const Condition& c, const std::string& suffix, const std::string& dest, const std::vector<std::string>& filed,
+                 bool hasDct, std::string& viaDest, std::string& viaAirway) {
+    viaDest.clear(); viaAirway.clear();
+    if (!c.suffix.empty() && c.suffix != suffix) return false;
+    if (!c.destinations.empty()) {
+        for (const auto& d : c.destinations) if (dest.compare(0, d.size(), d) == 0) { viaDest = d; break; }
+        if (viaDest.empty()) return false;
+    }
+    if (!c.airways.empty()) {
+        for (const auto& a : c.airways) {
+            bool hit = (a.size() == 1 && a[0] == "DCT") ? hasDct : ContainsRun(filed, a);
+            if (hit) { viaAirway = a[0] + (a.size() > 1 ? " ... " + a.back() : ""); break; }
+        }
+        if (viaAirway.empty()) return false;
+    }
+    return true;
+}
+
+// The checks of the condition that decides (VFPC: the first one whose filters fit)
+inline void Apply(const Condition& c, const Flight& f, Result& r) {
+    int fl = f.rflFt / 100;
+    if (!c.engines.empty()) {
+        std::string list;
+        bool ok = false;
+        for (const auto& e : c.engines) { list += (list.empty() ? "" : ",") + e; if (e[0] == f.engine) ok = true; }
+        if (!ok) { r.fails.push_back(Fail::Engine); r.notes.push_back("engine type " + std::string(1, f.engine ? f.engine : '?') + " is not " + list); }
+    }
+    bool even = EvenLevel(f.rflFt);
+    if (c.direction == "EVEN" || c.direction == "ODD") {
+        if (even != (c.direction == "EVEN")) {
+            r.fails.push_back(Fail::Direction);
+            r.notes.push_back(FlStr(f.rflFt) + " is " + (even ? "even" : "odd") + ", the SID needs " + Lower(c.direction));
+        } else r.notes.push_back(Lower(c.direction));
+    } else if (c.direction != "ANY") {
+        r.fails.push_back(Fail::Direction);
+        r.notes.push_back("the rule's direction " + c.direction + " is not EVEN, ODD or ANY");
+    }
+    if (c.minFl > 0 && fl < c.minFl) { r.fails.push_back(Fail::Min); r.notes.push_back(FlStr(f.rflFt) + " is below FL" + std::to_string(c.minFl)); }
+    if (c.maxFl > 0 && fl > c.maxFl) { r.fails.push_back(Fail::Max); r.notes.push_back(FlStr(f.rflFt) + " is above FL" + std::to_string(c.maxFl)); }
+    if (std::find(c.forbidden.begin(), c.forbidden.end(), fl) != c.forbidden.end()) {
+        r.fails.push_back(Fail::Forbidden);
+        r.notes.push_back(FlStr(f.rflFt) + " is not allowed");
+    }
+    if (!c.navigation.empty() && (!f.capability || c.navigation.find(f.capability) == std::string::npos)) {
+        r.fails.push_back(Fail::Navigation);
+        r.notes.push_back("equipment " + std::string(1, f.capability ? f.capability : '?') + " is not one of " + c.navigation);
+    }
+}
+
+// VFPC validizeSid, with two differences so that valid flight plans pass:
+// - When the SID's first waypoint has no rules at the airport, or no SID is set yet (EuroScope only sets one once a
+//   runway is active), the rules are found by the route: first the rules of a point on the filed route, then any
+//   rule whose airways the route follows. This is how ORBB's rules, keyed on the aerodrome VOR (BGD, BSR, ...), are
+//   found for a flight on NOLDO1A. A SID that has rules of its own is still only checked against those.
+// - The direction above FL410 (EvenLevel).
 inline Result Check(const Rules& rules, const Flight& f) {
     Result r;
     if (f.vfr) { r.checked = r.vfr = true; return r; }
     auto apt = rules.find(Upper(f.origin));
     if (apt == rules.end()) return r;                   // no rules for the airport: nothing to show
     r.checked = true;
+    const AirportRules& ar = apt->second;
     auto fail = [&r](Fail x, const std::string& why) { r.fails.push_back(x); r.notes.push_back(why); return r; };
 
     // SESRU1A -> SESRU and 1A; a SID with no number is no SID, except VCT (vectors)
-    std::string sid = Upper(Trim(f.sid));
-    if (sid.empty()) return fail(Fail::Sid, "no SID in the flight plan");
+    std::string sid = Upper(Trim(f.sid)), point, suffix;
     size_t digit = sid.find_first_of("0123456789");
-    r.sidPoint = sid.substr(0, digit);
-    if (digit != std::string::npos) r.suffix = sid.substr(digit);
-    if (r.suffix.empty() && r.sidPoint != "VCT") return fail(Fail::Sid, "no SID in the flight plan");
-    auto conds = apt->second.find(r.sidPoint);
-    if (conds == apt->second.end()) return fail(Fail::Sid, "no rules for SID " + r.sidPoint + " at " + apt->first);
+    point = sid.substr(0, digit);
+    if (digit != std::string::npos) suffix = sid.substr(digit);
+    r.noSid = point.empty() || (suffix.empty() && point != "VCT");
 
-    std::string dest = Upper(f.destination);
+    std::string dest = Upper(f.destination), viaDest, viaAirway;
     auto filed = NormaliseRoute(f.route);
-    int fl = f.rflFt / 100;
-    for (const auto& c : conds->second) {
-        // Filters: the first condition the flight fits decides
-        if (!c.suffix.empty() && c.suffix != r.suffix) continue;
-        std::string viaDest, viaAirway;
-        if (!c.destinations.empty()) {
-            for (const auto& d : c.destinations) if (dest.compare(0, d.size(), d) == 0) { viaDest = d; break; }
-            if (viaDest.empty()) continue;
-        }
-        if (!c.airways.empty()) {
-            for (const auto& a : c.airways) if (ContainsRun(filed, a)) { viaAirway = a[0] + (a.size() > 1 ? " ... " + a.back() : ""); break; }
-            if (viaAirway.empty()) continue;
-        }
+    bool hasDct = false;
+    for (const auto& t : SplitWs(f.route)) if (Upper(t) == "DCT") { hasDct = true; break; }
+    auto decide = [&](const std::string& key, const Condition& c) {
+        r.sidPoint = key;
         if (!viaDest.empty()) r.notes.push_back("destination " + viaDest);
         if (!viaAirway.empty()) r.notes.push_back("via " + viaAirway);
-
-        // Checks
-        if (!c.engines.empty()) {
-            std::string list;
-            bool ok = false;
-            for (const auto& e : c.engines) { list += (list.empty() ? "" : ",") + e; if (e[0] == f.engine) ok = true; }
-            if (!ok) { r.fails.push_back(Fail::Engine); r.notes.push_back("engine type " + std::string(1, f.engine ? f.engine : '?') + " is not " + list); }
-        }
-        bool even = (f.rflFt / 1000) % 2 == 0;
-        if (c.direction == "EVEN" || c.direction == "ODD") {
-            if (even != (c.direction == "EVEN")) {
-                r.fails.push_back(Fail::Direction);
-                r.notes.push_back(FlStr(f.rflFt) + " is " + (even ? "even" : "odd") + ", the SID needs " + Lower(c.direction));
-            } else r.notes.push_back(Lower(c.direction));
-        } else if (c.direction != "ANY") {
-            r.fails.push_back(Fail::Direction);
-            r.notes.push_back("the rule's direction " + c.direction + " is not EVEN, ODD or ANY");
-        }
-        if (c.minFl > 0 && fl < c.minFl) { r.fails.push_back(Fail::Min); r.notes.push_back(FlStr(f.rflFt) + " is below FL" + std::to_string(c.minFl)); }
-        if (c.maxFl > 0 && fl > c.maxFl) { r.fails.push_back(Fail::Max); r.notes.push_back(FlStr(f.rflFt) + " is above FL" + std::to_string(c.maxFl)); }
-        if (std::find(c.forbidden.begin(), c.forbidden.end(), fl) != c.forbidden.end()) {
-            r.fails.push_back(Fail::Forbidden);
-            r.notes.push_back(FlStr(f.rflFt) + " is not allowed");
-        }
-        if (!c.navigation.empty() && (!f.capability || c.navigation.find(f.capability) == std::string::npos)) {
-            r.fails.push_back(Fail::Navigation);
-            r.notes.push_back("equipment " + std::string(1, f.capability ? f.capability : '?') + " is not one of " + c.navigation);
-        }
+        Apply(c, f, r);
         return r;
+    };
+
+    if (!r.noSid) {
+        r.suffix = suffix;
+        auto own = ar.sids.find(point);
+        if (own != ar.sids.end()) {
+            for (const auto& c : own->second)
+                if (Fits(c, suffix, dest, filed, hasDct, viaDest, viaAirway)) return decide(point, c);
+            r.sidPoint = point;
+            return fail(Fail::Sid, "no rule for SID " + point + " fits this destination and route");
+        }
     }
-    return fail(Fail::Sid, "no rule for SID " + r.sidPoint + " fits this destination and route");
+
+    // Found by the route: the rules of points on the filed route, in route order, then the others in Core's order,
+    // where only a condition the route follows by airway counts (so a rule with no filters doesn't catch everything)
+    r.byRoute = true;
+    std::vector<const std::string*> onRoute;
+    for (const auto& t : filed) {
+        auto it = ar.sids.find(t);
+        if (it != ar.sids.end() && std::find(onRoute.begin(), onRoute.end(), &it->first) == onRoute.end()) onRoute.push_back(&it->first);
+    }
+    std::string sfx = r.noSid ? std::string() : suffix;
+    for (const std::string* key : onRoute)
+        for (const auto& c : ar.sids.at(*key))
+            if (Fits(c, sfx, dest, filed, hasDct, viaDest, viaAirway)) return decide(*key, c);
+    for (const auto& key : ar.order) {
+        bool seen = false;
+        for (const std::string* k : onRoute) if (*k == key) seen = true;
+        if (seen) continue;
+        for (const auto& c : ar.sids.at(key))
+            if (!c.airways.empty() && Fits(c, sfx, dest, filed, hasDct, viaDest, viaAirway)) return decide(key, c);
+    }
+    r.byRoute = false;
+    if (r.noSid) return fail(Fail::Sid, "no SID in the flight plan, and no rule at " + apt->first + " fits the route");
+    r.sidPoint = point;
+    return fail(Fail::Sid, "no rules for SID " + point + " at " + apt->first + ", and none fits the route");
 }
 
 // Explain FPC result (VFPC checkFPDetail)
@@ -176,9 +245,13 @@ inline std::string Explain(const Result& r, const Flight& f) {
     std::string head = Upper(f.origin) + " -> " + Upper(f.destination) + " " + (f.rflFt > 0 ? FlStr(f.rflFt) : "FL---");
     if (r.vfr) return head + ": VFR, not checked.";
     if (!r.checked) return head + ": no flight plan check rules for " + Upper(f.origin) + ".";
-    std::string s = head + (r.sidPoint.empty() ? "" : " SID " + r.sidPoint + r.suffix) + (r.Passed() ? ": passed" : ": failed");
-    for (size_t i = 0; i < r.notes.size(); i++) s += (i ? ", " : " (") + r.notes[i];
-    return s + (r.notes.empty() ? "." : ").");
+    std::string sid = Upper(Trim(f.sid));
+    std::string s = head + (r.noSid ? "" : " SID " + sid) + (r.Passed() ? ": passed" : ": failed");
+    std::vector<std::string> notes;
+    if (r.byRoute) notes.push_back(std::string(r.noSid ? "no SID set, " : "") + "rules for " + r.sidPoint + " by the route");
+    notes.insert(notes.end(), r.notes.begin(), r.notes.end());
+    for (size_t i = 0; i < notes.size(); i++) s += (i ? ", " : " (") + notes[i];
+    return s + (notes.empty() ? "." : ").");
 }
 
 } // namespace kwiq::fpc

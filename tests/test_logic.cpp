@@ -188,6 +188,31 @@ int main() {
     CHECK(ExplainSrd(srdx, "OKBK", "LTBA", "DCT SIDAD ABC UL602 ROTAP", 35000, nx).find("FIR exit ROTAP") != std::string::npos);
     CHECK(ExplainSrd(srdx, "OKBK", "LTBA", "DCT SIDAD XYZ ROTAP", 35000, nx).find("does not match") != std::string::npos);
 
+    // SRD: the aerodrome VOR at a row's airport end is optional (#9)
+    {
+        SrdData v = ParseSrd(
+            "SRD|ORBI|PAXAT|||BGD DCT NOLDO B411 PAXAT|\n"
+            "SRD|TASMI|ORBI|||TASMI L602 LOVEK DCT BGD|\n"
+            "SRD|TASMI|ORMM|||TASMI G795 BSR|\n"
+            "SRD|OKBK|ORBI|||SIDAD BGD L602 LOVEK|\n"
+            "SRD|ORBI|ORMM|||BGD|\n");
+        auto R = [](const char* s) { return NormaliseRoute(s); };
+        std::string skipped;
+        CHECK(SrdRowMatches(v.rows[0], R("NOLDO1A NOLDO B411 PAXAT"), &skipped) && skipped == "BGD");
+        CHECK(SrdRowMatches(v.rows[0], R("BGD DCT NOLDO B411 PAXAT"), &skipped) && skipped.empty());
+        CHECK(!SrdRowMatches(v.rows[0], R("NOLDO B411 XYZ")));
+        CHECK(SrdRowMatches(v.rows[1], R("TASMI L602 LOVEK LOVEK1A"), &skipped) && skipped == "BGD");
+        CHECK(SrdRowMatches(v.rows[1], R("TASMI L602 LOVEK DCT BGD")));
+        CHECK(SrdRowMatches(v.rows[2], R("TASMI G795 BSR1A")));      // both ends: the airport end only
+        CHECK(!SrdRowMatches(v.rows[2], R("G795 BSR")));               // TASMI is a waypoint end, still needed
+        CHECK(!SrdRowMatches(v.rows[3], R("SIDAD L602 LOVEK")));       // a VOR in the middle is still required
+        CHECK(SrdRowMatches(v.rows[4], R("BGD")) && !SrdRowMatches(v.rows[4], R("XYZ")));   // never an empty route
+        CHECK(CheckSrd(v, "ORBI", "PAXAT", R("NOLDO1A NOLDO B411 PAXAT"), 33000) == SrdResult::Ok);
+        CHECK(ExplainSrd(v, "ORBI", "PAXAT", "NOLDO1A NOLDO B411 PAXAT", 33000).find("(BGD not filed)") != std::string::npos);
+        CHECK(ExplainSrd(v, "ORBI", "PAXAT", "BGD NOLDO B411 PAXAT", 33000).find("not filed") == std::string::npos);
+        CHECK(IsNavaidIdent("BGD") && IsNavaidIdent("KI") && !IsNavaidIdent("NOLDO") && !IsNavaidIdent("B411") && !IsNavaidIdent(""));
+    }
+
     // flight plan check (VFPC rules)
     {
         using namespace kwiq::fpc;
@@ -198,9 +223,10 @@ int main() {
             "FPC|ORBI|BGD|1A|EVEN|80|600|250,260||DELMI DCT RUKAM B411 MURIB||RG\n"
             "FPC|ORBI|BGD||ANY|240||||NOLDO P975 SIDAD||\n"
             "FPC|XX|ABC||ODD|||||||\nFPC|ORBI|BGD|short\njunk\n");
-        CHECK(rules.size() == 2 && rules["OKKK"]["SESRU"].size() == 2 && rules["ORBI"]["BGD"].size() == 2);
-        CHECK(rules["OKKK"]["SESRU"][0].destinations.size() == 2 && rules["ORBI"]["BGD"][0].forbidden.size() == 2);
-        CHECK(rules["ORBI"]["BGD"][0].airways[0].size() == 4);    // DCT dropped
+        CHECK(rules.size() == 2 && rules["OKKK"].sids["SESRU"].size() == 2 && rules["ORBI"].sids["BGD"].size() == 2);
+        CHECK(rules["OKKK"].sids["SESRU"][0].destinations.size() == 2 && rules["ORBI"].sids["BGD"][0].forbidden.size() == 2);
+        CHECK(rules["ORBI"].sids["BGD"][0].airways[0].size() == 4);    // DCT dropped
+        CHECK((rules["OKKK"].order == std::vector<std::string>{ "SESRU", "BOXIK" }));
 
         Flight f; f.origin = "OKKK"; f.destination = "OMDB"; f.sid = "SESRU1A"; f.route = "SESRU1A SESRU M677 XYZ";
         f.rflFt = 35000; f.engine = 'J'; f.capability = 'L';
@@ -211,12 +237,19 @@ int main() {
         r = Check(rules, g);
         CHECK(!r.Passed() && r.fails.size() == 1 && r.fails[0] == Fail::Direction && std::string(Code(r.fails[0])) == "E/O");
         CHECK(Explain(r, g).find("FL360 is even, the SID needs odd") != std::string::npos);
-        g = f; g.sid = "";
-        CHECK(Check(rules, g).fails[0] == Fail::Sid);
-        g = f; g.sid = "SESRU";                                     // no number: not a SID
-        CHECK(Check(rules, g).fails[0] == Fail::Sid);
-        g = f; g.sid = "ABCDE1A";
-        CHECK(Check(rules, g).fails[0] == Fail::Sid);
+        g = f; g.sid = "";                                          // no SID set yet (no runway): checked by the route
+        r = Check(rules, g);
+        CHECK(r.Passed() && r.byRoute && r.sidPoint == "SESRU" && Explain(r, g).find("no SID set") != std::string::npos);
+        g = f; g.sid = "SESRU";                                     // no number: not a SID, so checked by the route
+        r = Check(rules, g);
+        CHECK(r.Passed() && r.byRoute && r.sidPoint == "SESRU");
+        g = f; g.sid = ""; g.route = "XYZ UL999 ABC";               // no SID and no rule fits the route
+        CHECK(Check(rules, g).fails.size() == 1 && Check(rules, g).fails[0] == Fail::Sid);
+        g = f; g.sid = "ABCDE1A"; g.route = "ABCDE1A ABCDE UL999 XYZ";   // a SID with no rules, a route no rule fits
+        r = Check(rules, g);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Sid && Explain(r, g).find("no rules for SID ABCDE") != std::string::npos);
+        g.route = "ABCDE1A ABCDE SESRU M677 XYZ";                  // ... that joins a route with rules
+        CHECK(Check(rules, g).Passed());
         g = f; g.destination = "EGLL"; g.route = "SESRU G669 XYZ";  // not a listed destination: the next rule
         CHECK(Check(rules, g).Passed());
         g = f; g.route = "SESRU UL999 XYZ";                         // no rule fits
@@ -246,6 +279,62 @@ int main() {
         g = f; g.origin = "OMDB";                                   // no rules for the airport: nothing shown
         CHECK(!Check(rules, g).checked);
         CHECK(ContainsRun({ "A", "B", "C" }, { "B", "C" }) && !ContainsRun({ "A", "B", "C" }, { "A", "C" }));
+
+        // The vACC's real rules (ORBB .data/VFPC, OKAC Sid.json): ORBB keys them on the aerodrome VOR, not the SID
+        Rules real = ParseRules(
+            "FPC|ORBI|BGD||EVEN|195|285|||NAMDI M860 NINVA||\n"
+            "FPC|ORBI|BGD||EVEN|160|460|||TAGRU L718 KABAN||\n"
+            "FPC|ORBI|BGD||ODD|80|600|||NOLDO B411 PAXAT||\n"
+            "FPC|ORMM|BSR||ODD||||| SIDAD||\n"
+            "FPC|ORNI|ALI||EVEN|160|460|||LAGLO L718 KABAN||\n"
+            "FPC|ORNI|NOLDO||ODD|80|600|||B411 PAXAT||\n"
+            "FPC|OKKK|NIDAP||EVEN||||OLBA|L550,DCT||\n"
+            "FPC|OKKK|NIDAP||EVEN|||||L550,DCT||\n");
+        Flight o; o.origin = "ORBI"; o.destination = "LTBA"; o.sid = "NOLDO1A"; o.route = "NOLDO1A NOLDO B411 PAXAT";
+        o.rflFt = 33000; o.engine = 'J'; o.capability = 'L';
+        r = Check(real, o);                                         // SID NOLDO1A: no NOLDO rules at ORBI, so BGD's
+        CHECK(r.Passed() && r.byRoute && r.sidPoint == "BGD" && Explain(r, o).find("rules for BGD") != std::string::npos);
+        o.rflFt = 34000;
+        r = Check(real, o);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Direction);
+        o.sid = ""; o.route = "BGD DCT NOLDO B411 PAXAT"; o.rflFt = 33000;   // no SID, the VOR filed
+        CHECK(Check(real, o).Passed());
+        o.route = "NOLDO UM999 PAXAT";                              // no rule fits: still SID
+        r = Check(real, o);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Sid);
+        o.sid = "TAGRU1A"; o.route = "TAGRU1A TAGRU L718 KABAN"; o.rflFt = 43000;   // FL430 is an even level
+        CHECK(Check(real, o).Passed());
+        o.rflFt = 45000;                                            // FL450 is odd
+        r = Check(real, o);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Direction);
+        o.rflFt = 47000;                                            // FL470 is even, but above FL460
+        r = Check(real, o);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Max);
+        o.rflFt = 41000; o.route = "NOLDO1A NOLDO B411 PAXAT"; o.sid = "NOLDO1A";   // FL410 is odd
+        CHECK(Check(real, o).Passed());
+        CHECK(!EvenLevel(41000) && EvenLevel(43000) && !EvenLevel(45000) && EvenLevel(47000) && EvenLevel(40000) && !EvenLevel(39000));
+        // ORNI: the SID's own rules still decide when there are any; a SID with rules that don't fit is SID
+        Flight n; n.origin = "ORNI"; n.destination = "LTBA"; n.sid = "NOLDO1A"; n.route = "NOLDO1A NOLDO B411 PAXAT";
+        n.rflFt = 33000; n.engine = 'J';
+        r = Check(real, n);
+        CHECK(r.Passed() && !r.byRoute && r.sidPoint == "NOLDO");
+        n.route = "NOLDO1A NOLDO LAGLO L718 KABAN"; n.rflFt = 34000;
+        CHECK(Check(real, n).fails.size() == 1 && Check(real, n).fails[0] == Fail::Sid);
+        n.sid = "LAGLO1A"; n.route = "LAGLO1A LAGLO L718 KABAN";   // no LAGLO rules: the ALI ones
+        CHECK(Check(real, n).Passed());
+        // a fallback condition must match the route by airway, so a rule-less group never catches everything
+        Rules loose = ParseRules("FPC|ORBI|BGD||ANY|||||||\nFPC|ORBI|XYZ||ANY|||||||\n");
+        Flight l = o; l.sid = "NOLDO1A"; l.route = "NOLDO1A NOLDO B411 PAXAT";
+        CHECK(Check(loose, l).fails.size() == 1 && Check(loose, l).fails[0] == Fail::Sid);
+        l.route = "XYZ NOLDO B411 PAXAT";                           // a group whose point is on the route does count
+        CHECK(Check(loose, l).Passed());
+        // OKAC NIDAP: "DCT" is an airway option of its own
+        Flight k; k.origin = "OKKK"; k.destination = "OJAI"; k.sid = "NIDAP1A"; k.route = "NIDAP1A NIDAP DCT OJAI"; k.rflFt = 30000;
+        CHECK(Check(real, k).Passed());
+        k.route = "NIDAP1A NIDAP L550 XYZ";
+        CHECK(Check(real, k).Passed());
+        k.route = "NIDAP1A NIDAP M999 XYZ";
+        CHECK(Check(real, k).fails.size() == 1 && Check(real, k).fails[0] == Fail::Sid);
     }
 
     // SRD search
