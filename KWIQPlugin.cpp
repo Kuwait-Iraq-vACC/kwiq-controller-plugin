@@ -1167,7 +1167,7 @@ private:
             std::lock_guard<std::mutex> g(mu_);
             msg = kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
         }
-        // its own chat tab, "KWIQ FPC", opened (and flashed) when it is not open yet
+        // its own chat tab, "KWIQ FPC", opened when it is not open yet
         DisplayUserMessage("KWIQ FPC", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
     }
 
