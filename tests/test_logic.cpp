@@ -462,16 +462,16 @@ int main() {
         CHECK(ForceNeeded(&st, v));
         CodeSet(st, "4523", false);
         // a code from the menu is by hand, and so is one typed in EuroScope (or set on another scope)
-        CodeSeen(st, "4523");                                       // the plugin's own: nothing changes
+        CodeSeen(st, "4523", codes, false);                                       // the plugin's own: nothing changes
         CHECK(!st.byHand);
-        CodeSeen(st, "2000");
+        CodeSeen(st, "2000", codes, false);
         CHECK(st.byHand && st.squawk == "2000");
         a = v; a.squawk = "2000";
         CHECK(Decide(twr, a, &st, codes) == Action::None);          // not replaced every 5 seconds
-        CodeSeen(st, ""); CodeSeen(st, "99");                       // cleared or invalid: ignored
+        CodeSeen(st, "", codes, false); CodeSeen(st, "99", codes, false);                       // cleared or invalid: ignored
         CHECK(st.squawk == "2000" && st.byHand);
         Stored gone{ "OKBK", "OMDB", "4521", false, 100 };          // disconnected: the code to give back is kept
-        CodeSeen(gone, "1234");
+        CodeSeen(gone, "1234", codes, false);
         CHECK(gone.squawk == "4521" && !gone.byHand);
         Remember(gone, gnd);                                        // reconnected with the same plan
         CHECK(gone.expires == 0 && Decide(twr, gnd, &gone, codes) == Action::Previous);
@@ -482,6 +482,30 @@ int main() {
         CHECK(!AnswerWanted(false, twr, gnd, &st, codes));          // set by hand meanwhile (st.byHand)
         CHECK(!AnswerWanted(false, twr, other, nullptr, codes) && !AnswerWanted(true, twr, other, nullptr, codes));
         CHECK(!AnswerWanted(true, obs, gnd, nullptr, codes));
+
+        // the holding code shown while Core answers is never a code, even if Core's list left 7000 out
+        CHECK(!HasCode(codes, HOLDING_SQUAWK) && !HasCode(CodeList(), HOLDING_SQUAWK) && HasCode(codes, "4521"));
+        a = gnd; a.squawk = HOLDING_SQUAWK;
+        CHECK(Decide(twr, a, nullptr, CodeList()) == Action::Assign && AnswerWanted(false, twr, a, nullptr, CodeList()));
+        Stored h; Remember(h, gnd); CodeSet(h, "4521", false);
+        CodeSeen(h, HOLDING_SQUAWK, codes, false);                  // another scope asking Core: not by hand
+        CHECK(h.squawk == "4521" && !h.byHand);
+
+        // sweatbox: aircraft spawn anywhere with 2000, so any aircraft nobody tracks gets a code
+        User sbx{ true, "OKAC_CTR", true };
+        Aircraft spawn = gnd; spawn.squawk = "2000"; spawn.deliveryByMe = false;
+        spawn.groundSpeed = 280; spawn.fromOrigin = 60; spawn.altitude = 12000;
+        CHECK(Decide(sbx, spawn, nullptr, codes) == Action::Assign);
+        CHECK(Decide(ctr, spawn, nullptr, codes) == Action::None);  // live: only tracked or on the ground
+        a = spawn; a.tracked = true;                                // someone else's
+        CHECK(Decide(sbx, a, nullptr, codes) == Action::None);
+        a = spawn; a.squawk = "4521";
+        CHECK(Decide(sbx, a, nullptr, codes) == Action::None);
+        Stored sp; Remember(sp, spawn);
+        CodeSeen(sp, "2000", codes, true);                          // the spawn's 2000 is not set by hand
+        CHECK(!sp.byHand && Decide(sbx, spawn, &sp, codes) == Action::Assign);
+        CodeSeen(sp, "4521", codes, true);                          // a real code still is
+        CHECK(sp.byHand && sp.squawk == "4521");
     }
 
     // api-settings.json, as UKCP keeps its key
