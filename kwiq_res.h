@@ -1,4 +1,4 @@
-// kwiq_res.h - IDs in kwiq.rc, KWIQPluginCore.dll's resources (shared by the .rc file and KWIQPlugin.cpp).
+// kwiq_res.h - IDs in kwiq.rc, KWIQPluginCore.dll's resources (shared by the .rc file, kwiq_ui.cpp and KWIQPlugin.cpp).
 #pragma once
 
 // SRD Search, as the UK Controller Plugin's IDD_SRD_SEARCH (#56)
