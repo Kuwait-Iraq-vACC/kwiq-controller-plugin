@@ -28,14 +28,13 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | KWIQ Controller Plugin / Event Route | green `OK` or red `CHK` on event days for event ADEP/ADES pairs |
 | ... / Event Flag | `EV` if the pilot has a VATCAN slot |
 | ... / Event Slot | the slot time |
-| ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV` |
-| ... / FPC (if failed) | the same, only when it fails |
+| ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV`; `-` when ignored with Open FPC menu |
 | ... / SRD | `OK`, `RTE`, `MIN` or `MAX` against the SRD |
 | ... / Sector Indicator | the alias of the position tracking the aircraft (also drawn above it) |
 | ... / RDF state | `!` while the aircraft transmits |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
 
-Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** (left button on FPC), **Explain SRD result** (left button on SRD), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
+Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** or **Open FPC menu** (left button on FPC), **Explain SRD result** (left button on SRD), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
@@ -132,7 +131,7 @@ When the SID's first waypoint has no rules at the airport, or the flight plan ha
 | `forbidden_fls` | check | flight levels not allowed | `FLR`, yellow (`ui.colour_warn`) when it is the only failure |
 | `navigation` | check | equipment codes allowed, e.g. `RG` | `NAV` |
 
-No rule that fits the flight (by its SID or its route) is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked, in its own **KWIQ FPC** chat tab (opened if it is not open yet). `.kwiq status` shows how many airports have rules.
+No rule that fits the flight (by its SID or its route) is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked, in its own **KWIQ FPC** chat tab (opened if it is not open yet). **Open FPC menu** (VFPC's options menu) has **Explain**, the same as Explain FPC result, and **Ignore**, which stops checking that flight: its FPC item shows `-` until **Check again** in the same menu, or until its flight plan disconnects. `.kwiq status` shows how many airports have rules.
 
 Core serves the rules at `/api/plugin/fpc`, one line per rule in order (a 404 means none):
 `FPC|<airport>|<sid>|<suffix>|<direction>|<min_fl>|<max_fl>|<forbidden_fls>|<destinations>|<airways>|<engine>|<navigation>`. Lists are comma separated and an empty field is no restriction, e.g. `FPC|ORBI|BGD||EVEN|80|600|250,260||DELMI DCT RUKAM B411 MURIB||`. The existing `Sid.json` files (OKAC `OKAC/Plugins/VFPC/Sid.json`, ORBB `.data/VFPC/*.json`) map onto it field for field.

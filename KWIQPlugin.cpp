@@ -82,12 +82,14 @@ enum {
     KWIQ_ITEM_SECTOR      = 1005,   // sector indicator of the position that tracks the aircraft
     KWIQ_ITEM_RDF         = 1006,   // RDF state: "!" while the aircraft transmits
     KWIQ_ITEM_SRD         = 1007,   // route and level against the SRD (1006 is RDF state)
-    KWIQ_ITEM_FPC_FAILED  = 1008,   // the flight plan check, only when it fails
-    KWIQ_ITEM_LAST        = KWIQ_ITEM_FPC_FAILED,
+    // 1008 was "FPC (if failed)", removed in 0.7.2
+    KWIQ_ITEM_LAST        = KWIQ_ITEM_SRD,
     KWIQ_FUNC_EVENT_ROUTES = 2001,   // "Open event routes window"
     KWIQ_FUNC_FPC_EXPLAIN  = 2002,   // "Explain FPC result"
     KWIQ_FUNC_SRD_SEARCH   = 2003,   // "Open SRD search window"
     KWIQ_FUNC_SRD_EXPLAIN  = 2010,   // "Explain SRD result"
+    KWIQ_FUNC_FPC_MENU     = 2011,   // "Open FPC menu"
+    KWIQ_FUNC_FPC_PICK     = 2012,   // a choice in the FPC menu
     KWIQ_FUNC_SQUAWK_MENU    = 2004,   // "Open squawk assignment menu"
     KWIQ_FUNC_SQUAWK_ASSIGN  = 2005,   // "Force squawk recycle"
     KWIQ_FUNC_SQUAWK_PICK    = 2007,   // a choice in the squawk assignment menu
@@ -272,12 +274,12 @@ public:
         RegisterTagItemType("Event Flag",  KWIQ_ITEM_EVENT_FLAG);
         RegisterTagItemType("Event Slot",  KWIQ_ITEM_EVENT_SLOT);
         RegisterTagItemType("FPC",         KWIQ_ITEM_FPC);
-        RegisterTagItemType("FPC (if failed)", KWIQ_ITEM_FPC_FAILED);
         RegisterTagItemType("SRD",         KWIQ_ITEM_SRD);
         RegisterTagItemType("Sector Indicator", KWIQ_ITEM_SECTOR);
         RegisterTagItemType("RDF state",   KWIQ_ITEM_RDF);
         RegisterTagItemFunction("Open event routes window", KWIQ_FUNC_EVENT_ROUTES);
         RegisterTagItemFunction("Explain FPC result",       KWIQ_FUNC_FPC_EXPLAIN);
+        RegisterTagItemFunction("Open FPC menu",            KWIQ_FUNC_FPC_MENU);
         RegisterTagItemFunction("Explain SRD result",       KWIQ_FUNC_SRD_EXPLAIN);
         RegisterTagItemFunction("Open SRD search window",   KWIQ_FUNC_SRD_SEARCH);
         RegisterTagItemFunction("Open squawk assignment menu", KWIQ_FUNC_SQUAWK_MENU);
@@ -421,6 +423,8 @@ public:
         switch (FunctionId) {
         case KWIQ_FUNC_EVENT_ROUTES: OpenRoutesWindow(Pt); return;
         case KWIQ_FUNC_FPC_EXPLAIN:  ExplainFpcSelected(); return;
+        case KWIQ_FUNC_FPC_MENU:     FpcMenu(Area); return;
+        case KWIQ_FUNC_FPC_PICK:     FpcPick(sItemString ? sItemString : ""); return;
         case KWIQ_FUNC_SRD_EXPLAIN:  ExplainSrdSelected(); return;
         case KWIQ_FUNC_SRD_SEARCH:   OpenSrdWindow(Pt); return;
         case KWIQ_FUNC_SQUAWK_MENU:    SquawkMenu(Area); return;
@@ -440,8 +444,11 @@ public:
         if (ours && !enabled_) return;                       // plugin too old
         UiCfg ui;
         if (ours) { std::lock_guard<std::mutex> g(mu_); ui = ui_; }
-        if (ItemCode == KWIQ_ITEM_EVENT_ROUTE || ItemCode == KWIQ_ITEM_SRD || ItemCode == KWIQ_ITEM_FPC ||
-            ItemCode == KWIQ_ITEM_FPC_FAILED) {
+        if (ItemCode == KWIQ_ITEM_FPC && FlightPlan.IsValid() && fpcIgnored_.count(FlightPlan.GetCallsign())) {
+            strncpy_s(sItemString, 16, "-", _TRUNCATE);       // ignored with the FPC menu: no result
+            return;
+        }
+        if (ItemCode == KWIQ_ITEM_EVENT_ROUTE || ItemCode == KWIQ_ITEM_SRD || ItemCode == KWIQ_ITEM_FPC) {
             if (!FlightPlan.IsValid()) return;
             const CacheEntry& e = Checks(FlightPlan);
             std::string txt;
@@ -459,9 +466,8 @@ public:
                 }
             } else if (e.fpcChecked) {
                 // VFPC: VFR and passed in green, the first failure in red, a forbidden level alone in yellow
-                if (e.fpcCode.empty()) {
-                    if (ItemCode == KWIQ_ITEM_FPC) { txt = e.fpcVfr ? "VFR" : ui.ok; colour = ui.cOk; }
-                } else {
+                if (e.fpcCode.empty()) { txt = e.fpcVfr ? "VFR" : ui.ok; colour = ui.cOk; }
+                else {
                     txt = e.fpcCode;
                     colour = e.fpcWarn ? ui.cWarn : ui.cBad;
                 }
@@ -1167,8 +1173,26 @@ private:
             std::lock_guard<std::mutex> g(mu_);
             msg = kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
         }
+        if (fpcIgnored_.count(fp.GetCallsign())) msg += " Ignored: the FPC item shows \"-\".";
         // its own chat tab, "KWIQ FPC", opened when it is not open yet
         DisplayUserMessage("KWIQ FPC", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
+    }
+
+    // VFPC's options menu: explain the result, or ignore the check for this flight (the FPC item then
+    // shows "-") until it is checked again or the flight plan disconnects
+    void FpcMenu(RECT area) {
+        auto fp = FlightPlanSelectASEL();
+        if (!fp.IsValid()) return;
+        OpenPopupList(area, "FPC", 1);
+        AddPopupListElement("Explain", "", KWIQ_FUNC_FPC_PICK);
+        AddPopupListElement(fpcIgnored_.count(fp.GetCallsign()) ? "Check again" : "Ignore", "", KWIQ_FUNC_FPC_PICK);
+    }
+    void FpcPick(const std::string& option) {
+        auto fp = FlightPlanSelectASEL();
+        if (!fp.IsValid()) return;
+        if (option == "Explain") ExplainFpcSelected();
+        else if (option == "Ignore") fpcIgnored_.insert(fp.GetCallsign());
+        else if (option == "Check again") fpcIgnored_.erase(fp.GetCallsign());
     }
 
     // ---- squawk assignment (main thread) ------------------------------------------------------
@@ -1544,6 +1568,7 @@ public:
                                GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX);
     }
     virtual void OnFlightPlanDisconnect(EuroScopePlugIn::CFlightPlan fp) override {
+        fpcIgnored_.erase(fp.GetCallsign());
         if (duplicate_) return;
         auto it = sqStored_.find(fp.GetCallsign());
         if (it != sqStored_.end()) it->second.expires = std::time(nullptr) + kwiq::squawk::STORED_SECONDS;
@@ -1936,6 +1961,7 @@ private:
     std::time_t lastMetar_ = 0, lastNotices_ = 0;
     std::atomic<int> metarPoll_{ 60 };
     std::map<std::string, std::pair<int, int>> qnhSeen_;            // main thread: ICAO -> QNH, TRL this session
+    std::set<std::string> fpcIgnored_;                              // main thread: callsigns whose FPC is ignored
     std::set<std::string> noticesTold_;                             // main thread: unread notifications already announced
     std::string qnhCallsign_;
     std::thread auxWorker_, markWorker_;
