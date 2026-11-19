@@ -32,7 +32,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - Codes come from Core (`/api/plugin/squawk-assignment/<callsign>`) instead of the UKCP API. Requests are form fields and answers are plain text (`SQUAWK|<code>`), like the rest of Core's plugin API.
 - UKCP's general and local code types are one request: Core picks the range from the requesting controller's FIR, the departure, the destination and the flight rules. The UK's circuit code and local codes are gone.
 - No code is built in: the codes never assigned, and which of them count as a code the aircraft has (UKCP's `HasAssignedSquawk`), come from Core's `/squawk/non-assignable`.
-- UKCP's conspicuity option is Conspicuity, with the codes (2000, 7000 for VFR) set in Core, and its general recycle is Recycle. The holding code 7000 is shown while Core is asked, as in UKCP, but is never taken as a code; a failed Recycle goes back to the old code. An aircraft Core could not give a code is not asked for again for a minute.
+- UKCP's conspicuity option is Conspicuity, with the codes (2000, 7000 for VFR) set in Core, and its general recycle is Assign. The holding code 7000 is shown while Core is asked, as in UKCP, but is never taken as a code; a failed Assign goes back to the old code. An aircraft Core could not give a code is not asked for again for a minute.
 - A reconnecting aircraft's old code is not set back straight away: Core is asked first, and only a code set by hand (which Core never held) comes back without it.
 - On sweatbox, any aircraft nobody tracks gets a code, as aircraft spawn anywhere with 2000.
 - Who gives departures their squawk comes from Core's top-down order (`/api/plugin/topdown`) instead of UKCP's airfield ownership.
