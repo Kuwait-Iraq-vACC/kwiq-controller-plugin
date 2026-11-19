@@ -44,7 +44,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 ## Changes made to RDF
 - It is driven by `CKWIQPlugin` and drawn by `CKWIQRadar`, instead of being a plugin of its own.
 - Its settings come from Core per callsign pattern. RDF's settings file, `RDFStyle.json`, per-ASR settings and the `.RDF` commands that set them are removed; `.RDF REFRESH` and `.RDF RELOAD` are kept, and `.RDF DRAW ON|OFF|CORE` is the controller's own switch.
-- plog, MFC and cpp-httplib are removed: TrackAudio's version is read with the plugin's libcurl, and messages go through the plugin's chat output on the main thread.
+- plog, MFC and cpp-httplib are removed (TrackAudio's version is no longer read or checked), and messages go through the plugin's chat output on the main thread.
 - The "RDF state" tag item uses ID 1006, clear of the KWIQ and VCH IDs.
 - It does not start if another RDF or afv-euroscope-bridge is loaded in the same EuroScope.
 

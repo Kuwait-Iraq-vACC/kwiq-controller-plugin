@@ -735,7 +735,7 @@ public:
                 "Remove one of them in Other Set > Plug-ins.", true);
             return;
         }
-        Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_VERSION + " loaded", false);
+        Msg(std::string("KWIQ plugin v") + KWIQ_PLUGIN_BUILD + " loaded", false);   // with the CI run and commit
         if (reduced_) { Msg(kReducedReminder, true); return; }
         std::string why;
         if (!rdf_.Start(why)) Msg(why, true);
@@ -1034,7 +1034,7 @@ public:
         }
         if (c == ".KWIQ STATUS") {
             std::lock_guard<std::mutex> g(mu_);
-            std::string s = "v" KWIQ_PLUGIN_VERSION " | " + std::string(enabled_ ? "enabled" : "DISABLED (too old)") +
+            std::string s = "v" KWIQ_PLUGIN_BUILD " | " + std::string(enabled_ ? "enabled" : "DISABLED (too old)") +
                 " | EuroScope " + (esVersion_.empty() ? std::string("?") : esVersion_) +
                 " | API key " + (apiKey_.empty() ? std::string("not set") : std::string("connected")) + WineNote() +
                 " | RDF " + (rdf_.DrawOn() ? "on" : "off") + ", TrackAudio " + kwiq::TrackAudioStateText(rdf_.TrackAudio()) +
@@ -2060,7 +2060,7 @@ private:
         std::string nonDiscrete = Trim(c.Get("squawk.non_discrete", "2000")), nonDiscreteVfr = Trim(c.Get("squawk.non_discrete_vfr", "7000"));
 
         std::string minV = c.Get("plugin.min_version", "0.0.0"), updUrl = c.Get("plugin.update_url");
-        bool tooOld = CompareVersions(KWIQ_PLUGIN_VERSION, minV) < 0;
+        bool tooOld = BelowMinimum(KWIQ_PLUGIN_VERSION, minV);
         tooOld_ = tooOld;
         u.alertOn = c.GetBool("alert.enabled", true);
         u.flashSec = c.GetInt("alert.flash_seconds", 10, 0, 60);

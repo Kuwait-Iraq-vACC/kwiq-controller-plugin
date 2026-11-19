@@ -31,8 +31,23 @@ set(KWIQ_OWN_SOURCES KWIQPlugin.cpp keylink.cpp loader.cpp updater.cpp rdf.cpp d
 set_source_files_properties(${KWIQ_OWN_SOURCES} PROPERTIES COMPILE_OPTIONS "/W4")
 # WIN32_LEAN_AND_MEAN is empty, as VCH's stdafx.h defines it, so it is never redefined (C4005)
 set(KWIQ_DEFINITIONS WIN32_LEAN_AND_MEAN= _CRT_SECURE_NO_WARNINGS)
-# Set by GitHub Actions to its run number, so each build has its own version (0.6.0.42)
-set(KWIQ_BUILD_NUMBER 0 CACHE STRING "Build number added to the plugin version")
+# The version is KWIQ_VERSION in version.h (Semantic Versioning). GitHub Actions passes the version it builds
+# (KWIQ_VERSION, or <version>-pr.<number>.<run> for a pull request) and build metadata (<run>.<commit>); they go
+# into kwiq_build.h in the build folder, which version.h includes. A local build has neither.
+set(KWIQ_BUILD_VERSION "" CACHE STRING "The SemVer version being built; empty: KWIQ_VERSION from version.h")
+set(KWIQ_BUILD_METADATA "" CACHE STRING "SemVer build metadata, e.g. 115.a1b2c3d; never compared")
+set(KWIQ_BUILD_H "// kwiq_build.h - written by CMakeLists.txt from what CI passes; see version.h\n")
+if(KWIQ_BUILD_VERSION)
+    string(APPEND KWIQ_BUILD_H "#define KWIQ_BUILD_VERSION \"${KWIQ_BUILD_VERSION}\"\n")
+endif()
+if(KWIQ_BUILD_METADATA)
+    string(APPEND KWIQ_BUILD_H "#define KWIQ_BUILD_METADATA \"${KWIQ_BUILD_METADATA}\"\n")
+endif()
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/kwiq_build.h CONTENT "${KWIQ_BUILD_H}" @ONLY)
+# Not kept in the cache: each configure takes only what it's given, so a build folder configured once by hand
+# with -DKWIQ_BUILD_VERSION doesn't keep that version
+unset(KWIQ_BUILD_VERSION CACHE)
+unset(KWIQ_BUILD_METADATA CACHE)
 
 # KWIQPluginCore.dll: the plugin itself
 add_library(KWIQPluginCore SHARED
@@ -48,9 +63,9 @@ add_library(KWIQPluginCore SHARED
     usefulStuff.cpp      # VCH
 )
 
-target_include_directories(KWIQPluginCore PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(KWIQPluginCore PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_include_directories(KWIQPluginCore SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libs)
-target_compile_definitions(KWIQPluginCore PRIVATE ${KWIQ_DEFINITIONS} KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
+target_compile_definitions(KWIQPluginCore PRIVATE ${KWIQ_DEFINITIONS})
 target_link_libraries(KWIQPluginCore PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/libs/EuroScopePlugInDll.lib
     CURL::libcurl
@@ -71,16 +86,16 @@ set_target_properties(KWIQPluginCore PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugi
 
 # KWIQPluginUpdater.dll: keeps the plugin and itself up to date
 add_library(KWIQPluginUpdater SHARED updater.cpp)
-target_include_directories(KWIQPluginUpdater PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(KWIQPluginUpdater PRIVATE ${KWIQ_DEFINITIONS} NOMINMAX KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
+target_include_directories(KWIQPluginUpdater PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_compile_definitions(KWIQPluginUpdater PRIVATE ${KWIQ_DEFINITIONS} NOMINMAX)
 target_link_libraries(KWIQPluginUpdater PRIVATE winhttp shell32)
 set_target_properties(KWIQPluginUpdater PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginUpdater")
 
 # KWIQPlugin.dll: the one file in the packages, loaded by EuroScope
 add_library(KWIQPlugin SHARED loader.cpp)
-target_include_directories(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_include_directories(KWIQPlugin SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libs)
-target_compile_definitions(KWIQPlugin PRIVATE ${KWIQ_DEFINITIONS} NOMINMAX KWIQ_BUILD_NUMBER=${KWIQ_BUILD_NUMBER})
+target_compile_definitions(KWIQPlugin PRIVATE ${KWIQ_DEFINITIONS} NOMINMAX)
 target_link_libraries(KWIQPlugin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libs/EuroScopePlugInDll.lib winhttp)
 set_target_properties(KWIQPlugin PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugin")
 
@@ -94,7 +109,7 @@ foreach(h IN LISTS KWIQ_HEADERS)
     list(APPEND KWIQ_HEADER_CHECKS ${CMAKE_CURRENT_BINARY_DIR}/header_check/${n}.cpp)
 endforeach()
 add_library(KWIQHeaderCheck OBJECT ${KWIQ_HEADER_CHECKS})
-target_include_directories(KWIQHeaderCheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(KWIQHeaderCheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)   # version.h as CI builds it
 target_include_directories(KWIQHeaderCheck SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libs)
 target_compile_definitions(KWIQHeaderCheck PRIVATE ${KWIQ_DEFINITIONS})
 target_compile_options(KWIQHeaderCheck PRIVATE /W4)
