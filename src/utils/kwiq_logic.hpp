@@ -515,7 +515,7 @@ inline std::vector<size_t> SrdSearch(const SrdData& d, const std::string& adep, 
 
 
 // ---- Sector indicators -------------------------------------------------------
-// Core /api/plugin/sectors (plain text):  SECTOR|<ESE position ID>|<alias, max 4 chars>
+// Core /api/plugin/sectors (plain text):  SECTOR|<ESE position ID>|<alias, max 4 chars>|<sector file>
 // Only the positions Core lists get an indicator, and the alias is what controllers see on the radar
 // (e.g. BS -> SR for ORBB_S_CTR). The ID is the one in the ESE's [POSITIONS], as EuroScope gives it.
 // ESE position IDs are per sector file (the same ID can be a different position in OKAC's and ORBB's ESE),
