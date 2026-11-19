@@ -134,6 +134,7 @@ inline bool DeliveryByMe(const TopDown& td, const std::string& airport, const st
 struct User {
     bool controller = false;          // logged on as a controller (not an observer), live or sweatbox
     std::string callsign;             // e.g. OKBK_TWR
+    bool sweatbox = false;            // on a sweatbox server: aircraft spawn anywhere with 2000
 };
 struct Aircraft {
     std::string callsign, origin, destination, squawk;          // squawk: the one controllers assigned
@@ -145,31 +146,52 @@ struct Aircraft {
 // What the plugin remembers about a flight plan, so a pilot who reconnects gets the same code back
 struct Stored {
     std::string origin, destination, squawk;
-    bool byHand = false;              // a controller set the code by hand: leave it alone
+    bool byHand = false;              // a controller set the code by hand (menu or EuroScope): leave it alone
     std::time_t expires = 0;          // 0 while connected; disconnected plans are forgotten after STORED_SECONDS
+    bool vfr = false;
+    bool planChanged = false;         // departure, destination or rules changed since the code was set: a code
+                                      // Core holds for the callsign may be for the old plan, so ask for a new one
 };
 
 constexpr int UNTRACKED_MAX_SPEED = 30;               // kt: untracked aircraft only get a code on the ground
 constexpr double UNTRACKED_MAX_FROM_ORIGIN = 7.0;     // nm
 constexpr int LOGIN_DELAY_SECONDS = 15;               // nothing automatic straight after logging on
 constexpr int STORED_SECONDS = 600;
+// Shown while Core is asked (UKCP StartSquawkUpdate). It is never a code: an aircraft showing it still needs one,
+// and seeing it set on another scope only means that scope's plugin is asking.
+constexpr const char* HOLDING_SQUAWK = "7000";
+
+// The aircraft has a code the plugin should not replace: Core's rule, and not the holding code
+inline bool HasCode(const CodeList& codes, const std::string& s) {
+    return s != HOLDING_SQUAWK && HasAssignedSquawk(codes, s);
+}
 
 inline bool Possible(const User& u, const Aircraft& a) {
     // All zeros: EuroScope sends flight plan events for aircraft it has no position for yet
     return u.controller && a.fromOrigin != 0.0 && a.altitude != 0;
 }
 // UKCP GeneralAssignmentNeeded: no code yet, and either tracked by the user or waiting on the ground at an
-// airport the user gives departures their squawk
+// airport the user gives departures their squawk. On sweatbox, where aircraft spawn anywhere (often in the air)
+// with 2000, also any aircraft nobody tracks.
 inline bool AssignmentNeeded(const User& u, const Aircraft& a, const CodeList& codes) {
-    if (!Possible(u, a) || HasAssignedSquawk(codes, a.squawk)) return false;
+    if (!Possible(u, a) || HasCode(codes, a.squawk)) return false;
     if (a.trackedByMe) return true;
+    if (u.sweatbox && !a.tracked) return true;
     return a.groundSpeed <= UNTRACKED_MAX_SPEED && a.fromOrigin <= UNTRACKED_MAX_FROM_ORIGIN && a.deliveryByMe;
 }
-// The departure or destination changed since the plan was stored: a code Core holds for it may be for the old one
-inline bool ForceNeeded(const Stored* s, const Aircraft& a) {
-    return s && (s->origin != a.origin || s->destination != a.destination);
+// The plan differs from the one stored (a plan never stored with a departure or destination is new, not changed)
+inline bool PlanDiffers(const Stored& s, const Aircraft& a) {
+    if (s.origin.empty() && s.destination.empty()) return false;
+    return s.origin != a.origin || s.destination != a.destination || s.vfr != a.vfr;
 }
-// Reconnected with the same plan: give it back the code it had (UKCP also needs no change of plan here)
+// The departure, destination or flight rules changed since the code was set: a code Core holds for the callsign
+// may be for the old plan. Stays until a code is set, so a change seen while nothing could be done isn't lost.
+inline bool ForceNeeded(const Stored* s, const Aircraft& a) {
+    return s && (s->planChanged || PlanDiffers(*s, a));
+}
+// Reconnected with the same plan: ask Core for the code it holds, so a code it has since given to someone else is
+// never handed back; if it holds none, a code set by hand comes back, else a new one (UKCP sets the old code back
+// without asking)
 inline bool PreviousNeeded(const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
     return AssignmentNeeded(u, a, codes) && s && HasAssignedSquawk(codes, s->squawk) && !ForceNeeded(s, a);
 }
@@ -185,6 +207,42 @@ inline Action Decide(const User& u, const Aircraft& a, const Stored* s, const Co
     if (s && s->byHand && !ForceNeeded(s, a)) return Action::None;
     if (AssignmentNeeded(u, a, codes)) return Action::Assign;
     return Action::None;
+}
+
+// ---- what the plugin remembers (UKCP StoredFlightplan) -------------------------------------------
+// Every look at a flight plan. A new plan makes the plugin automatic again for it (UKCP: until the plan changes).
+inline void Remember(Stored& st, const Aircraft& a) {
+    if (PlanDiffers(st, a)) { st.byHand = false; st.planChanged = true; }
+    st.origin = a.origin;
+    st.destination = a.destination;
+    st.vfr = a.vfr;
+    st.expires = 0;
+    if (st.squawk.empty() && ValidSquawk(a.squawk)) st.squawk = a.squawk;   // a code it had before the plugin saw it
+}
+// The plugin sets a code (Core's, a previous one, or one the controller chose in the menu)
+inline void CodeSet(Stored& st, const std::string& code, bool byHand) {
+    st.squawk = code;
+    st.byHand = byHand;
+    st.planChanged = false;
+}
+// EuroScope reports a code. One the plugin didn't set was set by a controller, here (typed in EuroScope) or on
+// another scope: leave it alone like a code set from the menu. Ignored: a cleared or invalid code, the holding
+// code, anything while the pilot is disconnected (so the code to give back survives a reconnect), and on sweatbox
+// a code that is no code (aircraft spawn with 2000).
+inline void CodeSeen(Stored& st, const std::string& code, const CodeList& codes, bool sweatbox) {
+    if (st.expires || code == st.squawk || !ValidSquawk(code) || code == HOLDING_SQUAWK) return;
+    if (sweatbox && !HasAssignedSquawk(codes, code)) return;
+    st.squawk = code;
+    st.byHand = true;
+    st.planChanged = false;
+}
+// Core's answer arrived: set it only if it is still wanted. One the controller asked for: if they may still change
+// the code. An automatic one: also only if the aircraft still has no code and no controller has set one by hand
+// meanwhile (UKCP sets it regardless and can overwrite a code someone set while the request was out).
+inline bool AnswerWanted(bool manual, const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
+    if (!ChangeAllowed(u, a)) return false;
+    if (manual) return true;
+    return !HasCode(codes, a.squawk) && !(s && s->byHand);
 }
 
 // ---- Core ------------------------------------------------------------------------------------------

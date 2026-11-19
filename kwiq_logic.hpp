@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -244,6 +245,31 @@ inline SrdData ParseSrd(const std::string& body) {
     BuildSrd(d);
     return d;
 }
+// A VOR or NDB ident (BGD, KI): 2 or 3 letters. Waypoints have 5 and airways have digits.
+inline bool IsNavaidIdent(const std::string& s) {
+    if (s.size() < 2 || s.size() > 3) return false;
+    for (char c : s) if (!std::isalpha((unsigned char)c)) return false;
+    return true;
+}
+// An SRD row's route against the filed one. The Iraq AIP's routes start or end at the aerodrome's VOR
+// (ORBI: BGD DCT NOLDO B411 PAXAT), which pilots who file a SID or STAR leave out, so a navaid at an end of the
+// row that is an airport is optional there (#9). Anywhere else it is still required. `skipped`: the navaids left out.
+inline bool SrdRowMatches(const SrdRoute& r, const std::vector<std::string>& filed, std::string* skipped = nullptr) {
+    if (skipped) skipped->clear();
+    if (MatchTokens(r.tokens, filed)) return true;
+    const auto& t = r.tokens;
+    bool front = t.size() > 1 && IsAirportCode(r.adep) && IsNavaidIdent(t.front());
+    bool back = t.size() > 1 && IsAirportCode(r.ades) && IsNavaidIdent(t.back());
+    auto tryRange = [&](size_t from, size_t to, const std::string& left) {
+        if (from >= to || !MatchTokens(std::vector<std::string>(t.begin() + (std::ptrdiff_t)from, t.begin() + (std::ptrdiff_t)to), filed))
+            return false;
+        if (skipped) *skipped = left;
+        return true;
+    };
+    if (front && tryRange(1, t.size(), t.front())) return true;
+    if (back && tryRange(0, t.size() - 1, t.back())) return true;
+    return front && back && tryRange(1, t.size() - 1, t.front() + " and " + t.back());
+}
 inline std::string FlStr(int ft) {
     char b[16];
     std::snprintf(b, sizeof b, "FL%03d", ft / 100);
@@ -370,7 +396,7 @@ inline SrdResult CheckSrd(const SrdData& d, const std::string& adep, const std::
     SrdResult lvl = SrdResult::None;
     for (size_t i : c) {
         const auto& r = d.rows[i];
-        if (!MatchTokens(r.tokens, filed)) continue;
+        if (!SrdRowMatches(r, filed)) continue;
         routeOk = true;
         if (rflFt > 0 && r.minLvl && rflFt < r.minLvl) { if (lvl == SrdResult::None) lvl = SrdResult::Min; }
         else if (rflFt > 0 && r.maxLvl && rflFt > r.maxLvl) { if (lvl == SrdResult::None) lvl = SrdResult::Max; }
@@ -392,13 +418,24 @@ inline std::string ExplainSrd(const SrdData& d, const std::string& adep, const s
     case SrdResult::None:  return head + (exit.external.empty() && exit.internal.empty()
                                               ? "no SRD route defined for this pair."
                                               : "no SRD route defined for this pair or its FIR exit.");
-    case SrdResult::Ok:    return head + "route and level conform to the SRD.";
+    case SrdResult::Ok: {
+        // say when the aerodrome VOR was left out: only when no row matched with it filed
+        std::string skipped, left;
+        for (size_t i : c) {
+            const auto& r = d.rows[i];
+            if (!SrdRowMatches(r, filed, &skipped)) continue;
+            if (rflFt > 0 && ((r.minLvl && rflFt < r.minLvl) || (r.maxLvl && rflFt > r.maxLvl))) continue;
+            if (skipped.empty()) { left.clear(); break; }
+            if (left.empty()) left = skipped;
+        }
+        return head + "route and level conform to the SRD" + (left.empty() ? "." : " (" + left + " not filed).");
+    }
     case SrdResult::Min:
     case SrdResult::Max: {
         std::string s = head + "route is valid but the level is outside the SRD limits. Allowed:";
         for (size_t i : c) {
             const auto& r = d.rows[i];
-            if (!MatchTokens(r.tokens, filed)) continue;
+            if (!SrdRowMatches(r, filed)) continue;
             s += " [" + (r.minLvl ? FlStr(r.minLvl) : std::string("any")) + " to " +
                  (r.maxLvl ? FlStr(r.maxLvl) : std::string("any")) + "]";
         }
@@ -1243,5 +1280,29 @@ inline void PremultiplyBgra(unsigned char* px, size_t count) {
         for (int c = 0; c < 3; c++) px[i * 4 + c] = (unsigned char)((px[i * 4 + c] * a + 127) / 255);
     }
 }
+
+
+// EuroScope reports one KWIQ menu choice to both the radar screen and the plugin: it must act once, or a switch
+// goes off and straight back on. The repeat comes as soon as the first report returns, and for SRD Search and
+// Event Routes that is when their window is closed, since they're modal. So a repeat is held back while the
+// first is still running and for 500 ms from when it finished, not from when it came in (`now` is GetTickCount).
+class MenuOnce {
+public:
+    static constexpr std::uint32_t kRepeatMs = 500;
+    bool Begin(int id, std::uint32_t now) {
+        if (running_) return false;
+        if (id == lastId_ && now - lastAt_ < kRepeatMs) return false;
+        running_ = true;
+        lastId_ = id;
+        lastAt_ = now;
+        return true;
+    }
+    void End(std::uint32_t now) { running_ = false; lastAt_ = now; }
+
+private:
+    bool running_ = false;
+    int lastId_ = 0;
+    std::uint32_t lastAt_ = 0;
+};
 
 } // namespace kwiq

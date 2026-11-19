@@ -10,7 +10,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 | SRD Search dialog | `kwiq.rc`, `kwiq_res.h` | The UK Controller Plugin's `IDD_SRD_SEARCH` dialog template (`resource/UKControllerPlugin.rc`), https://github.com/VATSIM-UK/uk-controller-plugin; the Event Routes dialog (`IDD_EVENT_ROUTES`) is laid out from it | GPL-3.0 |
 | Flight plan check | `fpc_logic.hpp` | Adapted from VFPC, https://github.com/hpeter2/VFPC (from https://github.com/DrFreas/VFPC, Jan Fries): `analyzeFP.cpp` | GPL-3.0 |
 | Squawk assignment rules | `squawk_logic.hpp`, and the squawk section of `KWIQPlugin.cpp` | Adapted from the UK Controller Plugin, https://github.com/VATSIM-UK/uk-controller-plugin (`src/plugin/squawk`) | GPL-3.0 |
-| KWIQ code | `KWIQPlugin.cpp`, `kwiq_logic.hpp`, `kwiq_win.hpp`, `loader.cpp`, `updater.cpp`, `keylink.*`, `push.*`, `version.h`, `tests/` | Kuwait & Iraq vACC | GPL-3.0-or-later |
+| KWIQ code | `KWIQPlugin.cpp`, `kwiq_ui.*`, `kwiq_logic.hpp`, `kwiq_win.hpp`, `loader.cpp`, `updater.cpp`, `keylink.*`, `push.*`, `version.h`, `tests/` | Kuwait & Iraq vACC | GPL-3.0-or-later |
 | Loader / updater design | `loader.cpp`, `updater.cpp`, `kwiq_win.hpp` | Follows the UK Controller Plugin's loader, updater and core layout (https://github.com/VATSIM-UK/uk-controller-plugin); written for this plugin, no UKCP code copied | GPL-3.0 |
 | libcurl (linked, from vcpkg) | - | https://curl.se (Daniel Stenberg and contributors) | curl licence (MIT style) |
 | JSON for Modern C++ (header only, from vcpkg) | - | https://github.com/nlohmann/json (Niels Lohmann) | MIT |
@@ -32,9 +32,13 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - Codes come from Core (`/api/plugin/squawk-assignment/<callsign>`) instead of the UKCP API. Requests are form fields and answers are plain text (`SQUAWK|<code>`), like the rest of Core's plugin API.
 - UKCP's general and local code types are one request: Core picks the range from the requesting controller's FIR, the departure, the destination and the flight rules. The UK's circuit code and local codes are gone.
 - No code is built in: the codes never assigned, and which of them count as a code the aircraft has (UKCP's `HasAssignedSquawk`), come from Core's `/squawk/non-assignable`.
-- UKCP's conspicuity option is Non-discrete, with the codes (2000, 7000 for VFR) set in Core. No code is held while Core is asked; an aircraft Core could not give a code is not asked for again for a minute.
+- UKCP's conspicuity option is Conspicuity, with the codes (2000, 7000 for VFR) set in Core, and its general recycle is Recycle. The holding code 7000 is shown while Core is asked, as in UKCP, but is never taken as a code; a failed Recycle goes back to the old code. An aircraft Core could not give a code is not asked for again for a minute.
+- A reconnecting aircraft's old code is not set back straight away: Core is asked first, and only a code set by hand (which Core never held) comes back without it.
+- On sweatbox, any aircraft nobody tracks gets a code, as aircraft spawn anywhere with 2000.
 - Who gives departures their squawk comes from Core's top-down order (`/api/plugin/topdown`) instead of UKCP's airfield ownership.
-- A reconnecting aircraft only gets its old code back if its departure and destination are unchanged; a code set by hand is left alone until they change.
+- A reconnecting aircraft only gets its old code back if its departure, destination and flight rules are unchanged; a code set by hand is left alone until they change. A change of plan is remembered until a code is set (UKCP compares with the stored plan only at that moment), and the flight rules count as the plan, as Core picks the range from them.
+- A code typed in EuroScope, or set on another scope, counts as set by hand, like one from the menu (UKCP replaces a typed 2000 or 7000 on its next pass).
+- Core's answer is only set if it is still wanted: not if another controller has started tracking the aircraft, or a code was set, while the request was out (UKCP sets it regardless). A by-hand change while a request is out is refused with a message instead of being ignored.
 - Requests say whether they are from the live network or sweatbox.
 
 ## Changes made to the Slots-Plugin code

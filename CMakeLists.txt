@@ -27,7 +27,7 @@ target_link_libraries(discord-rpc PRIVATE rapidjson advapi32 psapi)
 # Warnings (#41): KWIQ's own sources are built at /W4, and CI fails on any warning in them. Vendored code
 # (VCH, the Slots-Plugin's VatsimAPI.cpp) keeps the default level. Headers from libs/ and vcpkg are external
 # (SYSTEM, so /external:I and /external:W0), so their warnings never count.
-set(KWIQ_OWN_SOURCES KWIQPlugin.cpp keylink.cpp loader.cpp updater.cpp rdf.cpp discord.cpp push.cpp)
+set(KWIQ_OWN_SOURCES KWIQPlugin.cpp kwiq_ui.cpp keylink.cpp loader.cpp updater.cpp rdf.cpp discord.cpp push.cpp)
 set_source_files_properties(${KWIQ_OWN_SOURCES} PROPERTIES COMPILE_OPTIONS "/W4")
 # WIN32_LEAN_AND_MEAN is empty, as VCH's stdafx.h defines it, so it is never redefined (C4005)
 set(KWIQ_DEFINITIONS WIN32_LEAN_AND_MEAN= _CRT_SECURE_NO_WARNINGS)
@@ -52,6 +52,7 @@ unset(KWIQ_BUILD_METADATA CACHE)
 # KWIQPluginCore.dll: the plugin itself
 add_library(KWIQPluginCore SHARED
     KWIQPlugin.cpp
+    kwiq_ui.cpp          # the windows: SRD Search, Event Routes, the API key setup box, Notifications
     VatsimAPI.cpp
     keylink.cpp          # receives the API key from myKWIQ
     kwiq.rc              # the SRD Search and Event Routes dialogs, and the KWIQ button's logo (kwiq_res.h)
@@ -101,7 +102,7 @@ set_target_properties(KWIQPlugin PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugin")
 
 # Each KWIQ header must compile on its own (#41), e.g. windows.h before EuroScopePlugIn.h: one generated .cpp
 # per header, built at /W4 with the plugin's definitions. Nothing is linked from it.
-set(KWIQ_HEADERS kwiq_logic.hpp kwiq_win.hpp keylink.hpp VatsimAPI.h version.h rdf.hpp discord.hpp push.hpp)
+set(KWIQ_HEADERS kwiq_logic.hpp kwiq_win.hpp kwiq_ui.hpp keylink.hpp VatsimAPI.h version.h rdf.hpp discord.hpp push.hpp)
 set(KWIQ_HEADER_CHECKS "")
 foreach(h IN LISTS KWIQ_HEADERS)
     string(MAKE_C_IDENTIFIER "${h}" n)

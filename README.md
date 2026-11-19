@@ -102,6 +102,8 @@ The SRD item checks the filed route and level against the SRD rows for the fligh
 2. For a flight whose destination is outside the vACC's airspace (not `srd.domestic_prefixes`, default `OK,OR`), rows from its departure airport to the point where it leaves the airspace, as the UK Controller Plugin does. If there are none for that point, rows to the point where it leaves OKAC for ORBB or the other way round.
 3. Otherwise, en-route rows whose two ends are both on the filed route.
 
+The Iraq AIP's routes start or end at the aerodrome's VOR (ORBI: `BGD DCT NOLDO B411 PAXAT`, ORMM: `TASMI G795 BSR`), which pilots who file a SID or STAR leave out. So a navaid (2 or 3 letters) at an end of a row that is an airport is optional there: `NOLDO1A NOLDO B411 PAXAT` matches the row above, and **Explain SRD result** says `(BGD not filed)`. A navaid anywhere else in the row is still required.
+
 Where a flight leaves the airspace comes from Core's FIR exit points, `/api/plugin/fir-exits`, one line per exit cone: `EXIT|<point>|<from heading>|<to heading>|<internal 0 or 1>`. A point can have several cones, one per direction (a point on the OKAC/ORBB boundary is crossed both ways), so the same point on several lines is several cones, each with its own internal flag; identical lines count once. A route leaves at a point if its track from there to the next point is inside any of its cones, and if two of that point's cones overlap at that track, the external one is used. An example is `EXIT|ROTAP|300|060|0`. A flight leaves at the first listed point on its route (EuroScope's extracted route) whose track to the next point lies in one of that point's exit cones, each from one heading clockwise to the other. Internal points are on the OKAC and ORBB boundary, and count only before the flight leaves the vACC's airspace. With no exit points in Core (or a 404), only steps 1 and 3 apply.
 
 **Explain SRD result** names the exit point it used, and **Open SRD search window** fills in the exit point as the destination for such a flight. `.kwiq status` shows how many exit points Core sent (distinct points, not cones).
@@ -115,20 +117,22 @@ Where a flight leaves the airspace comes from Core's FIR exit points, `/api/plug
 **Search Results** lists every matching route: **Min** (`MC` when there is no minimum), **Max** (`-` when there is no limit), **FRA** (whether the route has Free Route Airspace, `<FRA>`, in it) and the **Route String**. Click a route to see its **Notes**, then **Copy Route String To Clipboard**. Tab moves between the boxes and Esc or **Close** closes the window. EuroScope keeps running while it is open.
 
 ## Flight plan check (FPC)
-The FPC item is VFPC (hpeter2/VFPC, from DrFreas/VFPC) built in, with the rules the vACC keeps in VFPC's `Sid.json` served by Core instead of a file. It is separate from the SRD check. Rules are per departure airport and per SID, by the SID's first waypoint (`SESRU` for SESRU1A). They are tried from top to bottom, and the first one the flight fits decides, so the narrowest rules go first.
+The FPC item is VFPC (hpeter2/VFPC, from DrFreas/VFPC) built in, with the rules the vACC keeps in VFPC's `Sid.json` served by Core instead of a file. It is separate from the SRD check. Rules are per departure airport and per SID, by the SID's first waypoint (`SESRU` for SESRU1A), or by the aerodrome's VOR (ORBB's rules are all keyed on it: `BGD`, `BSR`, `RER`, `KIR`, `SUL`, `ALI`). They are tried from top to bottom, and the first one the flight fits decides, so the narrowest rules go first.
+
+When the SID's first waypoint has no rules at the airport, or the flight plan has no SID yet (EuroScope only sets one once a runway is active), the rules are found by the route instead: first those of a point on the filed route, then any rule whose `airways` the route follows. So an ORBI departure on `NOLDO1A NOLDO B411 PAXAT` is checked against BGD's `NOLDO B411 PAXAT` rule, and **Explain FPC result** says `rules for BGD by the route`. A SID that has rules of its own is only checked against those.
 
 | Field | Kind | What it does | Fails as |
 |---|---|---|---|
 | `suffix` | filter | the rule is only for that SID suffix, e.g. `1A` | |
 | `destinations` | filter | only for these destinations; a prefix covers all of them (`OM`) | |
-| `airways` | filter | only if the route has one of these, an airway or a run of route elements (`NAMDI M860 NINVA`, DCT ignored) | |
+| `airways` | filter | only if the route has one of these, an airway or a run of route elements (`NAMDI M860 NINVA`, DCT inside a run ignored); `DCT` on its own means the route has a DCT | |
 | `engine` | check | engine type one of `P`, `T`, `J`, `E` | `ENG` |
-| `direction` | check | `EVEN`, `ODD` or `ANY` cruising level | `E/O` |
+| `direction` | check | `EVEN`, `ODD` or `ANY` cruising level; above FL410, FL410/450/490 are odd and FL430/470/510 even | `E/O` |
 | `min_fl`, `max_fl` | check | lowest and highest flight level | `MIN`, `MAX` |
 | `forbidden_fls` | check | flight levels not allowed | `FLR`, yellow (`ui.colour_warn`) when it is the only failure |
 | `navigation` | check | equipment codes allowed, e.g. `RG` | `NAV` |
 
-No SID in the flight plan, a SID with no rules, or no rule that fits the flight is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked. `.kwiq status` shows how many airports have rules.
+No rule that fits the flight (by its SID or its route) is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked. `.kwiq status` shows how many airports have rules.
 
 Core serves the rules at `/api/plugin/fpc`, one line per rule in order (a 404 means none):
 `FPC|<airport>|<sid>|<suffix>|<direction>|<min_fl>|<max_fl>|<forbidden_fls>|<destinations>|<airways>|<engine>|<navigation>`. Lists are comma separated and an empty field is no restriction, e.g. `FPC|ORBI|BGD||EVEN|80|600|250,260||DELMI DCT RUKAM B411 MURIB||`. The existing `Sid.json` files (OKAC `OKAC/Plugins/VFPC/Sid.json`, ORBB `.data/VFPC/*.json`) map onto it field for field.
@@ -139,11 +143,14 @@ Squawks are allocated by Core, so two controllers never hand out the same code. 
 **Automatic**: checked on every flight plan update and every 5 seconds, not in the first 15 seconds after logging on, for aircraft with no code that nobody else tracks. Which codes count as none comes from Core: a code on its non-assignable list with "counts as assigned" off (default and non-discrete codes such as 1200, 2000, 2200 and 7000) is replaced; an emergency code (7500, 7600, 7700) counts as a code and is never replaced:
 - **Untracked, on the ground** (30 kt or less, within 7 nm of the departure airport): only from the controller who gives that airport's departures their squawk, the lowest position online in Core's top-down order for the airport (`TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR`). An airport with no top-down order in Core is covered only by its own DEL, GND, TWR and APP.
 - **Tracked by the user**: any aircraft with no code.
-- **Reconnects**: a pilot who reconnects within 10 minutes with the same departure and destination gets their previous code back.
+- **Sweatbox**: aircraft spawn anywhere, often in the air, with 2000, so there any aircraft nobody tracks gets a code (the 2000 they spawn with is never taken as set by hand).
+- **Reconnects**: a pilot who reconnects within 10 minutes with the same departure, destination and flight rules: Core is asked first, and the code it still holds for them comes back. If it holds none, a code a controller set by hand comes back, otherwise they get a new one (so a code Core has since given to someone else is never handed back).
 
-If Core cannot give a code, the error is shown once and that aircraft is not asked for again for a minute.
+While Core is asked, the aircraft shows the holding code 7000, as in UKCP. It is never taken as a code: an aircraft showing it still needs one, and 7000 seen from another scope only means that scope is asking (so 7000 typed in EuroScope is not by hand; use **Conspicuity** in the menu). If Core gives nothing, a Recycle goes back to the code the aircraft had; otherwise 7000 stays and the aircraft is asked for again a minute later.
 
-**By hand**: **Open squawk assignment menu** offers Assign (a new code from Core, also **Force squawk recycle**), Non-discrete (`squawk.non_discrete`, default 2000, or `squawk.non_discrete_vfr`, default 7000, for VFR) and Manual (type a code). Setting a code by hand releases the one Core held, and the plugin leaves that aircraft alone until its departure or destination changes. Only for aircraft the user tracks or nobody tracks.
+When the departure, destination or flight rules change, the next code is a new one from Core (not one it holds for the old plan), even if the change was seen while nothing could be done. A code Core sends is only set if it is still wanted: not if someone else has started tracking the aircraft, or set a code, while Core was answering. If Core cannot give a code, the error is shown once and that aircraft is not asked for again for a minute.
+
+**By hand**: **Open squawk assignment menu** offers Recycle (a new code from Core, also **Force squawk recycle**), Conspicuity (by flight rules: `squawk.conspicuity`, default 2000, for IFR, `squawk.conspicuity_vfr`, default 7000, for VFR) and Manual (type a code). Setting a code from the menu releases the one Core held. A code set from the menu, typed in EuroScope, or set by a controller on another scope counts as by hand: the plugin leaves that aircraft alone (a 2000 typed in EuroScope is not replaced; on sweatbox it is) until its departure, destination or flight rules change. Only for aircraft the user tracks or nobody tracks.
 
 **Core API**, all under `/api/plugin`, with the same `X-KWIQ-Key` and `X-KWIQ-Version` headers as the rest. Every request carries `?network=live` or `?network=sweatbox`, and Core keeps the two apart.
 
@@ -155,7 +162,7 @@ If Core cannot give a code, the error is shown once and that aircraft is not ask
 | `GET /squawk/non-assignable` | the codes Core never assigns, fetched with the config: `NONASSIGNABLE\|<first>\|<last>\|<category>\|<counts as assigned 0/1>\|<description>`, a single code with first = last. Kept in memory only; no list (unreachable on the first start, 404, or no valid rows) keeps squawks off |
 | `GET /topdown` | one `TOPDOWN\|<airport>\|<position>,<position>,...` line per airport, lowest position first (refreshed with the SRD) |
 
-Errors may carry `ERROR|<message>` in the body, which the plugin shows. A code Core answers with that is on its own non-assignable list is ignored. Config keys: `squawk.enabled` (default 0), `squawk.non_discrete` (default 2000), `squawk.non_discrete_vfr` (default 7000).
+Errors may carry `ERROR|<message>` in the body, which the plugin shows. A code Core answers with that is on its own non-assignable list is ignored. Config keys: `squawk.enabled` (default 0), `squawk.conspicuity` (default 2000), `squawk.conspicuity_vfr` (default 7000); the old names `squawk.non_discrete` and `squawk.non_discrete_vfr` are still read when the new ones are not set.
 
 ## Tests
 `g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic && ./test_logic`

@@ -3,10 +3,12 @@
 // SRD Search (#56): the UK Controller Plugin's IDD_SRD_SEARCH dialog (resource/UKControllerPlugin.rc,
 // https://github.com/VATSIM-UK/uk-controller-plugin, GPL-3.0), with the same controls, layout, styles and font.
 // A standard Windows dialog, opened modally with DialogBoxParam and owned by EuroScope's active window,
-// as UKCP opens it, so it looks and behaves like EuroScope's own dialogues.
+// as UKCP opens it, so it looks and behaves like EuroScope's own dialogues. A little larger than UKCP's
+// (389 x 372 instead of 309 x 312), with the extra room going to the results list and the notes.
 //
 // Event Routes (#61): the same kind of dialog, with SRD Search's font, styles, margins, results list and
 // copy button: today's routes for Core's event, and Copy Route String To Clipboard for the one selected.
+// 369 wide, a little wider than SRD Search was, for the longer route strings.
 //
 // The KWIQ button's logo (#59): kwiq_logo.png scaled down by kwiq_logo.ps1 to each size the button is drawn
 // at, as 32-bit BMPs with alpha. Kept as RCDATA so the bytes are loaded exactly as written; KWIQPlugin.cpp
@@ -18,12 +20,12 @@
 
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
 
-IDD_SRD_SEARCH DIALOGEX 0, 0, 309, 312
+IDD_SRD_SEARCH DIALOGEX 0, 0, 389, 372
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "SRD Search"
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
-    PUSHBUTTON      "Close", IDOK, 254, 291, 50, 14
+    PUSHBUTTON      "Close", IDOK, 334, 351, 50, 14
     EDITTEXT        IDC_SRD_ORIGIN, 98, 5, 71, 14, ES_UPPERCASE | ES_AUTOHSCROLL
     LTEXT           "Origin Fix or Airfield*", IDC_SRD_ORIGIN_STATIC, 7, 8, 68, 8
     EDITTEXT        IDC_SRD_DESTINATION, 98, 24, 71, 14, ES_UPPERCASE | ES_AUTOHSCROLL
@@ -31,23 +33,23 @@ BEGIN
     EDITTEXT        IDC_SRD_CRUISE, 98, 43, 72, 14, ES_AUTOHSCROLL | ES_NUMBER
     LTEXT           "Cruising Altitude or Level", IDC_SRD_CRUISE_STATIC, 7, 46, 80, 8
     LTEXT           "* Required Field", IDC_SRD_REQUIRED_STATIC, 213, 27, 52, 8
-    CONTROL         "", IDC_SRD_RESULTS, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 7, 85, 295, 90
+    CONTROL         "", IDC_SRD_RESULTS, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 7, 85, 375, 120
     DEFPUSHBUTTON   "Search", IDC_SRD_SEARCH, 59, 61, 50, 14
-    LTEXT           "Search Results", IDC_SRD_RESULTS_STATIC, 130, 76, 48, 8
-    EDITTEXT        IDC_SRD_NOTES, 7, 187, 295, 101, ES_MULTILINE | ES_AUTOHSCROLL | ES_READONLY | WS_VSCROLL | WS_HSCROLL
-    LTEXT           "Notes", IDC_SRD_NOTES_STATIC, 144, 178, 20, 8
-    PUSHBUTTON      "Copy Route String To Clipboard", IDC_SRD_ROUTE_COPY, 7, 291, 110, 14, WS_DISABLED
+    LTEXT           "Search Results", IDC_SRD_RESULTS_STATIC, 170, 76, 48, 8
+    EDITTEXT        IDC_SRD_NOTES, 7, 217, 375, 131, ES_MULTILINE | ES_AUTOHSCROLL | ES_READONLY | WS_VSCROLL | WS_HSCROLL
+    LTEXT           "Notes", IDC_SRD_NOTES_STATIC, 184, 208, 20, 8
+    PUSHBUTTON      "Copy Route String To Clipboard", IDC_SRD_ROUTE_COPY, 7, 351, 110, 14, WS_DISABLED
 END
 
-IDD_EVENT_ROUTES DIALOGEX 0, 0, 309, 193
+IDD_EVENT_ROUTES DIALOGEX 0, 0, 369, 193
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "KWIQ Event Routes"
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
     LTEXT           "Routes for Today (UTC)", IDC_EVT_ROUTES_STATIC, 7, 7, 120, 8
-    CONTROL         "", IDC_EVT_ROUTES, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 7, 18, 295, 150
+    CONTROL         "", IDC_EVT_ROUTES, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 7, 18, 355, 150
     PUSHBUTTON      "Copy Route String To Clipboard", IDC_EVT_ROUTE_COPY, 7, 172, 110, 14, WS_DISABLED
-    PUSHBUTTON      "Close", IDOK, 254, 172, 50, 14
+    PUSHBUTTON      "Close", IDOK, 314, 172, 50, 14
 END
 
 IDR_KWIQ_LOGO_28 RCDATA "kwiq_logo_28.bmp"

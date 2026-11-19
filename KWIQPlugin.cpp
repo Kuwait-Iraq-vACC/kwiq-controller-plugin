@@ -28,8 +28,6 @@
 #include <mmsystem.h>       // PlaySound (link winmm)
 #include <shellapi.h>       // ShellExecute
 #include <winver.h>         // GetFileVersionInfo (link version)
-#include <commctrl.h>       // the SRD search results list (link comctl32)
-#include "kwiq_res.h"         // kwiq.rc: the SRD Search dialog
 #include "requestMenu.hpp"      // CVCHPlugin (VCH)
 #include "kwiq_logic.hpp"
 #include "fpc_logic.hpp"
@@ -39,6 +37,7 @@
 #include "rdf.hpp"                // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
 #include "discord.hpp"            // DiscordEuroScope (Kirollos/DiscordEuroScope), built in
 #include "push.hpp"               // Core's push events (Laravel Reverb), as UKCP gets its own
+#include "kwiq_ui.hpp"            // the windows: SRD Search, Event Routes, the API key setup box, Notifications
 #define KWIQ_NO_WINHTTP
 #include "kwiq_win.hpp"           // api-settings.json and the folders the loader uses
 #include "kwiq_res.h"             // kwiq.rc: the KWIQ button's logo
@@ -112,441 +111,6 @@ enum {
     KWIQ_MENU_SQUAWK       = 2115,   // automatic squawk assignment on or off
     KWIQ_MENU_LAST         = KWIQ_MENU_SQUAWK
 };
-
-// ---------------------------------------------------------------------------
-// Windows (plain Win32, no MFC): event routes list (Copy button per row), and the SRD Search dialog (kwiq.rc)
-// ---------------------------------------------------------------------------
-namespace kwiq_ui {
-
-enum { SRD_MAX_RESULTS = 500 };
-static const int M = 10, GAP = 6, ROWH = 24;                    // the Notifications window's margin, gap and row height
-
-static HMODULE gMod = nullptr;
-// SRD Search: the routes for an origin, a destination and a level (the plugin's data from Core)
-static std::vector<kwiq::SrdRoute> (*gOnSearch)(const std::string&, const std::string&, const std::string&) = nullptr;
-
-static void CopyToClipboard(HWND owner, const std::string& text) {
-    if (!OpenClipboard(owner)) return;
-    EmptyClipboard();
-    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
-    if (h) {
-        void* p = GlobalLock(h);
-        if (p) {
-            std::memcpy(p, text.c_str(), text.size() + 1);
-            GlobalUnlock(h);
-            if (!SetClipboardData(CF_TEXT, h)) GlobalFree(h);
-        } else GlobalFree(h);
-    }
-    CloseClipboard();
-}
-
-// The work area of the screen EuroScope is on (its largest visible window), so windows open in the
-// middle of that screen rather than the main one
-static BOOL CALLBACK LargestOwnWindow(HWND h, LPARAM l) {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(h, &pid);
-    RECT r;
-    if (pid != GetCurrentProcessId() || !IsWindowVisible(h) || !GetWindowRect(h, &r)) return TRUE;
-    auto* best = (std::pair<HWND, long long>*)l;
-    long long area = (long long)(r.right - r.left) * (r.bottom - r.top);
-    if (area > best->second) *best = { h, area };
-    return TRUE;
-}
-static RECT EuroScopeScreen() {
-    std::pair<HWND, long long> best = { nullptr, 0 };
-    EnumWindows(LargestOwnWindow, (LPARAM)&best);
-    MONITORINFO mi; mi.cbSize = sizeof(mi);
-    HMONITOR mon = best.first ? MonitorFromWindow(best.first, MONITOR_DEFAULTTONEAREST) : MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
-    if (GetMonitorInfoA(mon, &mi)) return mi.rcWork;
-    RECT wa; SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
-    return wa;
-}
-static void Centre(int ww, int wh, int& x, int& y) {
-    RECT wa = EuroScopeScreen();
-    x = wa.left + ((wa.right - wa.left) - ww) / 2;
-    y = wa.top + ((wa.bottom - wa.top) - wh) / 2;
-}
-
-static HWND Child(const char* cls, const char* text, DWORD style, int x, int y, int w, int h,
-                  HWND parent, int id = 0) {
-    HWND c = CreateWindowExA(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
-                             (HMENU)(INT_PTR)id, gMod, nullptr);
-    SendMessageA(c, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-    return c;
-}
-
-// SRD Search: the UK Controller Plugin's dialog (IDD_SRD_SEARCH in kwiq.rc, SrdSearchDialog.cpp), opened
-// the way UKCP opens it: DialogBoxParam, modal, owned by EuroScope's active window (#56). Origin and
-// destination are required; the results (Min, Max, FRA, Route String), the chosen route's notes, and Copy
-// Route String To Clipboard. Enter searches (Search is the default button), Esc or Close closes it.
-struct SrdDialog {
-    std::string adep, ades, lvl;                 // filled in from the flight plan, or empty
-    std::vector<kwiq::SrdRoute> results;
-};
-static std::string DlgText(HWND d, int id) { char b[256] = {}; GetDlgItemTextA(d, id, b, sizeof b); return kwiq::Trim(b); }
-static void AddColumn(HWND list, int i, const char* text, int width) {
-    LVCOLUMNA c = {};
-    c.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
-    c.fmt = LVCFMT_LEFT;
-    c.cx = width;
-    c.pszText = (LPSTR)text;
-    c.iSubItem = i;
-    SendMessageA(list, LVM_INSERTCOLUMNA, (WPARAM)i, (LPARAM)&c);
-}
-static void SetCell(HWND list, int row, int col, const std::string& text) {
-    LVITEMA it = {};
-    it.mask = LVIF_TEXT;
-    it.iItem = row;
-    it.iSubItem = col;
-    it.pszText = (LPSTR)text.c_str();
-    SendMessageA(list, col == 0 ? LVM_INSERTITEMA : LVM_SETITEMA, 0, (LPARAM)&it);
-}
-// Every result; "No routes found" when there are none (as UKCP)
-static void SrdShowResults(HWND d, SrdDialog& s) {
-    HWND list = GetDlgItem(d, IDC_SRD_RESULTS);
-    SendMessageA(list, LVM_DELETEALLITEMS, 0, 0);
-    SetDlgItemTextA(d, IDC_SRD_NOTES, "");
-    SetDlgItemTextA(d, IDC_SRD_ROUTE_COPY, "Copy Route String To Clipboard");
-    EnableWindow(GetDlgItem(d, IDC_SRD_ROUTE_COPY), FALSE);
-    if (s.results.empty()) {
-        SetCell(list, 0, 0, "0");
-        SetCell(list, 0, 1, "0");
-        SetCell(list, 0, 2, "0");
-        SetCell(list, 0, 3, "No routes found");
-        return;
-    }
-    for (int i = 0; i < (int)s.results.size(); i++) {
-        SetCell(list, i, 0, kwiq::SrdMinText(s.results[i]));
-        SetCell(list, i, 1, kwiq::SrdMaxText(s.results[i]));
-        SetCell(list, i, 2, kwiq::HasFreeRoute(s.results[i].rte) ? "Yes" : "No");
-        SetCell(list, i, 3, s.results[i].rte);
-    }
-}
-static void SrdRunSearch(HWND d, SrdDialog& s) {
-    std::string adep = DlgText(d, IDC_SRD_ORIGIN), ades = DlgText(d, IDC_SRD_DESTINATION);
-    if (adep.empty() || ades.empty()) {                      // both are required, as in UKCP
-        s.results.clear();
-        SrdShowResults(d, s);
-        SetDlgItemTextA(d, IDC_SRD_NOTES, "Enter both the origin and the destination (a fix or an airfield).");
-        return;
-    }
-    s.results = gOnSearch ? gOnSearch(adep, ades, DlgText(d, IDC_SRD_CRUISE)) : std::vector<kwiq::SrdRoute>();
-    SrdShowResults(d, s);
-}
-// Called by Windows inside DialogBoxParam, so nothing may escape from it
-static INT_PTR CALLBACK SrdDialogProc(HWND d, UINT m, WPARAM w, LPARAM l) {
-    try {
-        SrdDialog* s = (SrdDialog*)GetWindowLongPtrW(d, DWLP_USER);
-        switch (m) {
-        case WM_INITDIALOG: {
-            s = (SrdDialog*)l;
-            SetWindowLongPtrW(d, DWLP_USER, (LONG_PTR)s);
-            HWND list = GetDlgItem(d, IDC_SRD_RESULTS);
-            SendMessageA(list, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
-            RECT cols = { 0, 0, 25, 0 };                         // UKCP's columns, in dialog units
-            MapDialogRect(d, &cols);
-            AddColumn(list, 0, "Min", cols.right);
-            AddColumn(list, 1, "Max", cols.right);
-            AddColumn(list, 2, "FRA", cols.right);
-            AddColumn(list, 3, "Route String", 900);
-            SetDlgItemTextA(d, IDC_SRD_ORIGIN, s->adep.c_str());
-            SetDlgItemTextA(d, IDC_SRD_DESTINATION, s->ades.c_str());
-            SetDlgItemTextA(d, IDC_SRD_CRUISE, s->lvl.c_str());
-            if (!s->adep.empty() && !s->ades.empty()) SrdRunSearch(d, *s);   // opened from a flight plan: search at once
-            SetFocus(GetDlgItem(d, s->adep.empty() ? IDC_SRD_ORIGIN : s->ades.empty() ? IDC_SRD_DESTINATION : IDC_SRD_CRUISE));
-            return FALSE;                                        // the focus is set
-        }
-        case WM_COMMAND:
-            if (!s) return FALSE;
-            switch (LOWORD(w)) {
-            case IDC_SRD_SEARCH: SrdRunSearch(d, *s); return TRUE;
-            case IDC_SRD_ROUTE_COPY: {
-                int i = (int)SendDlgItemMessageA(d, IDC_SRD_RESULTS, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
-                if (i >= 0 && i < (int)s->results.size()) {
-                    CopyToClipboard(d, s->results[i].rte);
-                    SetDlgItemTextA(d, IDC_SRD_ROUTE_COPY, "Copied");
-                }
-                return TRUE;
-            }
-            case IDOK: case IDCANCEL: EndDialog(d, 0); return TRUE;   // Close, Esc and the title bar's X
-            }
-            return FALSE;
-        case WM_NOTIFY: {
-            // a route picked in the results: its notes, and it can be copied
-            NMHDR* nh = (NMHDR*)l;
-            if (!s || nh->idFrom != IDC_SRD_RESULTS || nh->code != LVN_ITEMCHANGED) return FALSE;
-            NMLISTVIEW* nv = (NMLISTVIEW*)l;
-            if (!(nv->uNewState & LVIS_SELECTED) || (nv->uOldState & LVIS_SELECTED)) return FALSE;
-            if (nv->iItem < 0 || nv->iItem >= (int)s->results.size()) return FALSE;
-            SetDlgItemTextA(d, IDC_SRD_NOTES, kwiq::SrdNotesText(s->results[nv->iItem]).c_str());
-            SetDlgItemTextA(d, IDC_SRD_ROUTE_COPY, "Copy Route String To Clipboard");
-            EnableWindow(GetDlgItem(d, IDC_SRD_ROUTE_COPY), TRUE);
-            return TRUE;
-        }
-        }
-    } catch (...) {}
-    return FALSE;
-}
-// Before either dialog opens: the list view class, and this DLL (the dialogs are in its resources)
-static void PrepareDialog() {
-    static bool commonControls = false;
-    if (!commonControls) {
-        INITCOMMONCONTROLSEX ic = { sizeof(ic), ICC_LISTVIEW_CLASSES };
-        commonControls = InitCommonControlsEx(&ic) != FALSE;
-    }
-    if (!gMod)
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)&SrdDialogProc, &gMod);
-}
-static void ShowSrd(const std::string& adep, const std::string& ades, const std::string& lvl) {
-    PrepareDialog();
-    SrdDialog s{ adep, ades, lvl, {} };
-    DialogBoxParamW(gMod, MAKEINTRESOURCEW(IDD_SRD_SEARCH), GetActiveWindow(), SrdDialogProc, (LPARAM)&s);
-}
-
-// Event Routes (#61): the same kind of dialog as SRD Search (IDD_EVENT_ROUTES in kwiq.rc), opened the same way.
-// Today's routes for Core's event (Airports, Route String); the one selected is copied with Copy Route String
-// To Clipboard, which then says "Copied". With none, the list says so. Esc or Close closes it.
-struct EventRoutesDialog {
-    std::string title;                           // "KWIQ Event Routes - <event> - <date>Z"
-    std::vector<kwiq::EventRoute> rows;
-};
-static INT_PTR CALLBACK EventRoutesDialogProc(HWND d, UINT m, WPARAM w, LPARAM l) {
-    try {
-        EventRoutesDialog* s = (EventRoutesDialog*)GetWindowLongPtrW(d, DWLP_USER);
-        switch (m) {
-        case WM_INITDIALOG: {
-            s = (EventRoutesDialog*)l;
-            SetWindowLongPtrW(d, DWLP_USER, (LONG_PTR)s);
-            SetWindowTextA(d, s->title.c_str());
-            HWND list = GetDlgItem(d, IDC_EVT_ROUTES);
-            SendMessageA(list, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
-            RECT cols = { 0, 0, 70, 0 };                         // dialog units, as SRD Search's columns
-            MapDialogRect(d, &cols);
-            AddColumn(list, 0, "Airports", cols.right);
-            AddColumn(list, 1, "Route String", 900);
-            if (s->rows.empty()) {
-                SetCell(list, 0, 0, "");
-                SetCell(list, 0, 1, "No event routes for today (UTC).");
-            }
-            for (int i = 0; i < (int)s->rows.size(); i++) {
-                SetCell(list, i, 0, kwiq::EventRouteAirports(s->rows[i]));
-                SetCell(list, i, 1, s->rows[i].rte);
-            }
-            SetFocus(list);
-            return FALSE;                                        // the focus is set
-        }
-        case WM_COMMAND:
-            if (!s) return FALSE;
-            switch (LOWORD(w)) {
-            case IDC_EVT_ROUTE_COPY: {
-                int i = (int)SendDlgItemMessageA(d, IDC_EVT_ROUTES, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
-                if (i >= 0 && i < (int)s->rows.size()) {
-                    CopyToClipboard(d, s->rows[i].rte);
-                    SetDlgItemTextA(d, IDC_EVT_ROUTE_COPY, "Copied");
-                }
-                return TRUE;
-            }
-            case IDOK: case IDCANCEL: EndDialog(d, 0); return TRUE;   // Close, Enter, Esc and the title bar's X
-            }
-            return FALSE;
-        case WM_NOTIFY: {
-            // a route selected: it can be copied
-            NMHDR* nh = (NMHDR*)l;
-            if (!s || nh->idFrom != IDC_EVT_ROUTES || nh->code != LVN_ITEMCHANGED) return FALSE;
-            NMLISTVIEW* nv = (NMLISTVIEW*)l;
-            if (!(nv->uNewState & LVIS_SELECTED) || (nv->uOldState & LVIS_SELECTED)) return FALSE;
-            bool route = nv->iItem >= 0 && nv->iItem < (int)s->rows.size();
-            SetDlgItemTextA(d, IDC_EVT_ROUTE_COPY, "Copy Route String To Clipboard");
-            EnableWindow(GetDlgItem(d, IDC_EVT_ROUTE_COPY), route ? TRUE : FALSE);
-            return TRUE;
-        }
-        }
-    } catch (...) {}
-    return FALSE;
-}
-static void ShowEvent(const std::string& title, const std::vector<kwiq::EventRoute>& rows) {
-    PrepareDialog();
-    EventRoutesDialog s{ title, rows };
-    DialogBoxParamW(gMod, MAKEINTRESOURCEW(IDD_EVENT_ROUTES), GetActiveWindow(), EventRoutesDialogProc, (LPARAM)&s);
-}
-
-// ---- Message boxes ---------------------------------------------------------------------------------
-// Every popup is a plain Windows message box, shown the way the UK Controller Plugin shows its own
-// (kwiq_win::Box: MessageBoxW, owned by EuroScope's active window, on EuroScope's thread) (#55).
-// The one exception is the API key setup: it waits while the controller signs in to myKWIQ, up to the
-// 15 minutes the listener waits, so it runs on a thread of its own and EuroScope keeps going. It is
-// not owned by EuroScope, so MB_SETFOREGROUND | MB_TOPMOST keep it in front. OK opens the page again
-// and the box comes back until the key arrives; the plugin then closes it, so it can't be dismissed (#18).
-class KeySetupBox {
-public:
-    ~KeySetupBox() { Close(); }
-    bool Open() const { return running_; }
-    void Show() {
-        if (running_) return;
-        if (thread_.joinable()) thread_.join();
-        closing_ = false;
-        reopen_ = false;
-        running_ = true;
-        thread_ = std::thread(&KeySetupBox::Run, this);
-    }
-    // True once after each OK: the plugin opens myKWIQ's page again (main thread)
-    bool TakeReopen() { return reopen_.exchange(false); }
-    // Closes the box (OK, as if clicked) and waits for its thread, which takes a few milliseconds
-    void Close() {
-        closing_ = true;
-        while (running_) {                       // the box may not be up yet: ask until the thread ends
-            DWORD id = threadId_;
-            if (id) EnumThreadWindows(id, CloseBox, 0);
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        if (thread_.joinable()) thread_.join();
-    }
-
-private:
-    static BOOL CALLBACK CloseBox(HWND h, LPARAM) { PostMessageW(h, WM_COMMAND, IDOK, 0); return TRUE; }
-    void Run() {
-        threadId_ = GetCurrentThreadId();
-        try {
-            while (!closing_) {
-                MessageBoxW(nullptr,
-                            L"Sign in to myKWIQ in your browser and click Connect EuroScope. The link is also on your "
-                            L"clipboard.\r\n\r\nThis message closes once your API key is connected. Select OK to open the "
-                            L"page again.\r\n\r\nNeed help? discord.kuwait-iraqvacc.net",
-                            L"KWIQ API Key Setup", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
-                if (!closing_) reopen_ = true;
-            }
-        } catch (...) {}
-        running_ = false;
-    }
-    std::thread thread_;
-    std::atomic<bool> running_{ false }, closing_{ false }, reopen_{ false };
-    std::atomic<DWORD> threadId_{ 0 };
-};
-static KeySetupBox gKeyBox;
-
-static void ShowKeyPrompt() { gKeyBox.Show(); }
-static bool KeyPromptOpen() { return gKeyBox.Open(); }
-static bool KeyPromptReopen() { return gKeyBox.TakeReopen(); }
-static void CloseKeyPrompt() { gKeyBox.Close(); }
-
-// ---- Procedure notifications window (KWIQ menu > Notifications) --------------------------------
-// The list on the left (unread first marked *), the selected one's text on the right, and Mark read /
-// Mark unread and Open link below. Read state is kept in Core per API key.
-static const char* const kNoticesClass = "KWIQNoticesWnd";
-static bool gNoticesReg = false;
-enum { NT_W = 720, NT_H = 420, NT_LIST = 250, ID_NT_LIST = 3500, ID_NT_READ = 3501, ID_NT_LINK = 3502, ID_NT_CLOSE = 3503 };
-struct NoticesWin {
-    HWND hwnd = nullptr, list = nullptr, title = nullptr, text = nullptr, bRead = nullptr, bLink = nullptr;
-    std::vector<kwiq::ProcedureNotice> items;
-    std::string selId;
-};
-static NoticesWin gNotices;
-static void (*gOnMarkRead)(const std::string& id, bool read) = nullptr;
-
-static void NoticesShowSelected() {
-    NoticesWin& w = gNotices;
-    int i = (int)SendMessageA(w.list, LB_GETCURSEL, 0, 0);
-    const kwiq::ProcedureNotice* n = i >= 0 && i < (int)w.items.size() ? &w.items[i] : nullptr;
-    w.selId = n ? n->id : "";
-    SetWindowTextA(w.title, n ? (n->title + (n->published.empty() ? "" : "   (" + n->published + ")")).c_str() : "No notification selected.");
-    SetWindowTextA(w.text, n ? n->text.c_str() : "");
-    SetWindowTextA(w.bRead, n && n->read ? "Mark unread" : "Mark read");
-    EnableWindow(w.bRead, n != nullptr);
-    EnableWindow(w.bLink, n && kwiq::IsWebLink(n->link));         // only a web page is ever opened (#44)
-}
-static void NoticesFill() {
-    NoticesWin& w = gNotices;
-    if (!w.hwnd) return;
-    SendMessageA(w.list, LB_RESETCONTENT, 0, 0);
-    int sel = w.items.empty() ? -1 : 0;
-    for (size_t i = 0; i < w.items.size(); i++) {
-        std::string row = std::string(w.items[i].read ? "   " : "*  ") + w.items[i].title;
-        SendMessageA(w.list, LB_ADDSTRING, 0, (LPARAM)row.c_str());
-        if (w.items[i].id == w.selId) sel = (int)i;
-    }
-    if (w.items.empty()) SendMessageA(w.list, LB_ADDSTRING, 0, (LPARAM)"   No notifications for your position.");
-    SendMessageA(w.list, LB_SETCURSEL, w.items.empty() ? -1 : sel, 0);
-    NoticesShowSelected();
-}
-static LRESULT CALLBACK NoticesProc(HWND h, UINT m, WPARAM wp, LPARAM l) {
-    NoticesWin& w = gNotices;
-    switch (m) {
-    case WM_COMMAND: {
-        int id = LOWORD(wp);
-        if (id == ID_NT_LIST && HIWORD(wp) == LBN_SELCHANGE) NoticesShowSelected();
-        else if (id == ID_NT_CLOSE) DestroyWindow(h);
-        else if (HIWORD(wp) == BN_CLICKED) {
-            for (auto& n : w.items) {
-                if (n.id != w.selId) continue;
-                if (id == ID_NT_LINK && kwiq::IsWebLink(n.link)) ShellExecuteA(nullptr, "open", n.link.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-                if (id == ID_NT_READ) {
-                    n.read = !n.read;                    // shown at once; Core is told in the background
-                    if (gOnMarkRead) gOnMarkRead(n.id, n.read);
-                    NoticesFill();
-                }
-                break;
-            }
-        }
-        return 0;
-    }
-    case WM_CLOSE: DestroyWindow(h); return 0;
-    case WM_DESTROY: if (h == w.hwnd) { w.hwnd = nullptr; w.list = w.title = w.text = w.bRead = w.bLink = nullptr; } return 0;
-    }
-    return DefWindowProcA(h, m, wp, l);
-}
-static void ShowNotices(const std::vector<kwiq::ProcedureNotice>& items) {
-    if (!gMod)
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)&NoticesProc, &gMod);
-    if (!gNoticesReg) {
-        WNDCLASSEXA wc; ZeroMemory(&wc, sizeof(wc));
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = NoticesProc;
-        wc.hInstance = gMod;
-        wc.hCursor = LoadCursorA(nullptr, MAKEINTRESOURCEA(32512));
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = kNoticesClass;
-        if (!RegisterClassExA(&wc)) return;
-        gNoticesReg = true;
-    }
-    gNotices.items = items;
-    if (gNotices.hwnd) { NoticesFill(); ShowWindow(gNotices.hwnd, SW_SHOW); SetForegroundWindow(gNotices.hwnd); return; }
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
-    RECT rc = { 0, 0, NT_W, NT_H };
-    AdjustWindowRectEx(&rc, style, FALSE, ex);
-    int ww = rc.right - rc.left, wh = rc.bottom - rc.top, x, y;
-    Centre(ww, wh, x, y);
-    HWND h = CreateWindowExA(ex, kNoticesClass, "KWIQ Notifications", style, x, y, ww, wh, nullptr, nullptr, gMod, nullptr);
-    if (!h) return;
-    NoticesWin& w = gNotices;
-    w.hwnd = h;
-    int bottom = NT_H - M - ROWH;
-    w.list = Child("LISTBOX", "", WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, M, M, NT_LIST, bottom - 2 * M, h, ID_NT_LIST);
-    int tx = M + NT_LIST + M, tw = NT_W - tx - M;
-    w.title = Child("STATIC", "", SS_LEFT | SS_ENDELLIPSIS, tx, M + 2, tw, ROWH - 4, h);
-    w.text = Child("EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, tx, M + ROWH, tw, bottom - 2 * M - ROWH, h);
-    w.bRead = Child("BUTTON", "Mark read", BS_PUSHBUTTON, tx, bottom, 110, ROWH, h, ID_NT_READ);
-    w.bLink = Child("BUTTON", "Open link", BS_PUSHBUTTON, tx + 110 + GAP, bottom, 110, ROWH, h, ID_NT_LINK);
-    Child("BUTTON", "Close", BS_PUSHBUTTON, NT_W - M - 90, bottom, 90, ROWH, h, ID_NT_CLOSE);
-    NoticesFill();
-    ShowWindow(h, SW_SHOW);
-    SetForegroundWindow(h);
-}
-// New data from Core while the window is open: keep the selection, update the rest
-static void UpdateNotices(const std::vector<kwiq::ProcedureNotice>& items) {
-    if (!gNotices.hwnd) return;
-    gNotices.items = items;
-    NoticesFill();
-}
-
-static void Shutdown() {
-    if (gNotices.hwnd) DestroyWindow(gNotices.hwnd);
-    if (gNoticesReg && gMod) { UnregisterClassA(kNoticesClass, gMod); gNoticesReg = false; }
-    gKeyBox.Close();                                     // its thread must end before the plugin does
-}
-
-} // namespace kwiq_ui
 
 class CKWIQPlugin;
 static CKWIQPlugin* gPlugin = nullptr;
@@ -1309,14 +873,14 @@ public:
         AddPopupListElement("Status", "", KWIQ_MENU_STATUS);
         AddPopupListElement("Hide Button", "", KWIQ_MENU_HIDE, false, EuroScopePlugIn::POPUP_ELEMENT_NO_CHECKBOX, false, true);
     }
-    void MenuAction(int id, const char*, POINT pt, RECT) {
-        // EuroScope can report one choice to both the radar screen and the plugin: act on it once,
-        // or a switch would go off and straight back on
-        static int lastId = 0;
-        static DWORD lastAt = 0;
-        DWORD tick = GetTickCount();
-        if (id == lastId && tick - lastAt < 500) return;
-        lastId = id; lastAt = tick;
+    void MenuAction(int id, const char* item, POINT pt, RECT area) {
+        // EuroScope reports one choice to both the radar screen and the plugin: act on it once (kwiq::MenuOnce),
+        // also when it opened SRD Search or Event Routes, whose repeat comes once the window is closed
+        if (!menuOnce_.Begin(id, GetTickCount())) return;
+        struct Finish { kwiq::MenuOnce& m; ~Finish() { m.End(GetTickCount()); } } finish{ menuOnce_ };
+        MenuChoice(id, item, pt, area);
+    }
+    void MenuChoice(int id, const char*, POINT pt, RECT) {
         switch (id) {
         case KWIQ_MENU_KEY:          StartKeySetup(); return;
         case KWIQ_MENU_SECTORS:      OnCompileCommand(".kwiq sector"); return;
@@ -1615,10 +1179,11 @@ private:
         std::string callsign, method, form, previous, network;
         bool lookupFirst = false;                                   // use a code Core already holds for it
         bool manual = false;                                        // the controller asked: say what went wrong
+        std::string fallback;                                       // a reconnect's code set by hand, if Core holds none
     };
     struct SqResult {
         std::string callsign, squawk, error, previous;
-        bool manual = false, released = false;
+        bool manual = false, released = false, byHand = false;
     };
     static constexpr std::time_t SQ_RETRY_SECONDS = 60;              // after Core could not give an aircraft a code
     // On with Core's squawk.enabled and its list of codes never to assign: there is no list built in
@@ -1647,6 +1212,7 @@ private:
             me.IsValid() && me.IsController()) {
             u.controller = true;
             u.callsign = kwiq::Upper(me.GetCallsign());
+            u.sweatbox = ct == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX;
         }
         return u;
     }
@@ -1664,10 +1230,10 @@ private:
         std::lock_guard<std::mutex> g(mu_);
         return sqTopDown_;
     }
-    // Core's non-discrete code for the flight rules (squawk.non_discrete, squawk.non_discrete_vfr)
-    std::string NonDiscreteCode(bool vfr) {
+    // Core's conspicuity code for the flight rules (squawk.conspicuity, squawk.conspicuity_vfr)
+    std::string ConspicuityCode(bool vfr) {
         std::lock_guard<std::mutex> g(mu_);
-        return vfr ? sqNonDiscreteVfr_ : sqNonDiscrete_;
+        return vfr ? sqConspicuityVfr_ : sqConspicuity_;
     }
 
     // What the rules need to know about an aircraft; false if it has no radar target yet
@@ -1691,17 +1257,22 @@ private:
         a.altitude = pos.GetFlightLevel();
         return true;
     }
-    void SetSquawk(EuroScopePlugIn::CFlightPlan& fp, const std::string& code, bool byHand) {
+    // Remembered first, so EuroScope's report of the new code is known to be the plugin's own
+    void SetSquawk(EuroScopePlugIn::CFlightPlan& fp, std::string code, bool byHand) {
+        kwiq::squawk::Aircraft a;
+        SquawkFacts(fp, kwiq::squawk::User{}, {}, kwiq::squawk::TopDown{}, a);
+        if (kwiq::squawk::Stored* st = SquawkStore(a)) kwiq::squawk::CodeSet(*st, code, byHand);
         fp.GetControllerAssignedData().SetSquawk(code.c_str());
-        auto it = sqStored_.find(fp.GetCallsign());
-        if (it != sqStored_.end()) { it->second.squawk = code; it->second.byHand = byHand; }
     }
     void SquawkQueue(SqJob job) {
         { std::lock_guard<std::mutex> g(sqMu_); sqJobs_.push_back(std::move(job)); }
         sqCv_.notify_one();
     }
-    // Ask Core for a code; it picks the range from the departure, destination and flight rules
-    bool SquawkRequest(const kwiq::squawk::Aircraft& a, bool lookupFirst, bool manual) {
+    // Ask Core for a code; it picks the range from the departure, destination and flight rules. The holding code
+    // shows while it answers (UKCP StartSquawkUpdate). EuroScope is told directly: the holding code is never
+    // remembered as the aircraft's code.
+    bool SquawkRequest(EuroScopePlugIn::CFlightPlan& fp, const kwiq::squawk::Aircraft& a, bool lookupFirst, bool manual,
+                       const std::string& fallback = "") {
         using namespace kwiq::squawk;
         if (!UrlSafeCallsign(a.callsign) || !sqBusy_.insert(a.callsign).second) return false;   // one request at a time
         SqJob job;
@@ -1710,9 +1281,19 @@ private:
         job.network = SquawkNetwork();
         job.lookupFirst = lookupFirst;
         job.manual = manual;
+        job.fallback = fallback;
+        job.previous = a.squawk;
         job.form = AssignForm(a, SquawkUser().callsign);            // Core picks the range from the requester's FIR
         SquawkQueue(std::move(job));
+        if (a.squawk != HOLDING_SQUAWK) fp.GetControllerAssignedData().SetSquawk(HOLDING_SQUAWK);
         return true;
+    }
+    // Core gave nothing usable: take the holding code off again if it is still showing and the aircraft had a code
+    // before (a Recycle that failed). With no code before, it stays: the aircraft is asked for again in a minute.
+    void SquawkUnhold(EuroScopePlugIn::CFlightPlan& fp, const std::string& previous) {
+        if (!fp.IsValid() || std::strcmp(fp.GetControllerAssignedData().GetSquawk(), kwiq::squawk::HOLDING_SQUAWK) != 0) return;
+        auto codes = SquawkCodes();
+        if (codes && kwiq::squawk::HasCode(*codes, previous)) fp.GetControllerAssignedData().SetSquawk(previous.c_str());
     }
     // Set a code by hand (non-discrete, manual) and give back the one Core held
     void SquawkReplace(EuroScopePlugIn::CFlightPlan& fp, const std::string& code) {
@@ -1723,45 +1304,44 @@ private:
             Msg("You can only change the squawk of an aircraft you track or nobody tracks.", true);
             return;
         }
-        if (!kwiq::squawk::UrlSafeCallsign(a.callsign) || !sqBusy_.insert(a.callsign).second) return;
+        if (!kwiq::squawk::UrlSafeCallsign(a.callsign)) return;
+        if (!sqBusy_.insert(a.callsign).second) {
+            Msg("Core is still answering for " + a.callsign + ": try again in a moment.", false);
+            return;
+        }
         SqJob job;
         job.callsign = a.callsign;
         job.method = "DELETE";
         job.network = SquawkNetwork();
         job.previous = a.squawk;
         job.manual = true;
-        SquawkStore(a.callsign, a.origin, a.destination);
         SetSquawk(fp, code, true);
         SquawkQueue(std::move(job));
     }
 
-    // UKCP SquawkEventHandler::AttemptAssignment, then remember the plan for a reconnect
+    // Remember the plan (a change is kept until a code is set), then UKCP SquawkEventHandler::AttemptAssignment
     void SquawkAttempt(EuroScopePlugIn::CFlightPlan& fp, const kwiq::squawk::User& u, const std::vector<std::string>& online,
                        const kwiq::squawk::TopDown& td, const kwiq::squawk::CodeList& codes, std::time_t now) {
         using namespace kwiq::squawk;
         Aircraft a;
         bool facts = SquawkFacts(fp, u, online, td, a);
-        auto it = sqStored_.find(a.callsign);
-        const Stored* s = it == sqStored_.end() ? nullptr : &it->second;
+        const Stored* s = SquawkStore(a);
         bool others = a.tracked && !a.trackedByMe;                  // theirs to give a code
         auto retry = sqRetryAt_.find(a.callsign);
         bool waiting = retry != sqRetryAt_.end() && now < retry->second;
         if (facts && !others && !waiting && sqLoggedIn_ && now - sqLoginAt_ >= LOGIN_DELAY_SECONDS) {
             switch (Decide(u, a, s, codes)) {
-            case Action::Previous: SetSquawk(fp, s->squawk, s->byHand); break;
-            case Action::Assign:   SquawkRequest(a, !ForceNeeded(s, a), false); break;
+            case Action::Previous: SquawkRequest(fp, a, true, false, s->byHand ? s->squawk : ""); break;
+            case Action::Assign:   SquawkRequest(fp, a, !ForceNeeded(s, a), false); break;
             case Action::None:     break;
             }
         }
-        SquawkStore(a.callsign, a.origin, a.destination);
     }
-    void SquawkStore(const std::string& callsign, const std::string& origin, const std::string& destination) {
-        if (callsign.empty()) return;
-        kwiq::squawk::Stored& st = sqStored_[callsign];
-        if (st.origin != origin || st.destination != destination) st.byHand = false;   // a new plan: automatic again
-        st.origin = origin;
-        st.destination = destination;
-        st.expires = 0;
+    kwiq::squawk::Stored* SquawkStore(const kwiq::squawk::Aircraft& a) {
+        if (a.callsign.empty()) return nullptr;
+        kwiq::squawk::Stored& st = sqStored_[a.callsign];
+        kwiq::squawk::Remember(st, a);
+        return &st;
     }
 
     void SquawkTick(std::time_t now) {
@@ -1790,7 +1370,7 @@ private:
         auto td = TopDownNow();
         for (auto fp = FlightPlanSelectFirst(); fp.IsValid(); fp = FlightPlanSelectNext(fp)) {
             const char* tracker = fp.GetTrackingControllerCallsign();
-            if (kwiq::squawk::HasAssignedSquawk(*codes, fp.GetControllerAssignedData().GetSquawk()) ||
+            if (kwiq::squawk::HasCode(*codes, fp.GetControllerAssignedData().GetSquawk()) ||
                 (tracker && *tracker && !fp.GetTrackingControllerIsMe())) continue;
             SquawkAttempt(fp, u, online, *td, *codes, now);
         }
@@ -1811,6 +1391,7 @@ private:
                 continue;
             }
             if (!r.error.empty()) {
+                SquawkUnhold(fp, r.previous);
                 sqRetryAt_[r.callsign] = now + SQ_RETRY_SECONDS;
                 if (r.manual) Msg("Core could not assign a squawk to " + r.callsign + ": " + r.error, true);
                 else SetError("Squawk", "Core could not assign squawks: " + r.error);
@@ -1818,7 +1399,21 @@ private:
             }
             ClearError("Squawk");
             sqRetryAt_.erase(r.callsign);
-            if (fp.IsValid()) SetSquawk(fp, r.squawk, false);
+            if (!fp.IsValid()) continue;
+            // Not if someone else took the aircraft, or set a code, while Core was answering
+            kwiq::squawk::User u = SquawkUser();
+            kwiq::squawk::Aircraft a;
+            SquawkFacts(fp, u, {}, kwiq::squawk::TopDown{}, a);
+            auto st = sqStored_.find(r.callsign);
+            auto codes = SquawkCodes();
+            const kwiq::squawk::CodeList none;
+            if (kwiq::squawk::AnswerWanted(r.manual, u, a, st == sqStored_.end() ? nullptr : &st->second, codes ? *codes : none)) {
+                SetSquawk(fp, r.squawk, r.byHand);
+                continue;
+            }
+            SquawkUnhold(fp, r.previous);
+            if (r.manual)
+                Msg("Core gave " + r.callsign + " " + r.squawk + ", but it was not set: you can no longer change its squawk.", true);
         }
     }
 
@@ -1862,6 +1457,8 @@ private:
             if (code == 200) r.squawk = kwiq::squawk::ParseSquawk(body, list);
             if (!r.squawk.empty()) return r;
             if (code != 200 && code != 404) { r.error = SquawkWhy(body, err); return r; }
+            // Core holds none: a reconnect's code set by hand comes back (Core never held it), else a new one
+            if (code == 404 && kwiq::squawk::ValidSquawk(job.fallback)) { r.squawk = job.fallback; r.byHand = true; return r; }
         }
         kwiq_net::HttpSend(job.method, url, job.form, body, err);
         if (!err.empty()) r.error = SquawkWhy(body, err);
@@ -1870,7 +1467,7 @@ private:
     }
 
     // ---- squawk menu and functions (main thread) ---------------------------------------------
-    // UKCP SquawkAssignmentMenu, without the UK's local and circuit codes: Assign, Non-discrete, Manual
+    // UKCP SquawkAssignmentMenu, without the UK's local and circuit codes: Recycle, Conspicuity, Manual
     bool SquawkTarget(EuroScopePlugIn::CFlightPlan& fp) {
         if (!SquawkOn()) { Msg("Squawk assignment is " + SquawkOffWhy() + ".", false); return false; }
         if (!SquawkUser().controller) { Msg("Squawks can only be assigned when logged on as a controller.", false); return false; }
@@ -1884,16 +1481,16 @@ private:
         if (tracker && *tracker && !fp.GetTrackingControllerIsMe()) return;
         bool vfr = std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0;
         OpenPopupList(area, "Assign Squawk", 1);
-        AddPopupListElement("Assign", "", KWIQ_FUNC_SQUAWK_PICK);
-        AddPopupListElement("Non-discrete", NonDiscreteCode(vfr).c_str(), KWIQ_FUNC_SQUAWK_PICK);
+        AddPopupListElement("Recycle", "", KWIQ_FUNC_SQUAWK_PICK);
+        AddPopupListElement("Conspicuity", ConspicuityCode(vfr).c_str(), KWIQ_FUNC_SQUAWK_PICK);
         AddPopupListElement("Manual", "", KWIQ_FUNC_SQUAWK_PICK);
     }
     void SquawkPick(const std::string& option, RECT area) {
         EuroScopePlugIn::CFlightPlan fp;
-        if (option == "Assign") SquawkForce();
+        if (option == "Recycle") SquawkForce();
         else if (!SquawkTarget(fp)) return;
-        else if (option == "Non-discrete")
-            SquawkReplace(fp, NonDiscreteCode(std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0));
+        else if (option == "Conspicuity")
+            SquawkReplace(fp, ConspicuityCode(std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0));
         else if (option == "Manual") {
             RECT box = { area.left, area.top, area.left + 50, area.top + 25 };
             OpenPopupEdit(box, KWIQ_FUNC_SQUAWK_MANUAL, fp.GetControllerAssignedData().GetSquawk());
@@ -1916,8 +1513,8 @@ private:
             Msg("You can only change the squawk of an aircraft you track or nobody tracks.", true);
             return;
         }
-        SquawkStore(a.callsign, a.origin, a.destination);
-        if (!SquawkRequest(a, false, true))
+        SquawkStore(a);
+        if (!SquawkRequest(fp, a, false, true))
             Msg("A squawk for " + a.callsign + " has already been asked for.", false);
     }
 
@@ -1931,14 +1528,19 @@ public:
             SquawkAttempt(fp, u, OnlineControllers(), *td, *codes, std::time(nullptr));
             return;
         }
-        auto d = fp.GetFlightPlanData();
-        SquawkStore(fp.GetCallsign(), kwiq::Upper(d.GetOrigin()), kwiq::Upper(d.GetDestination()));
+        kwiq::squawk::Aircraft a;
+        SquawkFacts(fp, u, {}, kwiq::squawk::TopDown{}, a);
+        SquawkStore(a);
     }
-    // A code someone set: the one to give back if the pilot reconnects
+    // A code someone set: the one to give back if the pilot reconnects. One the plugin didn't set is by hand.
     virtual void OnFlightPlanControllerAssignedDataUpdate(EuroScopePlugIn::CFlightPlan fp, int type) override {
         if (duplicate_ || type != EuroScopePlugIn::CTR_DATA_TYPE_SQUAWK || !fp.IsValid()) return;
         auto it = sqStored_.find(fp.GetCallsign());
-        if (it != sqStored_.end()) it->second.squawk = fp.GetControllerAssignedData().GetSquawk();
+        if (it == sqStored_.end()) return;
+        auto codes = SquawkCodes();
+        const kwiq::squawk::CodeList none;
+        kwiq::squawk::CodeSeen(it->second, fp.GetControllerAssignedData().GetSquawk(), codes ? *codes : none,
+                               GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX);
     }
     virtual void OnFlightPlanDisconnect(EuroScopePlugIn::CFlightPlan fp) override {
         if (duplicate_) return;
@@ -2057,7 +1659,9 @@ private:
         slotsEvery_ = c.GetInt("refresh.slots_s", 60, 15, 3600);
         if (!sectorUserSet_) sectorDraw_ = c.GetBool("ui.sector_enabled", true);
         sqEnabled_ = c.GetBool("squawk.enabled", false);
-        std::string nonDiscrete = Trim(c.Get("squawk.non_discrete", "2000")), nonDiscreteVfr = Trim(c.Get("squawk.non_discrete_vfr", "7000"));
+        // squawk.non_discrete(_vfr): the keys' old names, still read
+        std::string conspicuity = Trim(c.Get("squawk.conspicuity", c.Get("squawk.non_discrete", "2000"))),
+                    conspicuityVfr = Trim(c.Get("squawk.conspicuity_vfr", c.Get("squawk.non_discrete_vfr", "7000")));
 
         std::string minV = c.Get("plugin.min_version", "0.0.0"), updUrl = c.Get("plugin.update_url");
         bool tooOld = BelowMinimum(KWIQ_PLUGIN_VERSION, minV);
@@ -2096,8 +1700,8 @@ private:
             esUrl_ = Trim(c.Get("euroscope.setup_url", ES_SETUP_URL));
             if (!IsWebLink(esUrl_)) esUrl_ = ES_SETUP_URL;   // only a web page is ever opened (#44)
             esConfigured_ = true;
-            sqNonDiscrete_ = squawk::ValidSquawk(nonDiscrete) ? nonDiscrete : "2000";
-            sqNonDiscreteVfr_ = squawk::ValidSquawk(nonDiscreteVfr) ? nonDiscreteVfr : "7000";
+            sqConspicuity_ = squawk::ValidSquawk(conspicuity) ? conspicuity : "2000";
+            sqConspicuityVfr_ = squawk::ValidSquawk(conspicuityVfr) ? conspicuityVfr : "7000";
             if (domestic != domesticPrefixes_) { domesticPrefixes_ = domestic; exitGen_++; }
         }
         rdf_.SetEndpoint(c.Get("rdf.endpoint", "127.0.0.1:49080"));
@@ -2310,6 +1914,7 @@ private:
     std::atomic<int> coreEvery_{ 60 }, srdEvery_{ 300 }, slotsEvery_{ 60 };
     bool settingsLoaded_ = false;                                   // main thread only
     bool buttonShown_ = true;                                       // main thread only
+    kwiq::MenuOnce menuOnce_;                                       // main thread only: each menu choice acts once
     enum class ButtonPlace { Default, Offset, TopLeft };            // main thread only: how buttonOffset_ is meant
     ButtonPlace buttonPlace_ = ButtonPlace::Default;
     kwiq::ButtonXY buttonOffset_;
@@ -2371,7 +1976,7 @@ private:
     bool esConfigured_ = false;                                     // Core's config has arrived at least once
     std::map<std::string, std::string> lastErr_;
     std::shared_ptr<const kwiq::squawk::TopDown> sqTopDown_ = std::make_shared<const kwiq::squawk::TopDown>();   // squawks' copy (#42: one parser for both)
-    std::string sqNonDiscrete_ = "2000", sqNonDiscreteVfr_ = "7000";   // Core's squawk.non_discrete and squawk.non_discrete_vfr
+    std::string sqConspicuity_ = "2000", sqConspicuityVfr_ = "7000";   // Core's squawk.conspicuity and squawk.conspicuity_vfr
     std::shared_ptr<const kwiq::squawk::CodeList> sqCodes_;         // Core's /squawk/non-assignable; null = no list, squawks off
 
     // squawk assignment
