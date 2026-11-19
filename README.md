@@ -132,7 +132,7 @@ When the SID's first waypoint has no rules at the airport, or the flight plan ha
 | `forbidden_fls` | check | flight levels not allowed | `FLR`, yellow (`ui.colour_warn`) when it is the only failure |
 | `navigation` | check | equipment codes allowed, e.g. `RG` | `NAV` |
 
-No rule that fits the flight (by its SID or its route) is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked. `.kwiq status` shows how many airports have rules.
+No rule that fits the flight (by its SID or its route) is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked, in its own **KWIQ FPC** chat tab (opened if it is not open yet). `.kwiq status` shows how many airports have rules.
 
 Core serves the rules at `/api/plugin/fpc`, one line per rule in order (a 404 means none):
 `FPC|<airport>|<sid>|<suffix>|<direction>|<min_fl>|<max_fl>|<forbidden_fls>|<destinations>|<airways>|<engine>|<navigation>`. Lists are comma separated and an empty field is no restriction, e.g. `FPC|ORBI|BGD||EVEN|80|600|250,260||DELMI DCT RUKAM B411 MURIB||`. The existing `Sid.json` files (OKAC `OKAC/Plugins/VFPC/Sid.json`, ORBB `.data/VFPC/*.json`) map onto it field for field.

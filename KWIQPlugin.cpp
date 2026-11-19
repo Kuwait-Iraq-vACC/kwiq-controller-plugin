@@ -1165,9 +1165,10 @@ private:
         std::string msg;
         {
             std::lock_guard<std::mutex> g(mu_);
-            msg = "FPC: " + kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
+            msg = kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
         }
-        DisplayUserMessage("KWIQ Controller Plugin", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
+        // its own chat tab, "KWIQ FPC", opened (and flashed) when it is not open yet
+        DisplayUserMessage("KWIQ FPC", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
     }
 
     // ---- squawk assignment (main thread) ------------------------------------------------------
