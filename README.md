@@ -28,7 +28,7 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | KWIQ Controller Plugin / Event Route | green `OK` or red `CHK` on event days for event ADEP/ADES pairs |
 | ... / Event Flag | `EV` if the pilot has a VATCAN slot |
 | ... / Event Slot | the slot time |
-| ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV`; grey `-` when disabled with Open FPC menu |
+| ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV`; red `EVT` for an event flight off its event route; grey `-` when disabled with Open FPC menu |
 | ... / SRD | `OK`, `RTE`, `MIN` or `MAX` against the SRD |
 | ... / Sector Indicator | the alias of the position tracking the aircraft (also drawn above it) |
 | ... / RDF state | `!` while the aircraft transmits |
@@ -119,6 +119,10 @@ Where a flight leaves the airspace comes from Core's FIR exit points, `/api/plug
 The FPC item is VFPC (hpeter2/VFPC, from DrFreas/VFPC) built in, with the rules the vACC keeps in VFPC's `Sid.json` served by Core instead of a file. It is separate from the SRD check. Rules are per departure airport and per SID, by the SID's first waypoint (`SESRU` for SESRU1A), or by the aerodrome's VOR (ORBB's rules are all keyed on it: `BGD`, `BSR`, `RER`, `KIR`, `SUL`, `ALI`). They are tried from top to bottom, and the first one the flight fits decides, so the narrowest rules go first.
 
 When the SID's first waypoint has no rules at the airport, or the flight plan has no SID yet (EuroScope only sets one once a runway is active), the rules are found by the route instead: first those of a point on the filed route, then any rule whose `airways` the route follows. So an ORBI departure on `NOLDO1A NOLDO B411 PAXAT` is checked against BGD's `NOLDO B411 PAXAT` rule, and **Explain FPC result** says `rules for BGD by the route`. A SID that has rules of its own is only checked against those.
+
+The route is only checked up to the first FIR exit point on it (Core's FIR exits, internal or external, found as for the SRD), whatever the destination: what is filed after it isn't the vACC's to check. **Explain FPC result** then says `route checked up to FIR exit PAXAT`.
+
+**Event flights:** when the flight has an event route today (Core's event routes for its ADEP/ADES on that UTC day), the FPC item shows red `EVT` if the filed route isn't one of them exactly. Only these may differ: `DCT`, speed/level changes (`N0450F350`, `NOLDO/N0450F350`), a SID before the route and a STAR after it, and the aerodrome VOR at either end (as for the SRD). An extra point, a missing one or another order is `EVT`. This compares the whole route, not only up to the FIR exit. A flight on its event route shows the usual FPC result. The Event Route item keeps its looser check (`OK` while every event-route point is filed, in order). **Explain FPC result** says which event route was expected.
 
 | Field | Kind | What it does | Fails as |
 |---|---|---|---|

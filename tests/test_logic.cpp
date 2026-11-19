@@ -84,6 +84,27 @@ int main() {
     CHECK(CheckEventRoute(ev, "OKBK", "ORBI", "ABC UL123 XYZ", D) == RouteResult::Ok);
     CHECK(CheckEventRoute(ev, "OKBK", "ORBI", "QQQ", D) == RouteResult::Ok);
     CHECK(CheckEventRoute(ev, "OKBK", "ORBI", "ABC XYZ", D) == RouteResult::Check);
+    {   // the FPC's event check: exact, apart from DCT, speed/level changes, a SID/STAR and the aerodrome VOR
+        auto R = [](const char* s) { return NormaliseRoute(s); };
+        auto W = R("BGD DCT NOLDO B411 PAXAT");
+        CHECK(EventRouteExact(W, R("BGD DCT NOLDO B411 PAXAT")));
+        CHECK(EventRouteExact(W, R("NOLDO1A NOLDO B411 PAXAT")));                       // SID, VOR left out
+        CHECK(EventRouteExact(W, R("BGD NOLDO/N0450F350 B411 N0460F370 PAXAT")));       // speed/level changes
+        CHECK(EventRouteExact(W, R("NOLDO B411 PAXAT PAXAT1B")));                       // a STAR after it
+        CHECK(!EventRouteExact(W, R("BGD NOLDO B411 XYZ PAXAT")));                      // an extra point
+        CHECK(!EventRouteExact(W, R("BGD NOLDO B411")));                                // a point left out
+        CHECK(!EventRouteExact(W, R("BGD NOLDO B411 PAXAT ABCDE")));                    // more after it
+        CHECK(!EventRouteExact(W, R("BGD B411 NOLDO PAXAT")));                          // another order
+        CHECK(EventRouteExact(R("TASMI L602 LOVEK DCT BGD"), R("TASMI L602 LOVEK LOVEK1A")));  // STAR, VOR left out
+        CHECK(!EventRouteExact(R("NOLDO BGD B411 PAXAT"), R("NOLDO B411 PAXAT")));      // a VOR in the middle is required
+        CHECK(IsProcedureName("NOLDO1A") && IsProcedureName("BGD2") && !IsProcedureName("B411") && !IsProcedureName("NOLDO"));
+        std::string want;
+        CHECK(CheckEventRouteExact(ev, "OKBK", "ORBI", R("QQQ"), D) == RouteResult::Ok);           // the second route
+        CHECK(CheckEventRouteExact(ev, "OKBK", "ORBI", R("ABC UL123 XYZ EXTRA"), D, &want) == RouteResult::Check &&
+              want == "DCT ABC UL123 XYZ");
+        CHECK(CheckEventRouteExact(ev, "OKBK", "ORBI", R("ABC UL123 XYZ"), D2) == RouteResult::None);   // not that day
+        CHECK(CheckEventRouteExact(ev, "OTHH", "OKBK", R("ANYTHING"), D2) == RouteResult::Ok);      // nothing to check
+    }
     CHECK(CheckEventRoute(ev, "OKBK", "OMDB", "ABC XYZ", D) == RouteResult::None);
     CHECK(CheckEventRoute(ev, "OKBK", "ORBI", "ABC UL123 XYZ", D2) == RouteResult::None);
     CHECK(CheckEventRoute(ev, "OTHH", "OKBK", "DCT", D) == RouteResult::None);
@@ -294,6 +315,16 @@ int main() {
         o.rflFt = 33000; o.engine = 'J'; o.capability = 'L';
         r = Check(real, o);                                         // SID NOLDO1A: no NOLDO rules at ORBI, so BGD's
         CHECK(r.Passed() && r.byRoute && r.sidPoint == "BGD" && Explain(r, o).find("rules for BGD") != std::string::npos);
+        {   // only up to the FIR exit: what is filed after it does not count
+            Flight x = o; x.route = "NOLDO1A NOLDO B411 PAXAT DCT NAMDI M860 NINVA"; x.firExit = "PAXAT";
+            Result rx = Check(real, x);
+            CHECK(rx.Passed() && rx.sidPoint == "BGD" && rx.checkedTo == "PAXAT" &&
+                  Explain(rx, x).find("up to FIR exit PAXAT") != std::string::npos);
+            x.firExit = ""; rx = Check(real, x);                        // the whole route: NAMDI M860 NINVA's rule first
+            CHECK(!rx.fails.empty() && rx.fails[0] == Fail::Direction);
+            x.firExit = "NOWHERE"; rx = Check(real, x);                 // an exit not on the route: the whole route
+            CHECK(rx.checkedTo.empty());
+        }
         o.rflFt = 34000;
         r = Check(real, o);
         CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Direction);

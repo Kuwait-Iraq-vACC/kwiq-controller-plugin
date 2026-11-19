@@ -462,6 +462,7 @@ public:
                 }
             } else if (e.fpcVfr) { txt = "VFR"; colour = ui.cOk; }
             else if (fpcDisabled_.count(FlightPlan.GetCallsign())) { txt = "-"; colour = RGB(128, 128, 128); }   // VFPC's grey
+            else if (e.evExact == kwiq::RouteResult::Check) txt = "EVT";        // an event flight off its event route
             else if (e.fpcChecked) {
                 // VFPC: VFR and passed in green, the first failure in red, a forbidden level alone in yellow
                 if (e.fpcCode.empty()) { txt = ui.ok; colour = ui.cOk; }
@@ -1052,6 +1053,7 @@ private:
         char engine = 0, capability = 0;
         std::string adep, ades, rte, sid, planType, today;
         kwiq::RouteResult ev = kwiq::RouteResult::None;
+        kwiq::RouteResult evExact = kwiq::RouteResult::None;       // the FPC's event check: Check shows EVT
         kwiq::SrdResult srd = kwiq::SrdResult::None;
         bool fpcChecked = false, fpcVfr = false, fpcWarn = false;   // the flight plan check: empty code = passed
         std::string fpcCode;
@@ -1077,7 +1079,8 @@ private:
             auto toks = kwiq::NormaliseRoute(r);
             e.ev  = kwiq::CheckEventRoute(ev_, o, a, toks, today);
             e.srd = kwiq::CheckSrd(srd_, o, a, toks, rfl, FirExitLocked(fp, a));
-            kwiq::fpc::Result f = kwiq::fpc::Check(fpcRules_, FpcFlight(fp));
+            e.evExact = kwiq::CheckEventRouteExact(ev_, o, a, toks, today);
+            kwiq::fpc::Result f = kwiq::fpc::Check(fpcRules_, FpcFlight(fp, FpcExitLocked(fp)));
             e.fpcChecked = f.checked; e.fpcVfr = f.vfr; e.fpcWarn = f.WarningOnly();
             e.fpcCode = f.fails.empty() ? std::string() : kwiq::fpc::Code(f.fails[0]);
             e.evGen = evGen_; e.srdGen = srdGen_; e.exitGen = exitGen_; e.fpcGen = fpcGen_;
@@ -1086,8 +1089,8 @@ private:
         }
         return e;
     }
-    // What VFPC checks, from the flight plan as filed
-    static kwiq::fpc::Flight FpcFlight(EuroScopePlugIn::CFlightPlan& fp) {
+    // What VFPC checks, from the flight plan as filed, up to its first FIR exit point
+    static kwiq::fpc::Flight FpcFlight(EuroScopePlugIn::CFlightPlan& fp, const std::string& firExit) {
         auto d = fp.GetFlightPlanData();
         kwiq::fpc::Flight f;
         f.origin = d.GetOrigin();
@@ -1098,13 +1101,24 @@ private:
         f.engine = d.GetEngineType();
         f.capability = d.GetCapibilities();
         f.vfr = std::strcmp(d.GetPlanType(), "V") == 0;
+        f.firExit = firExit;
         return f;
     }
     // ---- FIR exit (UK Controller Plugin: CachedAircraftFirExitGenerator) ----------------------
     // Where a flight leaves the vACC's airspace, from EuroScope's extracted route and Core's exit points.
     // Only looked for when the destination is outside it; callers hold mu_.
     kwiq::AircraftExit FirExitLocked(EuroScopePlugIn::CFlightPlan& fp, const std::string& ades) {
-        if (firExits_.empty() || kwiq::Domestic(ades, domesticPrefixes_)) return {};
+        if (kwiq::Domestic(ades, domesticPrefixes_)) return {};
+        return FirExitAnyLocked(fp);
+    }
+    // The FPC only checks the route up to the first FIR exit point on it, internal (OKAC/ORBB) or external,
+    // whatever the destination; empty when it has none
+    std::string FpcExitLocked(EuroScopePlugIn::CFlightPlan& fp) {
+        kwiq::AircraftExit x = FirExitAnyLocked(fp);
+        return !x.internal.empty() ? x.internal : x.external;
+    }
+    kwiq::AircraftExit FirExitAnyLocked(EuroScopePlugIn::CFlightPlan& fp) {
+        if (firExits_.empty()) return {};
         std::vector<kwiq::RoutePoint> pts;
         EuroScopePlugIn::CFlightPlanExtractedRoute er = fp.GetExtractedRoute();
         int n = er.GetPointsNumber();
@@ -1165,11 +1179,17 @@ private:
     void ExplainFpcSelected() {
         auto fp = FlightPlanSelectASEL();
         if (!fp.IsValid()) return;
-        kwiq::fpc::Flight f = FpcFlight(fp);
         std::string msg;
         {
             std::lock_guard<std::mutex> g(mu_);
+            kwiq::fpc::Flight f = FpcFlight(fp, FpcExitLocked(fp));
             msg = kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
+            std::string want;
+            auto d = fp.GetFlightPlanData();
+            if (!f.vfr && kwiq::CheckEventRouteExact(ev_, kwiq::Upper(d.GetOrigin()), kwiq::Upper(d.GetDestination()),
+                                                     kwiq::NormaliseRoute(d.GetRoute()), kwiq::TodayUtc(), &want) == kwiq::RouteResult::Check)
+                msg = "EVT: the route is not today's event route " + want + " (only DCT, speed/level changes, a SID or "
+                      "STAR, and the aerodrome VOR at an end may differ). " + msg;
         }
         if (fpcDisabled_.count(fp.GetCallsign())) msg += " Disabled for this flight: Enable in Open FPC menu to show it again.";
         // its own chat tab, "KWIQ FPC", opened when it is not open yet

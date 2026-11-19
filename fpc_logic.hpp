@@ -76,6 +76,7 @@ struct Flight {
     char engine = 0;                                    // EuroScope's engine type: P, T, J, E
     char capability = 0;                                // EuroScope's equipment code
     bool vfr = false;
+    std::string firExit;                                // the first FIR exit point on the route: only checked up to it
 };
 enum class Fail { Sid, Engine, Direction, Min, Max, Forbidden, Navigation };
 // VFPC's tag codes
@@ -99,6 +100,7 @@ struct Result {
     bool noSid = false;                                 // the flight plan has no SID set yet
     std::vector<Fail> fails;
     std::vector<std::string> notes;                     // what was checked, for Explain FPC result
+    std::string checkedTo;                              // the FIR exit point the route was checked up to
     bool Passed() const { return checked && fails.empty(); }
     // VFPC shows the forbidden-level failure in yellow when it is the only one
     bool WarningOnly() const { return fails.size() == 1 && fails[0] == Fail::Forbidden; }
@@ -193,9 +195,17 @@ inline Result Check(const Rules& rules, const Flight& f) {
     r.noSid = point.empty() || (suffix.empty() && point != "VCT");
 
     std::string dest = Upper(f.destination), viaDest, viaAirway;
+    // The route only up to the first FIR exit point: what comes after it is not the vACC's to check
+    std::string exitPt = Upper(Trim(f.firExit));
     auto filed = NormaliseRoute(f.route);
+    auto cut = exitPt.empty() ? filed.end() : std::find(filed.begin(), filed.end(), exitPt);
+    if (cut != filed.end()) { filed.erase(cut + 1, filed.end()); r.checkedTo = exitPt; }
     bool hasDct = false;
-    for (const auto& t : SplitWs(f.route)) if (Upper(t) == "DCT") { hasDct = true; break; }
+    for (const auto& raw : SplitWs(f.route)) {
+        std::string t = Upper(raw);
+        if (t == "DCT") { hasDct = true; break; }
+        if (!r.checkedTo.empty() && t.substr(0, t.find('/')) == r.checkedTo) break;
+    }
     auto decide = [&](const std::string& key, const Condition& c) {
         r.sidPoint = key;
         if (!viaDest.empty()) r.notes.push_back("destination " + viaDest);
@@ -248,6 +258,7 @@ inline std::string Explain(const Result& r, const Flight& f) {
     std::string sid = Upper(Trim(f.sid));
     std::string s = head + (r.noSid ? "" : " SID " + sid) + (r.Passed() ? ": passed" : ": failed");
     std::vector<std::string> notes;
+    if (!r.checkedTo.empty()) notes.push_back("route checked up to FIR exit " + r.checkedTo);
     if (r.byRoute) notes.push_back(std::string(r.noSid ? "no SID set, " : "") + "rules for " + r.sidPoint + " by the route");
     notes.insert(notes.end(), r.notes.begin(), r.notes.end());
     for (size_t i = 0; i < notes.size(); i++) s += (i ? ", " : " (") + notes[i];
