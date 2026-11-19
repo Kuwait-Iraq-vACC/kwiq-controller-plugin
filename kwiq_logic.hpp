@@ -516,11 +516,11 @@ inline unsigned long ParseColour(const std::string& s, unsigned long def) {
     return ((v & 0xFF) << 16) | (v & 0xFF00) | ((v >> 16) & 0xFF);
 }
 // ---- Versions: Semantic Versioning 2.0.0 (https://semver.org/) ----------------------------------------
-// The plugin's own version (version.h), Core's plugin.latest_version and plugin.min_version, and TrackAudio's
-// version are compared by SemVer precedence, with this one function. A version is MAJOR.MINOR.PATCH, with an
+// The plugin's own version (version.h) and Core's plugin.latest_version and plugin.min_version are compared
+// by SemVer precedence, with this one function. A version is MAJOR.MINOR.PATCH, with an
 // optional -prerelease (dot-separated identifiers of letters, digits and hyphens) and +build metadata.
 // Leniency, on purpose:
-//   - a leading "v" is allowed (v1.3.0, as tags and TrackAudio write it)
+//   - a leading "v" is allowed (v0.7.0, as tags write it)
 //   - fewer than three numbers count as zeros (0.6 is 0.6.0), as plugin.min_version was written before
 //   - a fourth number is an old build number: 0.5 and 0.6 builds were versioned <base>.<run> (0.6.0.159).
 //     It compares after PATCH, as a number (0.6.0.100 < 0.6.0.159 < 0.6.1 < 0.7.0), and a missing one is 0,
@@ -598,23 +598,6 @@ inline int CompareVersions(const Version& a, const Version& b) {
 // <0, 0, >0
 inline int CompareVersions(const std::string& a, const std::string& b) {
     return CompareVersions(ParseVersion(a), ParseVersion(b));
-}
-// The first version in a text, e.g. "TrackAudio v1.3.0-beta.5": from the first number that has at least
-// MAJOR.MINOR.PATCH, as far as the characters a version can have go, less any trailing ".", "-" or "+"
-// (so "v1.3.0." and "\"v1.3.0\"" are read too); not valid if there is none
-inline Version VersionInText(const std::string& text) {
-    auto part = [](char c) { return std::isalnum((unsigned char)c) || c == '.' || c == '-' || c == '+'; };
-    for (size_t i = 0; i < text.size(); i++) {
-        if (!std::isdigit((unsigned char)text[i])) continue;
-        char p = i ? text[i - 1] : ' ';                       // not inside a word or a number, but "v1.3.0" is fine
-        if (std::isdigit((unsigned char)p) || p == '.' || (std::isalpha((unsigned char)p) && p != 'v' && p != 'V')) continue;
-        size_t end = i;
-        while (end < text.size() && part(text[end])) end++;
-        while (end > i && (text[end - 1] == '.' || text[end - 1] == '-' || text[end - 1] == '+')) end--;
-        Version v = ParseVersion(text.substr(i, end - i));
-        if (v.valid && v.numbers >= 3) return v;
-    }
-    return Version();
 }
 // EuroScope's own versions are four plain numbers where the fourth counts (3.2.3.2 is 3.2c r2), not SemVer:
 // <0, 0, >0, missing numbers are zeros
@@ -900,40 +883,20 @@ inline RdfSettings RdfFor(const std::vector<RdfRow>& rows, const std::string& ca
     return RdfSettings();
 }
 
-// TrackAudio's version, from the text its HTTP endpoint answers with (e.g. "TrackAudio v1.3.0-beta.5").
-// RDF needs 1.3.0 Beta 5 or later, by SemVer precedence (CompareVersions), ignoring case ("Beta" is "beta").
-// A pre-release written without its dot ("beta4") reads as "beta.4", which SemVer would otherwise put above
-// "beta.5" (one identifier, "beta4", is higher than "beta"). False if unreadable.
-inline bool TrackAudioVersionOk(const std::string& text) {
-    Version v = VersionInText(Lower(text));
-    std::vector<std::string> pre;
-    for (const std::string& id : v.pre) {
-        size_t d = 0;
-        while (d < id.size() && std::isalpha((unsigned char)id[d])) d++;
-        if (d && d < id.size() && AllDigits(id, d, id.size() - d)) {
-            pre.push_back(id.substr(0, d)); pre.push_back(id.substr(d));
-        } else pre.push_back(id);
-    }
-    v.pre = pre;
-    return v.valid && CompareVersions(v, ParseVersion("1.3.0-beta.5")) >= 0;
-}
-
 // The KWIQ menu's TrackAudio row: the state of the connection to TrackAudio, which the plugin makes on its own.
 //   running:   RDF started (not when another RDF or afv-euroscope-bridge is loaded)
 //   inUse:     Core's settings (or the controller's RDF Drawing) use TrackAudio: the bridge or drawing is on
 //   wsOpen:    TrackAudio's WebSocket is open
-//   version:   what TrackAudio said its version is (empty if it didn't); an unreadable one isn't "too old"
 //   afvRecent: the AFV standalone client was heard from in the last 10 minutes
-enum class TrackAudioState { Off, Connected, TooOld, AfvClient, NotRunning };
-inline TrackAudioState TrackAudioStatus(bool running, bool inUse, bool wsOpen, const std::string& version, bool afvRecent) {
+enum class TrackAudioState { Off, Connected, AfvClient, NotRunning };
+inline TrackAudioState TrackAudioStatus(bool running, bool inUse, bool wsOpen, bool afvRecent) {
     if (!running || !inUse) return TrackAudioState::Off;
-    if (wsOpen) return VersionInText(version).valid && !TrackAudioVersionOk(version) ? TrackAudioState::TooOld : TrackAudioState::Connected;
+    if (wsOpen) return TrackAudioState::Connected;
     return afvRecent ? TrackAudioState::AfvClient : TrackAudioState::NotRunning;
 }
 inline const char* TrackAudioStateText(TrackAudioState s) {
     switch (s) {
     case TrackAudioState::Connected:  return "Connected";
-    case TrackAudioState::TooOld:     return "Version too old";
     case TrackAudioState::AfvClient:  return "AFV client";
     case TrackAudioState::NotRunning: return "Not running";
     default:                          return "Off";
@@ -944,8 +907,7 @@ inline const char* TrackAudioStateText(TrackAudioState s) {
 enum class TrackAudioClick { None, Resync, Reconnect };
 inline TrackAudioClick TrackAudioClickAction(TrackAudioState s) {
     switch (s) {
-    case TrackAudioState::Connected:
-    case TrackAudioState::TooOld:     return TrackAudioClick::Resync;
+    case TrackAudioState::Connected:  return TrackAudioClick::Resync;
     case TrackAudioState::AfvClient:
     case TrackAudioState::NotRunning: return TrackAudioClick::Reconnect;
     default:                          return TrackAudioClick::None;
