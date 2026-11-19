@@ -28,14 +28,13 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | KWIQ Controller Plugin / Event Route | green `OK` or red `CHK` on event days for event ADEP/ADES pairs |
 | ... / Event Flag | `EV` if the pilot has a VATCAN slot |
 | ... / Event Slot | the slot time |
-| ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV` |
-| ... / FPC (if failed) | the same, only when it fails |
+| ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV`; red `EVT` for an event flight off its event route; grey `-` when disabled with Open FPC menu |
 | ... / SRD | `OK`, `RTE`, `MIN` or `MAX` against the SRD |
 | ... / Sector Indicator | the alias of the position tracking the aircraft (also drawn above it) |
 | ... / RDF state | `!` while the aircraft transmits |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
 
-Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** (left button on FPC), **Explain SRD result** (left button on SRD), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
+Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** or **Open FPC menu** (left button on FPC), **Explain SRD result** (left button on SRD), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
@@ -121,6 +120,10 @@ The FPC item is VFPC (hpeter2/VFPC, from DrFreas/VFPC) built in, with the rules 
 
 When the SID's first waypoint has no rules at the airport, or the flight plan has no SID yet (EuroScope only sets one once a runway is active), the rules are found by the route instead: first those of a point on the filed route, then any rule whose `airways` the route follows. So an ORBI departure on `NOLDO1A NOLDO B411 PAXAT` is checked against BGD's `NOLDO B411 PAXAT` rule, and **Explain FPC result** says `rules for BGD by the route`. A SID that has rules of its own is only checked against those.
 
+The route is only checked up to the first FIR exit point on it (Core's FIR exits, internal or external, found as for the SRD), whatever the destination: what is filed after it isn't the vACC's to check. **Explain FPC result** then says `route checked up to FIR exit PAXAT`.
+
+**Event flights:** when the flight has an event route today (Core's event routes for its ADEP/ADES on that UTC day), the FPC item shows red `EVT` if the filed route isn't one of them exactly. Only these may differ: `DCT`, speed/level changes (`N0450F350`, `NOLDO/N0450F350`), a SID before the route and a STAR after it, and the aerodrome VOR at either end (as for the SRD). An extra point, a missing one or another order is `EVT`. This compares the whole route, not only up to the FIR exit. A flight on its event route shows the usual FPC result. The Event Route item keeps its looser check (`OK` while every event-route point is filed, in order). **Explain FPC result** says which event route was expected.
+
 | Field | Kind | What it does | Fails as |
 |---|---|---|---|
 | `suffix` | filter | the rule is only for that SID suffix, e.g. `1A` | |
@@ -132,7 +135,7 @@ When the SID's first waypoint has no rules at the airport, or the flight plan ha
 | `forbidden_fls` | check | flight levels not allowed | `FLR`, yellow (`ui.colour_warn`) when it is the only failure |
 | `navigation` | check | equipment codes allowed, e.g. `RG` | `NAV` |
 
-No rule that fits the flight (by its SID or its route) is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked. `.kwiq status` shows how many airports have rules.
+No rule that fits the flight (by its SID or its route) is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked, in its own **KWIQ FPC** chat tab (opened if it is not open yet). **Open FPC menu** is VFPC's **Check FP** menu: **Show Checks** is the same as Explain FPC result, and **Disable** turns the check off for that flight, so its FPC item shows a grey `-` (a VFR flight still shows `VFR`). On a disabled flight the menu has **Enable** instead, which turns it back on. As in VFPC, a flight stays disabled until its flight plan disconnects. `.kwiq status` shows how many airports have rules.
 
 Core serves the rules at `/api/plugin/fpc`, one line per rule in order (a 404 means none):
 `FPC|<airport>|<sid>|<suffix>|<direction>|<min_fl>|<max_fl>|<forbidden_fls>|<destinations>|<airways>|<engine>|<navigation>`. Lists are comma separated and an empty field is no restriction, e.g. `FPC|ORBI|BGD||EVEN|80|600|250,260||DELMI DCT RUKAM B411 MURIB||`. The existing `Sid.json` files (OKAC `OKAC/Plugins/VFPC/Sid.json`, ORBB `.data/VFPC/*.json`) map onto it field for field.
@@ -146,11 +149,11 @@ Squawks are allocated by Core, so two controllers never hand out the same code. 
 - **Sweatbox**: aircraft spawn anywhere, often in the air, with 2000, so there any aircraft nobody tracks gets a code (the 2000 they spawn with is never taken as set by hand).
 - **Reconnects**: a pilot who reconnects within 10 minutes with the same departure, destination and flight rules: Core is asked first, and the code it still holds for them comes back. If it holds none, a code a controller set by hand comes back, otherwise they get a new one (so a code Core has since given to someone else is never handed back).
 
-While Core is asked, the aircraft shows the holding code 7000, as in UKCP. It is never taken as a code: an aircraft showing it still needs one, and 7000 seen from another scope only means that scope is asking (so 7000 typed in EuroScope is not by hand; use **Conspicuity** in the menu). If Core gives nothing, a Recycle goes back to the code the aircraft had; otherwise 7000 stays and the aircraft is asked for again a minute later.
+While Core is asked, the aircraft shows the holding code 7000, as in UKCP. It is never taken as a code: an aircraft showing it still needs one, and 7000 seen from another scope only means that scope is asking (so 7000 typed in EuroScope is not by hand; use **Conspicuity** in the menu). If Core gives nothing, an Assign from the menu goes back to the code the aircraft had; otherwise 7000 stays and the aircraft is asked for again a minute later.
 
 When the departure, destination or flight rules change, the next code is a new one from Core (not one it holds for the old plan), even if the change was seen while nothing could be done. A code Core sends is only set if it is still wanted: not if someone else has started tracking the aircraft, or set a code, while Core was answering. If Core cannot give a code, the error is shown once and that aircraft is not asked for again for a minute.
 
-**By hand**: **Open squawk assignment menu** offers Recycle (a new code from Core, also **Force squawk recycle**), Conspicuity (by flight rules: `squawk.conspicuity`, default 2000, for IFR, `squawk.conspicuity_vfr`, default 7000, for VFR) and Manual (type a code). Setting a code from the menu releases the one Core held. A code set from the menu, typed in EuroScope, or set by a controller on another scope counts as by hand: the plugin leaves that aircraft alone (a 2000 typed in EuroScope is not replaced; on sweatbox it is) until its departure, destination or flight rules change. Only for aircraft the user tracks or nobody tracks.
+**By hand**: **Open squawk assignment menu** offers Assign (a new code from Core, also **Force squawk recycle**), Conspicuity (by flight rules: `squawk.conspicuity`, default 2000, for IFR, `squawk.conspicuity_vfr`, default 7000, for VFR) and Manual (type a code). Setting a code from the menu releases the one Core held. A code set from the menu, typed in EuroScope, or set by a controller on another scope counts as by hand: the plugin leaves that aircraft alone (a 2000 typed in EuroScope is not replaced; on sweatbox it is) until its departure, destination or flight rules change. Only for aircraft the user tracks or nobody tracks.
 
 **Core API**, all under `/api/plugin`, with the same `X-KWIQ-Key` and `X-KWIQ-Version` headers as the rest. Every request carries `?network=live` or `?network=sweatbox`, and Core keeps the two apart.
 

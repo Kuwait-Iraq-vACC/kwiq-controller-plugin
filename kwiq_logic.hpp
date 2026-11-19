@@ -120,6 +120,7 @@ inline bool RouteMatches(const std::string& wantRte, const std::string& filedRte
 }
 
 // ---- Event routes ----------------------------------------------------------
+inline bool IsNavaidIdent(const std::string& s);
 
 struct EventRoute { std::string date, adep, ades, rte; std::vector<std::string> tokens; }; // date = YYYY-MM-DD UTC
 struct EventData {
@@ -170,6 +171,43 @@ inline RouteResult CheckEventRoute(const EventData& ev, const std::string& adep,
 inline RouteResult CheckEventRoute(const EventData& ev, const std::string& adep, const std::string& ades,
                                    const std::string& filedRte, const std::string& today) {
     return CheckEventRoute(ev, adep, ades, NormaliseRoute(filedRte), today);
+}
+// A SID or STAR name: 2 to 5 letters, a digit, at most one letter (NOLDO1A, LOVEK1A, BGD2)
+inline bool IsProcedureName(const std::string& t) {
+    size_t i = 0;
+    while (i < t.size() && std::isalpha((unsigned char)t[i])) i++;
+    if (i < 2 || i > 5 || i >= t.size() || !std::isdigit((unsigned char)t[i])) return false;
+    size_t rest = t.size() - i - 1;
+    return rest == 0 || (rest == 1 && std::isalpha((unsigned char)t.back()));
+}
+// The filed route is the event route exactly (both normalised, so DCT and speed/level changes never count),
+// except that a SID before it and a STAR after it are allowed, and so is leaving out the aerodrome VOR at
+// either end, as for the SRD (#9). Anything else filed, left out or in another order is not.
+inline bool EventRouteExact(const std::vector<std::string>& want, std::vector<std::string> filed) {
+    if (want.empty()) return true;                                  // an event route with nothing to check
+    if (!filed.empty() && filed.front() != want.front() && IsProcedureName(filed.front())) filed.erase(filed.begin());
+    if (!filed.empty() && filed.back() != want.back() && IsProcedureName(filed.back())) filed.pop_back();
+    auto same = [&](size_t from, size_t to) {
+        return from < to && to - from == filed.size() && std::equal(filed.begin(), filed.end(), want.begin() + (std::ptrdiff_t)from);
+    };
+    bool front = want.size() > 1 && IsNavaidIdent(want.front()), back = want.size() > 1 && IsNavaidIdent(want.back());
+    return same(0, want.size()) || (front && same(1, want.size())) || (back && same(0, want.size() - 1)) ||
+           (front && back && same(1, want.size() - 1));
+}
+// The FPC's event check: None when the flight has no event route today, Ok when its route is one of them
+// exactly (EventRouteExact), Check when it is none of them
+inline RouteResult CheckEventRouteExact(const EventData& ev, const std::string& adep, const std::string& ades,
+                                        const std::vector<std::string>& filed, const std::string& today,
+                                        std::string* expected = nullptr) {
+    if (!ev.active) return RouteResult::None;
+    bool pair = false;
+    for (const auto& r : ev.routes) {
+        if ((!r.date.empty() && r.date != today) || r.adep != adep || r.ades != ades) continue;
+        if (!pair && expected) *expected = r.rte;
+        pair = true;
+        if (EventRouteExact(r.tokens, filed)) return RouteResult::Ok;
+    }
+    return pair ? RouteResult::Check : RouteResult::None;
 }
 
 // Core /api/plugin/event (plain text):

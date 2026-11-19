@@ -82,12 +82,14 @@ enum {
     KWIQ_ITEM_SECTOR      = 1005,   // sector indicator of the position that tracks the aircraft
     KWIQ_ITEM_RDF         = 1006,   // RDF state: "!" while the aircraft transmits
     KWIQ_ITEM_SRD         = 1007,   // route and level against the SRD (1006 is RDF state)
-    KWIQ_ITEM_FPC_FAILED  = 1008,   // the flight plan check, only when it fails
-    KWIQ_ITEM_LAST        = KWIQ_ITEM_FPC_FAILED,
+    // 1008 was "FPC (if failed)", removed in 0.7.2
+    KWIQ_ITEM_LAST        = KWIQ_ITEM_SRD,
     KWIQ_FUNC_EVENT_ROUTES = 2001,   // "Open event routes window"
     KWIQ_FUNC_FPC_EXPLAIN  = 2002,   // "Explain FPC result"
     KWIQ_FUNC_SRD_SEARCH   = 2003,   // "Open SRD search window"
     KWIQ_FUNC_SRD_EXPLAIN  = 2010,   // "Explain SRD result"
+    KWIQ_FUNC_FPC_MENU     = 2011,   // "Open FPC menu"
+    KWIQ_FUNC_FPC_PICK     = 2012,   // a choice in the FPC menu
     KWIQ_FUNC_SQUAWK_MENU    = 2004,   // "Open squawk assignment menu"
     KWIQ_FUNC_SQUAWK_ASSIGN  = 2005,   // "Force squawk recycle"
     KWIQ_FUNC_SQUAWK_PICK    = 2007,   // a choice in the squawk assignment menu
@@ -272,12 +274,12 @@ public:
         RegisterTagItemType("Event Flag",  KWIQ_ITEM_EVENT_FLAG);
         RegisterTagItemType("Event Slot",  KWIQ_ITEM_EVENT_SLOT);
         RegisterTagItemType("FPC",         KWIQ_ITEM_FPC);
-        RegisterTagItemType("FPC (if failed)", KWIQ_ITEM_FPC_FAILED);
         RegisterTagItemType("SRD",         KWIQ_ITEM_SRD);
         RegisterTagItemType("Sector Indicator", KWIQ_ITEM_SECTOR);
         RegisterTagItemType("RDF state",   KWIQ_ITEM_RDF);
         RegisterTagItemFunction("Open event routes window", KWIQ_FUNC_EVENT_ROUTES);
         RegisterTagItemFunction("Explain FPC result",       KWIQ_FUNC_FPC_EXPLAIN);
+        RegisterTagItemFunction("Open FPC menu",            KWIQ_FUNC_FPC_MENU);
         RegisterTagItemFunction("Explain SRD result",       KWIQ_FUNC_SRD_EXPLAIN);
         RegisterTagItemFunction("Open SRD search window",   KWIQ_FUNC_SRD_SEARCH);
         RegisterTagItemFunction("Open squawk assignment menu", KWIQ_FUNC_SQUAWK_MENU);
@@ -421,6 +423,8 @@ public:
         switch (FunctionId) {
         case KWIQ_FUNC_EVENT_ROUTES: OpenRoutesWindow(Pt); return;
         case KWIQ_FUNC_FPC_EXPLAIN:  ExplainFpcSelected(); return;
+        case KWIQ_FUNC_FPC_MENU:     FpcMenu(Area); return;
+        case KWIQ_FUNC_FPC_PICK:     FpcPick(sItemString ? sItemString : ""); return;
         case KWIQ_FUNC_SRD_EXPLAIN:  ExplainSrdSelected(); return;
         case KWIQ_FUNC_SRD_SEARCH:   OpenSrdWindow(Pt); return;
         case KWIQ_FUNC_SQUAWK_MENU:    SquawkMenu(Area); return;
@@ -440,8 +444,7 @@ public:
         if (ours && !enabled_) return;                       // plugin too old
         UiCfg ui;
         if (ours) { std::lock_guard<std::mutex> g(mu_); ui = ui_; }
-        if (ItemCode == KWIQ_ITEM_EVENT_ROUTE || ItemCode == KWIQ_ITEM_SRD || ItemCode == KWIQ_ITEM_FPC ||
-            ItemCode == KWIQ_ITEM_FPC_FAILED) {
+        if (ItemCode == KWIQ_ITEM_EVENT_ROUTE || ItemCode == KWIQ_ITEM_SRD || ItemCode == KWIQ_ITEM_FPC) {
             if (!FlightPlan.IsValid()) return;
             const CacheEntry& e = Checks(FlightPlan);
             std::string txt;
@@ -457,11 +460,13 @@ public:
                 case SrdResult::Max:   txt = "MAX"; break;
                 default: break;
                 }
-            } else if (e.fpcChecked) {
+            } else if (e.fpcVfr) { txt = "VFR"; colour = ui.cOk; }
+            else if (fpcDisabled_.count(FlightPlan.GetCallsign())) { txt = "-"; colour = RGB(128, 128, 128); }   // VFPC's grey
+            else if (e.evExact == kwiq::RouteResult::Check) txt = "EVT";        // an event flight off its event route
+            else if (e.fpcChecked) {
                 // VFPC: VFR and passed in green, the first failure in red, a forbidden level alone in yellow
-                if (e.fpcCode.empty()) {
-                    if (ItemCode == KWIQ_ITEM_FPC) { txt = e.fpcVfr ? "VFR" : ui.ok; colour = ui.cOk; }
-                } else {
+                if (e.fpcCode.empty()) { txt = ui.ok; colour = ui.cOk; }
+                else {
                     txt = e.fpcCode;
                     colour = e.fpcWarn ? ui.cWarn : ui.cBad;
                 }
@@ -1048,6 +1053,7 @@ private:
         char engine = 0, capability = 0;
         std::string adep, ades, rte, sid, planType, today;
         kwiq::RouteResult ev = kwiq::RouteResult::None;
+        kwiq::RouteResult evExact = kwiq::RouteResult::None;       // the FPC's event check: Check shows EVT
         kwiq::SrdResult srd = kwiq::SrdResult::None;
         bool fpcChecked = false, fpcVfr = false, fpcWarn = false;   // the flight plan check: empty code = passed
         std::string fpcCode;
@@ -1073,7 +1079,8 @@ private:
             auto toks = kwiq::NormaliseRoute(r);
             e.ev  = kwiq::CheckEventRoute(ev_, o, a, toks, today);
             e.srd = kwiq::CheckSrd(srd_, o, a, toks, rfl, FirExitLocked(fp, a));
-            kwiq::fpc::Result f = kwiq::fpc::Check(fpcRules_, FpcFlight(fp));
+            e.evExact = kwiq::CheckEventRouteExact(ev_, o, a, toks, today);
+            kwiq::fpc::Result f = kwiq::fpc::Check(fpcRules_, FpcFlight(fp, FpcExitLocked(fp)));
             e.fpcChecked = f.checked; e.fpcVfr = f.vfr; e.fpcWarn = f.WarningOnly();
             e.fpcCode = f.fails.empty() ? std::string() : kwiq::fpc::Code(f.fails[0]);
             e.evGen = evGen_; e.srdGen = srdGen_; e.exitGen = exitGen_; e.fpcGen = fpcGen_;
@@ -1082,8 +1089,8 @@ private:
         }
         return e;
     }
-    // What VFPC checks, from the flight plan as filed
-    static kwiq::fpc::Flight FpcFlight(EuroScopePlugIn::CFlightPlan& fp) {
+    // What VFPC checks, from the flight plan as filed, up to its first FIR exit point
+    static kwiq::fpc::Flight FpcFlight(EuroScopePlugIn::CFlightPlan& fp, const std::string& firExit) {
         auto d = fp.GetFlightPlanData();
         kwiq::fpc::Flight f;
         f.origin = d.GetOrigin();
@@ -1094,13 +1101,24 @@ private:
         f.engine = d.GetEngineType();
         f.capability = d.GetCapibilities();
         f.vfr = std::strcmp(d.GetPlanType(), "V") == 0;
+        f.firExit = firExit;
         return f;
     }
     // ---- FIR exit (UK Controller Plugin: CachedAircraftFirExitGenerator) ----------------------
     // Where a flight leaves the vACC's airspace, from EuroScope's extracted route and Core's exit points.
     // Only looked for when the destination is outside it; callers hold mu_.
     kwiq::AircraftExit FirExitLocked(EuroScopePlugIn::CFlightPlan& fp, const std::string& ades) {
-        if (firExits_.empty() || kwiq::Domestic(ades, domesticPrefixes_)) return {};
+        if (kwiq::Domestic(ades, domesticPrefixes_)) return {};
+        return FirExitAnyLocked(fp);
+    }
+    // The FPC only checks the route up to the first FIR exit point on it, internal (OKAC/ORBB) or external,
+    // whatever the destination; empty when it has none
+    std::string FpcExitLocked(EuroScopePlugIn::CFlightPlan& fp) {
+        kwiq::AircraftExit x = FirExitAnyLocked(fp);
+        return !x.internal.empty() ? x.internal : x.external;
+    }
+    kwiq::AircraftExit FirExitAnyLocked(EuroScopePlugIn::CFlightPlan& fp) {
+        if (firExits_.empty()) return {};
         std::vector<kwiq::RoutePoint> pts;
         EuroScopePlugIn::CFlightPlanExtractedRoute er = fp.GetExtractedRoute();
         int n = er.GetPointsNumber();
@@ -1161,13 +1179,40 @@ private:
     void ExplainFpcSelected() {
         auto fp = FlightPlanSelectASEL();
         if (!fp.IsValid()) return;
-        kwiq::fpc::Flight f = FpcFlight(fp);
         std::string msg;
         {
             std::lock_guard<std::mutex> g(mu_);
-            msg = "FPC: " + kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
+            kwiq::fpc::Flight f = FpcFlight(fp, FpcExitLocked(fp));
+            msg = kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
+            std::string want;
+            auto d = fp.GetFlightPlanData();
+            if (!f.vfr && kwiq::CheckEventRouteExact(ev_, kwiq::Upper(d.GetOrigin()), kwiq::Upper(d.GetDestination()),
+                                                     kwiq::NormaliseRoute(d.GetRoute()), kwiq::TodayUtc(), &want) == kwiq::RouteResult::Check)
+                msg = "EVT: the route is not today's event route " + want + " (only DCT, speed/level changes, a SID or "
+                      "STAR, and the aerodrome VOR at an end may differ). " + msg;
         }
-        DisplayUserMessage("KWIQ Controller Plugin", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
+        if (fpcDisabled_.count(fp.GetCallsign())) msg += " Disabled for this flight: Enable in Open FPC menu to show it again.";
+        // its own chat tab, "KWIQ FPC", opened when it is not open yet
+        DisplayUserMessage("KWIQ FPC", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
+    }
+
+    // VFPC's "Check FP" menu (analyzeFP.cpp OnFunctionCall): Show Checks explains the result; Disable
+    // turns the check off for this flight, so the FPC item shows a grey "-" (a VFR flight still shows VFR),
+    // and Enable turns it back on. A flight stays disabled until its flight plan disconnects, as in VFPC.
+    void FpcMenu(RECT area) {
+        auto fp = FlightPlanSelectASEL();
+        if (!fp.IsValid()) return;
+        OpenPopupList(area, "Check FP", 1);
+        AddPopupListElement("Show Checks", "", KWIQ_FUNC_FPC_PICK, false, EuroScopePlugIn::POPUP_ELEMENT_NO_CHECKBOX, false);
+        AddPopupListElement(fpcDisabled_.count(fp.GetCallsign()) ? "Enable" : "Disable", "", KWIQ_FUNC_FPC_PICK,
+                            false, EuroScopePlugIn::POPUP_ELEMENT_NO_CHECKBOX, false);
+    }
+    void FpcPick(const std::string& option) {
+        auto fp = FlightPlanSelectASEL();
+        if (!fp.IsValid()) return;
+        if (option == "Show Checks") ExplainFpcSelected();
+        else if (option == "Disable") fpcDisabled_.insert(fp.GetCallsign());
+        else if (option == "Enable") fpcDisabled_.erase(fp.GetCallsign());
     }
 
     // ---- squawk assignment (main thread) ------------------------------------------------------
@@ -1289,7 +1334,7 @@ private:
         return true;
     }
     // Core gave nothing usable: take the holding code off again if it is still showing and the aircraft had a code
-    // before (a Recycle that failed). With no code before, it stays: the aircraft is asked for again in a minute.
+    // before (an Assign that failed). With no code before, it stays: the aircraft is asked for again in a minute.
     void SquawkUnhold(EuroScopePlugIn::CFlightPlan& fp, const std::string& previous) {
         if (!fp.IsValid() || std::strcmp(fp.GetControllerAssignedData().GetSquawk(), kwiq::squawk::HOLDING_SQUAWK) != 0) return;
         auto codes = SquawkCodes();
@@ -1467,7 +1512,7 @@ private:
     }
 
     // ---- squawk menu and functions (main thread) ---------------------------------------------
-    // UKCP SquawkAssignmentMenu, without the UK's local and circuit codes: Recycle, Conspicuity, Manual
+    // UKCP SquawkAssignmentMenu, without the UK's local and circuit codes: Assign, Conspicuity, Manual
     bool SquawkTarget(EuroScopePlugIn::CFlightPlan& fp) {
         if (!SquawkOn()) { Msg("Squawk assignment is " + SquawkOffWhy() + ".", false); return false; }
         if (!SquawkUser().controller) { Msg("Squawks can only be assigned when logged on as a controller.", false); return false; }
@@ -1481,13 +1526,13 @@ private:
         if (tracker && *tracker && !fp.GetTrackingControllerIsMe()) return;
         bool vfr = std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0;
         OpenPopupList(area, "Assign Squawk", 1);
-        AddPopupListElement("Recycle", "", KWIQ_FUNC_SQUAWK_PICK);
+        AddPopupListElement("Assign", "", KWIQ_FUNC_SQUAWK_PICK);
         AddPopupListElement("Conspicuity", ConspicuityCode(vfr).c_str(), KWIQ_FUNC_SQUAWK_PICK);
         AddPopupListElement("Manual", "", KWIQ_FUNC_SQUAWK_PICK);
     }
     void SquawkPick(const std::string& option, RECT area) {
         EuroScopePlugIn::CFlightPlan fp;
-        if (option == "Recycle") SquawkForce();
+        if (option == "Assign") SquawkForce();
         else if (!SquawkTarget(fp)) return;
         else if (option == "Conspicuity")
             SquawkReplace(fp, ConspicuityCode(std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0));
@@ -1543,6 +1588,7 @@ public:
                                GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX);
     }
     virtual void OnFlightPlanDisconnect(EuroScopePlugIn::CFlightPlan fp) override {
+        fpcDisabled_.erase(fp.GetCallsign());
         if (duplicate_) return;
         auto it = sqStored_.find(fp.GetCallsign());
         if (it != sqStored_.end()) it->second.expires = std::time(nullptr) + kwiq::squawk::STORED_SECONDS;
@@ -1935,6 +1981,7 @@ private:
     std::time_t lastMetar_ = 0, lastNotices_ = 0;
     std::atomic<int> metarPoll_{ 60 };
     std::map<std::string, std::pair<int, int>> qnhSeen_;            // main thread: ICAO -> QNH, TRL this session
+    std::set<std::string> fpcDisabled_;                             // main thread: callsigns whose FPC is disabled
     std::set<std::string> noticesTold_;                             // main thread: unread notifications already announced
     std::string qnhCallsign_;
     std::thread auxWorker_, markWorker_;
