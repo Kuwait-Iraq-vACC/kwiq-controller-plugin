@@ -51,9 +51,9 @@ inline Rules ParseRules(const std::string& body) {
         c.suffix = Upper(Trim(f[3]));
         std::string dir = Upper(Trim(f[4]));
         c.direction = dir.empty() ? "ANY" : dir;
-        c.minFl = std::atoi(Trim(f[5]).c_str());
-        c.maxFl = std::atoi(Trim(f[6]).c_str());
-        for (const auto& fl : SplitList(f[7])) c.forbidden.push_back(std::atoi(fl.c_str()));
+        c.minFl = ToInt(Trim(f[5]));                    // ToInt, not atoi: clamped rather than undefined when too big
+        c.maxFl = ToInt(Trim(f[6]));
+        for (const auto& fl : SplitList(f[7])) c.forbidden.push_back(ToInt(fl));
         c.destinations = SplitList(f[8]);
         for (const auto& a : SplitList(f[9])) {
             auto toks = a == "DCT" ? std::vector<std::string>{ "DCT" } : NormaliseRoute(a);   // DCT alone is an option

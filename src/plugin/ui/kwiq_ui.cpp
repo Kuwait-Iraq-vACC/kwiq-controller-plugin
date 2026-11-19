@@ -368,7 +368,7 @@ static void NoticesFill() {
     SendMessageA(w.list, LB_SETCURSEL, w.items.empty() ? -1 : sel, 0);
     NoticesShowSelected();
 }
-static LRESULT CALLBACK NoticesProc(HWND h, UINT m, WPARAM wp, LPARAM l) {
+static LRESULT NoticesProcInner(HWND h, UINT m, WPARAM wp, LPARAM l) {
     NoticesWin& w = gNotices;
     switch (m) {
     case WM_COMMAND: {
@@ -393,6 +393,14 @@ static LRESULT CALLBACK NoticesProc(HWND h, UINT m, WPARAM wp, LPARAM l) {
     case WM_DESTROY: if (h == w.hwnd) { w.hwnd = nullptr; w.list = w.title = w.text = w.bRead = w.bLink = nullptr; } return 0;
     }
     return DefWindowProcA(h, m, wp, l);
+}
+// Called by Windows, so nothing may escape from it (#45)
+static LRESULT CALLBACK NoticesProc(HWND h, UINT m, WPARAM wp, LPARAM l) {
+    try {
+        return NoticesProcInner(h, m, wp, l);
+    } catch (...) {
+        return m == WM_COMMAND ? 0 : DefWindowProcA(h, m, wp, l);
+    }
 }
 void ShowNotices(const std::vector<kwiq::ProcedureNotice>& items) {
     if (!gMod)

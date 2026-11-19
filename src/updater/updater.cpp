@@ -72,7 +72,7 @@ static void UpdateFailed(const std::string& message) {
 }
 
 // Returns a kwiq::StartMode for the loader
-extern "C" __declspec(dllexport) int KWIQUpdaterRun() {
+static int UpdaterRun() {
     using kwiq::StartMode;
     std::string core = CorePath();
     if (core.empty()) return (int)StartMode::DontLoad;
@@ -113,6 +113,16 @@ extern "C" __declspec(dllexport) int KWIQUpdaterRun() {
         ShellExecuteA(nullptr, "open", changelog.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 
     return (int)kwiq::DecideStart(answered, killSwitch, Exists(core), declined);
+}
+// Called by the loader while EuroScope loads it, so nothing may escape: if anything throws, the plugin that is
+// installed starts as it is (the next start tries the update again)
+extern "C" __declspec(dllexport) int KWIQUpdaterRun() {
+    try {
+        return UpdaterRun();
+    } catch (...) {
+        try { std::string core = CorePath(); return (int)(!core.empty() && Exists(core) ? kwiq::StartMode::Full : kwiq::StartMode::DontLoad); }
+        catch (...) { return (int)kwiq::StartMode::DontLoad; }
+    }
 }
 
 // The updater's own version, for support

@@ -4,11 +4,12 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 
 | Part | Files | Origin | License |
 |---|---|---|---|
-| VCH, built in | `src/plugin/vch/` (`requestMenu.*`, `internet.*`, `usefulStuff.*`, `Constant.hpp`, `stdafx.h`, `targetver.h`, `Config.h`) | https://github.com/DrFreas/VCH (Jan Fries), v0.8.6 | GPL-3.0 |
+| VCH, built in | `src/plugin/vch/` (`requestMenu.*`, `usefulStuff.*`, `Constant.hpp`, `stdafx.h`, `targetver.h`, `Config.h`) | https://github.com/DrFreas/VCH (Jan Fries), v0.8.6 | GPL-3.0 |
 | Slot detection | `src/plugin/slots/VatsimAPI.h`, `src/plugin/slots/VatsimAPI.cpp` | Adapted from the VATCAN Slots-Plugin, via https://github.com/frazerxyz/Slots-Plugin | See below |
 | FIR exit points | the FIR exit section of `src/utils/kwiq_logic.hpp` | Adapted from the UK Controller Plugin, https://github.com/VATSIM-UK/uk-controller-plugin (`src/plugin/intention`: FirExitPoint, ExitCone, CachedAircraftFirExitGenerator; `src/plugin/srd`: SrdSearchDialog) | GPL-3.0 |
 | SRD Search dialog | `resource/kwiq.rc`, `resource/kwiq_res.h` | The UK Controller Plugin's `IDD_SRD_SEARCH` dialog template (`resource/UKControllerPlugin.rc`), https://github.com/VATSIM-UK/uk-controller-plugin; the Event Routes dialog (`IDD_EVENT_ROUTES`) is laid out from it | GPL-3.0 |
 | Flight plan check | `src/plugin/fpc/fpc_logic.hpp` | Adapted from VFPC, https://github.com/hpeter2/VFPC (from https://github.com/DrFreas/VFPC, Jan Fries): `analyzeFP.cpp` | GPL-3.0 |
+| Airfield ownership (top-down) | `src/plugin/ownership/ownership_logic.hpp` | Adapted from the UK Controller Plugin, https://github.com/VATSIM-UK/uk-controller-plugin (`src/plugin/ownership`: ServiceType, ServiceProvision, AirfieldServiceProviderCollection, AirfieldOwnershipManager, AirfieldOwnershipHandler; `src/plugin/controller`: ActiveCallsignCollection, ActiveCallsignMonitor, ControllerPosition) | GPL-3.0 |
 | Squawk assignment rules | `src/plugin/squawk/squawk_logic.hpp`, and the squawk section of `src/plugin/KWIQPlugin.cpp` | Adapted from the UK Controller Plugin, https://github.com/VATSIM-UK/uk-controller-plugin (`src/plugin/squawk`) | GPL-3.0 |
 | KWIQ code | `src/plugin/KWIQPlugin.cpp`, `src/plugin/ui/`, `src/utils/kwiq_logic.hpp`, `src/utils/kwiq_win.hpp`, `src/loader/`, `src/updater/`, `src/plugin/keylink/`, `src/plugin/push/`, `src/utils/version.h`, `test/` | Kuwait & Iraq vACC | GPL-3.0-or-later |
 | Loader / updater design | `src/loader/`, `src/updater/`, `src/utils/kwiq_win.hpp` | Follows the UK Controller Plugin's loader, updater and core layout (https://github.com/VATSIM-UK/uk-controller-plugin); written for this plugin, no UKCP code copied | GPL-3.0 |
@@ -25,7 +26,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 
 ## Changes made to VCH
 - `CVCHPlugin` takes the plugin name, version, developer and copyright as constructor arguments, so it appears as part of "KWIQ Controller Plugin".
-- The upstream version check (which compares against DrFreas/VCH releases) is disabled.
+- The upstream version check (which compares against DrFreas/VCH releases) is removed, with `internet.*`, its WinInet helper.
 
 ## Changes made to the UK Controller Plugin's squawk code
 - Ported from UKCP's classes (SquawkAssignment, SquawkEventHandler, SquawkGenerator, SquawkAssignmentMenu, SquawkValidator, Login) to plain functions in `src/plugin/squawk/squawk_logic.hpp` and the EuroScope events in `src/plugin/KWIQPlugin.cpp`.
