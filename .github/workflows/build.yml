@@ -140,7 +140,7 @@ jobs:
         run: |
           $all = @(Select-String -Path build.log -Pattern ': warning C\d+' |
                    ForEach-Object { ($_.Line -replace '\s*\[[^\]]*\]\s*$', '').Trim() } | Sort-Object -Unique)
-          $vendored = '(?i)\\(third_party|vcpkg_installed|vch|slots)\\'
+          $vendored = '(?i)[\\/](third_party|vcpkg_installed|vch|slots)[\\/]'
           $own = @($all | Where-Object { $_ -notmatch $vendored })
           "$($all.Count) warning(s), $($own.Count) of them in KWIQ's own files"
           foreach ($w in $all) { if ($w -match $vendored) { "  vendored: $w" } else { "::warning::$w" } }
