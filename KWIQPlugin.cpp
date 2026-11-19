@@ -1290,7 +1290,7 @@ private:
         return true;
     }
     // Core gave nothing usable: take the holding code off again if it is still showing and the aircraft had a code
-    // before (a Recycle that failed). With no code before, it stays: the aircraft is asked for again in a minute.
+    // before (an Assign that failed). With no code before, it stays: the aircraft is asked for again in a minute.
     void SquawkUnhold(EuroScopePlugIn::CFlightPlan& fp, const std::string& previous) {
         if (!fp.IsValid() || std::strcmp(fp.GetControllerAssignedData().GetSquawk(), kwiq::squawk::HOLDING_SQUAWK) != 0) return;
         auto codes = SquawkCodes();
@@ -1468,7 +1468,7 @@ private:
     }
 
     // ---- squawk menu and functions (main thread) ---------------------------------------------
-    // UKCP SquawkAssignmentMenu, without the UK's local and circuit codes: Recycle, Conspicuity, Manual
+    // UKCP SquawkAssignmentMenu, without the UK's local and circuit codes: Assign, Conspicuity, Manual
     bool SquawkTarget(EuroScopePlugIn::CFlightPlan& fp) {
         if (!SquawkOn()) { Msg("Squawk assignment is " + SquawkOffWhy() + ".", false); return false; }
         if (!SquawkUser().controller) { Msg("Squawks can only be assigned when logged on as a controller.", false); return false; }
@@ -1482,13 +1482,13 @@ private:
         if (tracker && *tracker && !fp.GetTrackingControllerIsMe()) return;
         bool vfr = std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0;
         OpenPopupList(area, "Assign Squawk", 1);
-        AddPopupListElement("Recycle", "", KWIQ_FUNC_SQUAWK_PICK);
+        AddPopupListElement("Assign", "", KWIQ_FUNC_SQUAWK_PICK);
         AddPopupListElement("Conspicuity", ConspicuityCode(vfr).c_str(), KWIQ_FUNC_SQUAWK_PICK);
         AddPopupListElement("Manual", "", KWIQ_FUNC_SQUAWK_PICK);
     }
     void SquawkPick(const std::string& option, RECT area) {
         EuroScopePlugIn::CFlightPlan fp;
-        if (option == "Recycle") SquawkForce();
+        if (option == "Assign") SquawkForce();
         else if (!SquawkTarget(fp)) return;
         else if (option == "Conspicuity")
             SquawkReplace(fp, ConspicuityCode(std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0));
