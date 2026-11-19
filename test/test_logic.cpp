@@ -3,6 +3,7 @@
 #include "version.h"
 #include "fpc/fpc_logic.hpp"
 #include "squawk/squawk_logic.hpp"
+#include "ownership/ownership_logic.hpp"
 using namespace kwiq;
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -52,7 +53,7 @@ int main() {
         CHECK(d.pair.size() == 1 && d.wp.size() == 1);                    // built again from scratch
     }
     CHECK(ParseLevelFt("1234567") == 0 && ParseLevelFt(" fl350\r\n") == 35000 && ParseLevelFt("999") == 99900);
-    CHECK(ParseSectors("").empty() && ParseSectors("SECTOR|BS|SR\r\n").at("BS") == "SR" && ParseSectors("SECTOR|BS\r\nSECTOR||SR\r\n").empty());
+    CHECK(ParseSectors("").empty() && ParseSectors("SECTOR|BS|SR\r\n").at("|BS") == "SR" && ParseSectors("SECTOR|BS\r\nSECTOR||SR\r\n").empty());
     {
         PluginConfig c = ParseConfig("|nokey\r\na|1|2\r\nb| \r\nnobar\r\nn|99999999999\r\n");
         CHECK(c.kv.size() == 3 && c.Get("a") == "1|2" && c.Get("b", "x").empty() && c.GetBool("b", true) && c.GetBool("a", false));
@@ -355,6 +356,9 @@ int main() {
         CHECK(Check(real, n).Passed());
         // a fallback condition must match the route by airway, so a rule-less group never catches everything
         Rules loose = ParseRules("FPC|ORBI|BGD||ANY|||||||\nFPC|ORBI|XYZ||ANY|||||||\n");
+        // levels too big for an int are clamped, not undefined (#86)
+        Rules huge = ParseRules("FPC|ORBI|BGD||ANY|99999999999|99999999999|99999999999||||\n");
+        CHECK(huge["ORBI"].sids["BGD"][0].minFl == INT_MAX && huge["ORBI"].sids["BGD"][0].forbidden[0] == INT_MAX);
         Flight l = o; l.sid = "NOLDO1A"; l.route = "NOLDO1A NOLDO B411 PAXAT";
         CHECK(Check(loose, l).fails.size() == 1 && Check(loose, l).fails[0] == Fail::Sid);
         l.route = "XYZ NOLDO B411 PAXAT";                           // a group whose point is on the route does count
@@ -385,9 +389,15 @@ int main() {
 
     // sector indicators, only for the ESE position IDs Core lists, shown as their alias
     SectorMap sm = ParseSectors("SECTOR|bs|sr\nSECTOR|BN|NR\nSECTOR|BGA|BGD\nSECTOR|BX|\nSECTOR|BL|ABCDE\nbad\n");
-    CHECK(sm.size() == 4 && sm["BS"] == "SR" && sm["BN"] == "NR" && sm["BGA"] == "BGD" && sm["BL"] == "ABCD");
-    CHECK(sm.find("BX") == sm.end());
+    CHECK(sm.size() == 4 && sm["|BS"] == "SR" && sm["|BN"] == "NR" && sm["|BGA"] == "BGD" && sm["|BL"] == "ABCD");
+    CHECK(sm.find("|BX") == sm.end());
     CHECK(ParseSectors("NONE\n").empty());
+    // per sector file: the loaded file's row, else the row for both; file not known: both, else either file
+    SectorMap sf = ParseSectors("SECTOR|BS|SR|ORBB\nSECTOR|bs|ks|okac\nSECTOR|BN|NR|\nSECTOR|BX|XX|ORBB\n");
+    CHECK(SectorAliasFor(sf, "ORBB", "bs") == "SR" && SectorAliasFor(sf, "OKAC", "BS") == "KS");
+    CHECK(SectorAliasFor(sf, "ORBB", "BN") == "NR" && SectorAliasFor(sf, "OKAC", "BN") == "NR");
+    CHECK(SectorAliasFor(sf, "OKAC", "BX").empty() && SectorAliasFor(sf, "", "BX") == "XX");
+    CHECK(SectorAliasFor(sf, "", "BS") == "KS" && SectorAliasFor(sf, "ORBB", "ZZ").empty());
 
     // sector indicator colour by flight plan state, named as in EuroScope's Symbology
     CHECK(std::string(SectorColourName(0)) == "non_concerned" && std::string(SectorColourName(1)) == "notified" &&
@@ -434,6 +444,10 @@ int main() {
         std::string x64 = dll; x64[0x84] = 0x64; x64[0x85] = (char)0x86;
         std::string exe = dll; exe[0x80 + 23] = 0x00;
         CHECK(!LooksLikeX86Dll(x64) && !LooksLikeX86Dll(exe) && !LooksLikeX86Dll("<html>404</html>") && !LooksLikeX86Dll(""));
+        // a PE offset near the top of the range: false, not an exception (pe + 24 would wrap in the 32-bit updater, #82)
+        std::string far(0x200, '\0');
+        far[0] = 'M'; far[1] = 'Z'; far[0x3C] = (char)0xF0; far[0x3D] = (char)0xFF; far[0x3E] = (char)0xFF; far[0x3F] = (char)0xFF;
+        CHECK(!LooksLikeX86Dll(far));
     }
     std::string sha64(64, 'a');
     CHECK(UpdateAvailable("0.4.0", "0.5.0", sha64) && !UpdateAvailable("0.5.0", "0.5.0", sha64) && !UpdateAvailable("0.6.0", "0.5.0", sha64));
@@ -498,18 +512,6 @@ int main() {
         CHECK(!HasAssignedSquawk(codes, "2200") && !HasAssignedSquawk(codes, "2000") && !HasAssignedSquawk(codes, "7000") &&
               !HasAssignedSquawk(codes, "1200") && !HasAssignedSquawk(codes, "0441") && !HasAssignedSquawk(codes, ""));
         CHECK(HasAssignedSquawk(CodeList(), "2000"));               // nothing built in
-        CHECK(PositionMatches("OKBK_TWR", "OKBK_N_TWR") && PositionMatches("OKBK_TWR", "okbk_twr"));
-        CHECK(!PositionMatches("OKBK_TWR", "OKBK_APP") && !PositionMatches("OKBK_TWR", "OKBK"));
-        CHECK(CallsignPrefix("OKBK_N_TWR") == "OKBK" && CallsignSuffix("OKBK_N_TWR") == "TWR");
-
-        // top-down: the lowest position anyone is on gives departures their squawk
-        TopDown td = ParseTopDown("TOPDOWN|okbk|OKBK_DEL, OKBK_GND,OKBK_TWR,OKAC_CTR\r\nTOPDOWN|BAD|X_Y\nJUNK\n");
-        CHECK(td.size() == 1 && td["OKBK"].size() == 4);
-        CHECK(DeliveryByMe(td, "OKBK", "OKAC_CTR", {}));
-        CHECK(!DeliveryByMe(td, "OKBK", "OKAC_CTR", { "OKBK_TWR" }));
-        CHECK(DeliveryByMe(td, "OKBK", "OKBK_GND", { "OKBK_TWR", "OKAC_CTR" }));
-        CHECK(!DeliveryByMe(td, "ORBI", "OKAC_CTR", {}));          // no order from Core: only its own positions
-        CHECK(DeliveryByMe(td, "ORBI", "ORBI_TWR", { "ORBI_APP" }));
 
         User twr{ true, "OKBK_TWR" }, ctr{ true, "OKAC_CTR" }, obs{ false, "" };
         Aircraft gnd;                                               // on the ground at OKBK
@@ -741,15 +743,67 @@ int main() {
     CHECK(QnhMessage("OEJN", 1013, 0, 0, 0) == "Pressure monitor: OEJN QNH now 1013");
     CHECK(QnhMessage("OKBK", 1012, 0, 150, 0) == "Pressure monitor: OKBK QNH now 1012 TRL FL150");
 
-    // top-down
-    auto td = ParseTopDownOrders("TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR\nTOPDOWN|ORBI|ORBI_TWR,ORBI_APP,ORBB_S_CTR\n");
-    CHECK(CoveredByMe(td, "OKBK", "OKAC_CTR", {}) && !CoveredByMe(td, "OKBK", "OKAC_CTR", { "OKBK_N_TWR" }));
-    CHECK(CoveredByMe(td, "OKBK", "OKBK_1_TWR", { "OKAC_CTR" }) && !CoveredByMe(td, "ORBI", "OKAC_CTR", {}));
-    CHECK(CoveredByMe(td, "ORMM", "ORMM_TWR", {}) && !CoveredByMe(td, "ORMM", "ORBB_S_CTR", {}));     // no order: own positions
-    auto cov = AirportsCovered(td, "ORBB_S_CTR", { "ORBI_APP" });
-    CHECK(cov.empty());
-    cov = AirportsCovered(td, "ORBB_S_CTR", {});
-    CHECK(cov.size() == 1 && cov[0] == "ORBI");
+    // top-down and who provides what, as UKCP works it out (ownership_logic.hpp, #42)
+    {
+        using namespace kwiq::ownership;
+        // one parser: CRLF, case, spaces, a bad airport, junk, positions without "_" and repeats
+        auto td = ParseTopDown("TOPDOWN|okbk|OKBK_DEL, OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR,OKBK_TWR\r\nTOPDOWN|BAD|X_Y\nJUNK\n"
+                               "TOPDOWN|ORBI|ORBI_TWR,ORBI_APP,ORBB_S_CTR\nTOPDOWN|OKKK|TWR, \r\nTOPDOWN|OKBK\r\n");
+        CHECK(td.size() == 2 && td["OKBK"].size() == 5 && td["OKBK"][0] == "OKBK_DEL" && td["ORBI"].size() == 3);
+        CHECK(ParseTopDown("").empty() && TopDownOrder(td, "ORMM").size() == 4 && TopDownOrder(td, "ORMM")[0] == "ORMM_DEL" && TopDownOrder(td, "").empty());
+        CHECK(PositionMatches("OKBK_TWR", "OKBK_N_TWR") && PositionMatches("okbk_twr", "OKBK_1_TWR") && !PositionMatches("OKBK_TWR", "OKBK_APP"));
+        CHECK(!PositionMatches("OKBK_TWR", "OKBK") && !PositionMatches("OKBK", "OKBK_TWR") && CallsignSuffix("OKBK_N_TWR") == "TWR");
+        CHECK(HasActiveFrequency(118.3) && !HasActiveFrequency(199.998) && !HasActiveFrequency(0));
+
+        // UKCP GetServiceProvidersAtAirfield
+        auto services = [](const std::vector<ServiceProvision>& v) {
+            std::string s;
+            for (const auto& p : v) s += std::to_string((unsigned)p.service) + ":" + p.controller.callsign + " ";
+            return s;
+        };
+        std::vector<std::string> okbk = td["OKBK"];
+        ActiveCallsigns a;
+        CHECK(ServiceProvidersAt(okbk, a).empty());
+        a.Add("OKAC_CTR", true);                                    // only CTR: everything
+        CHECK(services(ServiceProvidersAt(okbk, a)) == "1:OKAC_CTR 2:OKAC_CTR 4:OKAC_CTR 8:OKAC_CTR 16:OKAC_CTR ");
+        a.Add("OKBK_N_TWR", false);                                 // TWR takes DEL, GND, TWR; CTR keeps APP
+        CHECK(services(ServiceProvidersAt(okbk, a)) == "1:OKBK_N_TWR 2:OKBK_N_TWR 4:OKBK_N_TWR 8:OKAC_CTR 16:OKAC_CTR ");
+        a.Add("OKBK_TWR", false);                                   // two on TWR: the first in callsign order leads
+        CHECK(a.LeadFor("OKBK_TWR")->callsign == "OKBK_N_TWR" && !a.Add("OKBK_TWR", false));
+        a.Add("OKBK_APP", false);                                   // APP: final approach and approach; CTR nothing
+        CHECK(services(ServiceProvidersAt(okbk, a)) == "1:OKBK_N_TWR 2:OKBK_N_TWR 4:OKBK_N_TWR 8:OKBK_APP 16:OKBK_APP ");
+        a.Add("OKBK_GND", false);                                   // GND: delivery and ground
+        CHECK(services(ServiceProvidersAt(okbk, a)) == "1:OKBK_GND 2:OKBK_GND 4:OKBK_N_TWR 8:OKBK_APP 16:OKBK_APP ");
+        CHECK(a.Remove("okbk_gnd") && !a.Remove("OKBK_GND") && a.User()->callsign == "OKAC_CTR");
+
+        // AirfieldOwnership: Core's orders and EuroScope's controller events
+        AirfieldOwnership o;
+        o.SetTopDown(td);
+        o.ControllerUpdate("OKAC_CTR", true, true, 124.1);
+        CHECK(o.DeliveryControlProvidedByUser("OKBK") && o.DeliveryControlProvidedByUser("okbk") && !o.DeliveryControlProvidedByUser("ORBI"));
+        o.ControllerUpdate("OKBK_TWR", false, true, 199.998);      // no primary frequency yet: not active
+        CHECK(o.DeliveryControlProvidedByUser("OKBK"));
+        o.ControllerUpdate("OKBK_TWR", false, true, 118.3);
+        CHECK(!o.DeliveryControlProvidedByUser("OKBK") && o.Providers().DeliveryProviderForAirfield("OKBK") == "OKBK_TWR");
+        CHECK(o.Providers().ServiceProvidedAtAirfieldByUser("OKBK", ServiceType::Approach));
+        CHECK(o.Providers().GetAirfieldsWhereUserProvidingServices(kAnyService) == std::vector<std::string>({ "OKBK" }));
+        CHECK(o.Providers().GetAirfieldsWhereUserProvidingServices(ServiceType::Delivery).empty());
+        CHECK(o.UserHasTopdownAirfield("OKBK") && !o.UserHasTopdownAirfield("ORBI") && o.UserTopdownAirfields() == std::vector<std::string>({ "OKBK" }));
+        o.ControllerDisconnect("OKBK_TWR");
+        CHECK(o.DeliveryControlProvidedByUser("OKBK"));
+        o.ControllerUpdate("ORBI_APP", false, false, 120.0);       // not a controller (an observer): not active
+        CHECK(!o.Active().CallsignActive("ORBI_APP"));
+        // an airfield Core has no order for: its own positions only
+        o.ControllerUpdate("ORMM_TWR", false, true, 118.1);
+        CHECK(o.Providers().DeliveryProviderForAirfield("ORMM") == "ORMM_TWR" && !o.UserHasTopdownAirfield("ORMM"));
+        // new orders keep who is online
+        o.SetTopDown(ParseTopDown("TOPDOWN|ORMM|ORMM_TWR,OKAC_CTR\n"));
+        CHECK(o.Providers().DeliveryProviderForAirfield("ORMM") == "ORMM_TWR" && o.UserHasTopdownAirfield("ORMM") && !o.UserHasTopdownAirfield("OKBK"));
+        CHECK(o.Providers().ServiceProvidedAtAirfieldByUser("ORMM", ServiceType::FinalApproach));
+        o.SelfDisconnect();
+        CHECK(!o.DeliveryControlProvidedByUser("ORMM") && o.Providers().GetAirfieldsWhereUserProvidingServices(kAnyService).empty() &&
+              !o.UserHasTopdownAirfield("ORMM") && o.Active().All().empty());
+    }
 
     // procedure notifications
     auto notices = ParseNotices("NOTICE|12|OKBK, okkk|2026-11-01|0|Standard taxi routes|https://docs.kuwait-iraqvacc.net/x|Line 1\\nLine | 2\nNOTICE||OKBK|x|0|t|l|b\n");
@@ -762,16 +816,13 @@ int main() {
 
     // QNH monitor, top-down and notifications: empty, CRLF, short and malformed lines (#52)
     CHECK(QnhFromMetar("OKBK Q101") == -1 && QnhFromMetar("OKBK QABCD A29.9") == -1 && QnhFromMetar("METAR OKBK Q1012\r\n") == 1012);
+    CHECK(QnhFromMetar("OKBK \xC3\xA9 Q\xC3\xA9\xC3\xA9 Q1012") == 1012);              // bytes above 127 (#86)
     CHECK(ParseMetars("").empty() && ParseMetars("METAR|OKBK\r\nMETAR||x\r\n").empty() && ParseMetars("METAR|OKBK|OKBK Q1012\r\n").at("OKBK") == "OKBK Q1012");
     CHECK(ParseTrl("").empty() && ParseTrl("TRL|OR|14000\r\nTRL||1|150\r\nTRL|OR|x|150,980\r\n").empty());
     auto trl2 = ParseTrl("TRL|or|14000|160, 980 ,170\r\n");
     CHECK(trl2.size() == 1 && trl2[0].prefix == "OR" && trl2[0].ta == 14000 && TrlFor(trl2, "orbi", 980) == 160 && TrlFor({}, "ORBI", 1013) == 0);
     CHECK(QnhMessage("OKBK", 1012, 1012, 0, 150) == "Pressure monitor: OKBK QNH now 1012");
-    CHECK(ParseTopDownOrders("").empty() && ParseTopDownOrders("TOPDOWN|OKBK\r\nTOPDOWN|OKB|OKB_TWR\r\nTOPDOWN|OKBK|TWR, \r\n").empty());
-    auto td2 = ParseTopDownOrders("TOPDOWN|okbk| okbk_twr ,OKAC_CTR\r\n");
-    CHECK(td2.size() == 1 && td2["OKBK"].size() == 2 && td2["OKBK"][0] == "OKBK_TWR");
-    CHECK(!TopDownPositionMatches("OKBK_TWR", "OKBK") && !TopDownPositionMatches("OKBK", "OKBK_TWR") && TopDownPositionMatches("okbk_twr", "OKBK_X_TWR"));
-    CHECK(!CoveredByMe(td2, "OKBK", "", {}) && !CoveredByMe(td2, "", "OKBK_TWR", {}) && AirportsCovered(td2, "", {}).empty());
+    CHECK(kwiq::ownership::ParseTopDown("TOPDOWN|OKBK\r\nTOPDOWN|OKB|OKB_TWR\r\nTOPDOWN|OKBK|TWR, \r\n").empty());
     CHECK(ParseNotices("").empty() && ParseNotices("NOTICE|1|OKBK|2026-11-01|0|t|l\r\n").empty());
     auto n2 = ParseNotices("NOTICE| 7 |OKBK,,|2026-11-01|1|Title|https://x.net|end\\n\r\n");
     CHECK(n2.size() == 1 && n2[0].id == "7" && n2[0].airports.size() == 1 && n2[0].read && n2[0].text == "end\r\n" && !NoticeRelevant(n2[0], {}));

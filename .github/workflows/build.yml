@@ -23,9 +23,10 @@ on:
     types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
+# Read only by default: the test and build jobs compile the pull request's code. Only the jobs that publish get
+# more, each in its own permissions block.
 permissions:
-  contents: write        # to create releases
-  pull-requests: write   # to comment on a pull request when its test build is published
+  contents: read
 
 concurrency:
   group: build-${{ github.event.pull_request.number || github.ref }}
@@ -71,6 +72,13 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic
           ./test_logic
+      # The same tests with AddressSanitizer and UndefinedBehaviorSanitizer: an out-of-bounds read, an overflow or
+      # other undefined behaviour in the pure logic fails the build
+      - name: Logic tests (sanitizers)
+        run: |
+          g++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer \
+            -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic_san
+          ./test_logic_san
 
   build:
     needs: test
@@ -180,6 +188,9 @@ jobs:
       needs.changes.outputs.release == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # to create releases
+      pull-requests: write   # to say on a pull request that its test build is published
     outputs:
       published: ${{ steps.main.outputs.published }}
     env:
@@ -233,9 +244,16 @@ jobs:
           gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$tag" KWIQPlugin.dll KWIQPluginUpdater.dll KWIQPluginCore.dll --prerelease --target "$SHA" --title "$title" \
             --notes "For testing only. Core does not offer pre-releases to controllers. Built from ${SHA:0:7}."
+          # One comment per pull request, edited on every push, not a new one each time
           if [ -n "$PR" ]; then
             url=$(gh release view "$tag" --json url -q .url)
-            gh pr comment "$PR" --body "Test build $VERSION has been published as a pre-release: [$tag]($url) (built from ${SHA:0:7})."
+            marker="<!-- kwiq-test-build -->"
+            body="$marker
+          Test build $VERSION has been published as a pre-release: [$tag]($url) (built from ${SHA:0:7})."
+            id=$(gh api --paginate "repos/$GH_REPO/issues/$PR/comments" \
+                   --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | tail -n 1)
+            if [ -n "$id" ]; then gh api -X PATCH "repos/$GH_REPO/issues/comments/$id" -f body="$body" > /dev/null
+            else gh pr comment "$PR" --body "$body"; fi
           fi
 
   changelog:
@@ -245,6 +263,8 @@ jobs:
     needs: release
     if: needs.release.outputs.published == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read         # reads the releases; the docs repository is written with DOCS_REPO_TOKEN
     env:
       GH_TOKEN: ${{ github.token }}
       DOCS_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
@@ -306,6 +326,8 @@ jobs:
     # a closed pull request no longer needs its test build
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # to delete the test pre-release and its tag
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}

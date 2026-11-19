@@ -77,59 +77,6 @@ inline bool HasAssignedSquawk(const CodeList& list, const std::string& s) {
     return !r || r->countsAsAssigned;
 }
 
-// ---- callsigns ---------------------------------------------------------------------------------
-// OKBK_N_TWR -> OKBK and TWR
-inline std::string CallsignPrefix(const std::string& cs) { return Upper(cs.substr(0, cs.find('_'))); }
-inline std::string CallsignSuffix(const std::string& cs) {
-    size_t i = cs.rfind('_');
-    return i == std::string::npos ? std::string() : Upper(cs.substr(i + 1));
-}
-// A top-down position (OKBK_TWR) is worked by OKBK_TWR, OKBK_1_TWR, OKBK_N_TWR: same prefix and suffix
-inline bool PositionMatches(const std::string& position, const std::string& callsign) {
-    if (callsign.find('_') == std::string::npos) return false;
-    return CallsignPrefix(position) == CallsignPrefix(callsign) && CallsignSuffix(position) == CallsignSuffix(callsign);
-}
-
-// ---- top-down: who gives departures their squawk (UKCP AirfieldServiceProviderCollection) ---------------
-// Core /api/plugin/topdown (plain text, shared with the QNH monitor and notifications):  TOPDOWN|<airport>|<position>,<position>,...  lowest first,
-// e.g. TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR
-using TopDown = std::unordered_map<std::string, std::vector<std::string>>;
-
-inline TopDown ParseTopDown(const std::string& body) {
-    TopDown td;
-    for (const auto& line : SplitChar(body, '\n')) {
-        auto f = SplitChar(Trim(line), '|');
-        if (f.size() < 3 || f[0] != "TOPDOWN") continue;
-        std::string apt = Upper(Trim(f[1]));
-        if (!IsAirportCode(apt)) continue;
-        std::vector<std::string> order;
-        for (const auto& p : SplitChar(f[2], ',')) {
-            std::string pos = Upper(Trim(p));
-            if (pos.find('_') != std::string::npos) order.push_back(pos);
-        }
-        if (!order.empty()) td[apt] = order;
-    }
-    return td;
-}
-// An airport Core has no order for is covered by its own positions only
-inline std::vector<std::string> TopDownOrder(const TopDown& td, const std::string& airport) {
-    auto it = td.find(airport);
-    if (it != td.end()) return it->second;
-    return { airport + "_DEL", airport + "_GND", airport + "_TWR", airport + "_APP" };
-}
-// The user gives departures from the airport their squawk: the lowest position in its top-down order that
-// anyone is on is one the user is on. online = the other controllers' callsigns.
-inline bool DeliveryByMe(const TopDown& td, const std::string& airport, const std::string& me,
-                         const std::vector<std::string>& online) {
-    if (airport.empty() || me.empty()) return false;
-    for (const auto& pos : TopDownOrder(td, airport)) {
-        if (PositionMatches(pos, me)) return true;
-        for (const auto& cs : online)
-            if (PositionMatches(pos, cs)) return false;
-    }
-    return false;
-}
-
 // ---- the rules (UKCP SquawkAssignment) ---------------------------------------------------------
 struct User {
     bool controller = false;          // logged on as a controller (not an observer), live or sweatbox
@@ -139,7 +86,7 @@ struct User {
 struct Aircraft {
     std::string callsign, origin, destination, squawk;          // squawk: the one controllers assigned
     bool vfr = false, tracked = false, trackedByMe = false;
-    bool deliveryByMe = false;        // DeliveryByMe(origin)
+    bool deliveryByMe = false;        // the user provides Delivery at the origin (ownership::AirfieldOwnership)
     double fromOrigin = 0;            // nm from the departure airport
     int groundSpeed = 0, altitude = 0;                          // kt, ft
 };

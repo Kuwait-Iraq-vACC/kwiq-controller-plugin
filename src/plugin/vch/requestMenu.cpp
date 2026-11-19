@@ -25,8 +25,6 @@ string lastError, lastDebug, lastDebug2, lastAmend, nextAmend = "";
 map<string, requestBox> request;  // type, time, lastSeen, byMe
 map<string, landingBox> landing;  // byMe, eraseTime
 
-internetConnection interNet(MY_PLUGIN_VERSION);
-
 // Euroscope functions
 
 CVCHPlugin::CVCHPlugin(const char* name, const char* version, const char* developer, const char* copyright)
@@ -1543,26 +1541,3 @@ int CVCHPlugin::countRequests(map<std::string, requestBox>* cRequest, char reque
 	return count;
 }
 
-void CVCHPlugin::versionCheck() {
-	displayMessage("Checking VCH version...");
-	string answer = interNet.getData();
-	if (interNet.hasError) {
-		displayError("Version checking Error: " + answer);
-		return;
-	}
-	if (answer.find_first_of("ERROR") == 0) {
-		displayError("ERROR DATA: " + answer);
-		return;
-	}
-	if (answer == MY_PLUGIN_VERSION) {
-		displayMessage("VCH is up to date!");
-	}
-	else {
-		string versionMsg = "New VCH version available: ";
-		versionMsg += answer;
-		versionMsg += ". Your version is: ";
-		versionMsg += MY_PLUGIN_VERSION;
-		versionMsg += ".";
-		displayError(versionMsg);
-	}
-}
