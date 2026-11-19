@@ -6,7 +6,7 @@
 # no scaling at those sizes and stays crisp. Each is written as a 32-bit BMP with straight (not premultiplied)
 # alpha; kwiq.rc embeds them and KWIQPlugin.cpp premultiplies and alpha-blends them.
 #
-# Run from the repo root in Windows PowerShell: powershell -NoProfile -ExecutionPolicy Bypass -File kwiq_logo.ps1
+# Run from the repo root in Windows PowerShell: powershell -NoProfile -ExecutionPolicy Bypass -File resource/kwiq_logo.ps1
 # Only needed when the logo changes; the BMPs are committed.
 
 $ErrorActionPreference = 'Stop'

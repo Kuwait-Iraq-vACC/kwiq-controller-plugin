@@ -1,7 +1,7 @@
 // fpc_logic.hpp - flight plan check (FPC), adapted from VFPC (https://github.com/hpeter2/VFPC, from
 // https://github.com/DrFreas/VFPC; analyzeFP.cpp validizeSid and getFails; GPL-3.0): the rules the vACC
 // keeps in VFPC's Sid.json, per departure airport and SID. Separate from the SRD check in kwiq_logic.hpp.
-// Pure logic (no Windows / EuroScope dependencies), unit-tested in tests/test_logic.cpp.
+// Pure logic (no Windows / EuroScope dependencies), unit-tested in test/test_logic.cpp.
 // License: GPL-3.0-or-later
 #pragma once
 

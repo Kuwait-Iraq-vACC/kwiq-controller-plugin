@@ -1,7 +1,7 @@
 // discord.hpp - DiscordEuroScope: Discord Rich Presence for EuroScope, built into the KWIQ plugin.
 //
 // Adapted from DiscordEuroScope by Kirollos Nashaat (https://github.com/Kirollos/DiscordEuroScope, 1.3.0-rc1,
-// GPL-3.0), see discord.cpp and NOTICE.md. Uses discord-rpc (Multi Theft Auto's fork, MIT) in libs/discord-rpc.
+// GPL-3.0), see discord.cpp and NOTICE.md. Uses discord-rpc (Multi Theft Auto's fork, MIT) in third_party/discord-rpc.
 // Everything DiscordEuroscope_config.json held comes from Core (kwiq::DiscordConfig).
 #pragma once
 #include <windows.h>
