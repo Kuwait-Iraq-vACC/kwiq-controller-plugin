@@ -102,6 +102,8 @@ The SRD item checks the filed route and level against the SRD rows for the fligh
 2. For a flight whose destination is outside the vACC's airspace (not `srd.domestic_prefixes`, default `OK,OR`), rows from its departure airport to the point where it leaves the airspace, as the UK Controller Plugin does. If there are none for that point, rows to the point where it leaves OKAC for ORBB or the other way round.
 3. Otherwise, en-route rows whose two ends are both on the filed route.
 
+The Iraq AIP's routes start or end at the aerodrome's VOR (ORBI: `BGD DCT NOLDO B411 PAXAT`, ORMM: `TASMI G795 BSR`), which pilots who file a SID or STAR leave out. So a navaid (2 or 3 letters) at an end of a row that is an airport is optional there: `NOLDO1A NOLDO B411 PAXAT` matches the row above, and **Explain SRD result** says `(BGD not filed)`. A navaid anywhere else in the row is still required.
+
 Where a flight leaves the airspace comes from Core's FIR exit points, `/api/plugin/fir-exits`, one line per exit cone: `EXIT|<point>|<from heading>|<to heading>|<internal 0 or 1>`. A point can have several cones, one per direction (a point on the OKAC/ORBB boundary is crossed both ways), so the same point on several lines is several cones, each with its own internal flag; identical lines count once. A route leaves at a point if its track from there to the next point is inside any of its cones, and if two of that point's cones overlap at that track, the external one is used. An example is `EXIT|ROTAP|300|060|0`. A flight leaves at the first listed point on its route (EuroScope's extracted route) whose track to the next point lies in one of that point's exit cones, each from one heading clockwise to the other. Internal points are on the OKAC and ORBB boundary, and count only before the flight leaves the vACC's airspace. With no exit points in Core (or a 404), only steps 1 and 3 apply.
 
 **Explain SRD result** names the exit point it used, and **Open SRD search window** fills in the exit point as the destination for such a flight. `.kwiq status` shows how many exit points Core sent (distinct points, not cones).
@@ -115,20 +117,22 @@ Where a flight leaves the airspace comes from Core's FIR exit points, `/api/plug
 **Search Results** lists every matching route: **Min** (`MC` when there is no minimum), **Max** (`-` when there is no limit), **FRA** (whether the route has Free Route Airspace, `<FRA>`, in it) and the **Route String**. Click a route to see its **Notes**, then **Copy Route String To Clipboard**. Tab moves between the boxes and Esc or **Close** closes the window. EuroScope keeps running while it is open.
 
 ## Flight plan check (FPC)
-The FPC item is VFPC (hpeter2/VFPC, from DrFreas/VFPC) built in, with the rules the vACC keeps in VFPC's `Sid.json` served by Core instead of a file. It is separate from the SRD check. Rules are per departure airport and per SID, by the SID's first waypoint (`SESRU` for SESRU1A). They are tried from top to bottom, and the first one the flight fits decides, so the narrowest rules go first.
+The FPC item is VFPC (hpeter2/VFPC, from DrFreas/VFPC) built in, with the rules the vACC keeps in VFPC's `Sid.json` served by Core instead of a file. It is separate from the SRD check. Rules are per departure airport and per SID, by the SID's first waypoint (`SESRU` for SESRU1A), or by the aerodrome's VOR (ORBB's rules are all keyed on it: `BGD`, `BSR`, `RER`, `KIR`, `SUL`, `ALI`). They are tried from top to bottom, and the first one the flight fits decides, so the narrowest rules go first.
+
+When the SID's first waypoint has no rules at the airport, or the flight plan has no SID yet (EuroScope only sets one once a runway is active), the rules are found by the route instead: first those of a point on the filed route, then any rule whose `airways` the route follows. So an ORBI departure on `NOLDO1A NOLDO B411 PAXAT` is checked against BGD's `NOLDO B411 PAXAT` rule, and **Explain FPC result** says `rules for BGD by the route`. A SID that has rules of its own is only checked against those.
 
 | Field | Kind | What it does | Fails as |
 |---|---|---|---|
 | `suffix` | filter | the rule is only for that SID suffix, e.g. `1A` | |
 | `destinations` | filter | only for these destinations; a prefix covers all of them (`OM`) | |
-| `airways` | filter | only if the route has one of these, an airway or a run of route elements (`NAMDI M860 NINVA`, DCT ignored) | |
+| `airways` | filter | only if the route has one of these, an airway or a run of route elements (`NAMDI M860 NINVA`, DCT inside a run ignored); `DCT` on its own means the route has a DCT | |
 | `engine` | check | engine type one of `P`, `T`, `J`, `E` | `ENG` |
-| `direction` | check | `EVEN`, `ODD` or `ANY` cruising level | `E/O` |
+| `direction` | check | `EVEN`, `ODD` or `ANY` cruising level; above FL410, FL410/450/490 are odd and FL430/470/510 even | `E/O` |
 | `min_fl`, `max_fl` | check | lowest and highest flight level | `MIN`, `MAX` |
 | `forbidden_fls` | check | flight levels not allowed | `FLR`, yellow (`ui.colour_warn`) when it is the only failure |
 | `navigation` | check | equipment codes allowed, e.g. `RG` | `NAV` |
 
-No SID in the flight plan, a SID with no rules, or no rule that fits the flight is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked. `.kwiq status` shows how many airports have rules.
+No rule that fits the flight (by its SID or its route) is `SID`. VFR flights show `VFR`, and airports with no rules show nothing. The item shows the first failure; **Explain FPC result** lists everything that was checked. `.kwiq status` shows how many airports have rules.
 
 Core serves the rules at `/api/plugin/fpc`, one line per rule in order (a 404 means none):
 `FPC|<airport>|<sid>|<suffix>|<direction>|<min_fl>|<max_fl>|<forbidden_fls>|<destinations>|<airways>|<engine>|<navigation>`. Lists are comma separated and an empty field is no restriction, e.g. `FPC|ORBI|BGD||EVEN|80|600|250,260||DELMI DCT RUKAM B411 MURIB||`. The existing `Sid.json` files (OKAC `OKAC/Plugins/VFPC/Sid.json`, ORBB `.data/VFPC/*.json`) map onto it field for field.
