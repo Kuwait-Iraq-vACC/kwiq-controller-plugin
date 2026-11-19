@@ -52,7 +52,7 @@ int main() {
         CHECK(d.pair.size() == 1 && d.wp.size() == 1);                    // built again from scratch
     }
     CHECK(ParseLevelFt("1234567") == 0 && ParseLevelFt(" fl350\r\n") == 35000 && ParseLevelFt("999") == 99900);
-    CHECK(ParseSectors("").empty() && ParseSectors("SECTOR|BS|SR\r\n").at("BS") == "SR" && ParseSectors("SECTOR|BS\r\nSECTOR||SR\r\n").empty());
+    CHECK(ParseSectors("").empty() && ParseSectors("SECTOR|BS|SR\r\n").at("|BS") == "SR" && ParseSectors("SECTOR|BS\r\nSECTOR||SR\r\n").empty());
     {
         PluginConfig c = ParseConfig("|nokey\r\na|1|2\r\nb| \r\nnobar\r\nn|99999999999\r\n");
         CHECK(c.kv.size() == 3 && c.Get("a") == "1|2" && c.Get("b", "x").empty() && c.GetBool("b", true) && c.GetBool("a", false));
@@ -385,9 +385,15 @@ int main() {
 
     // sector indicators, only for the ESE position IDs Core lists, shown as their alias
     SectorMap sm = ParseSectors("SECTOR|bs|sr\nSECTOR|BN|NR\nSECTOR|BGA|BGD\nSECTOR|BX|\nSECTOR|BL|ABCDE\nbad\n");
-    CHECK(sm.size() == 4 && sm["BS"] == "SR" && sm["BN"] == "NR" && sm["BGA"] == "BGD" && sm["BL"] == "ABCD");
-    CHECK(sm.find("BX") == sm.end());
+    CHECK(sm.size() == 4 && sm["|BS"] == "SR" && sm["|BN"] == "NR" && sm["|BGA"] == "BGD" && sm["|BL"] == "ABCD");
+    CHECK(sm.find("|BX") == sm.end());
     CHECK(ParseSectors("NONE\n").empty());
+    // per sector file: the loaded file's row, else the row for both; file not known: both, else either file
+    SectorMap sf = ParseSectors("SECTOR|BS|SR|ORBB\nSECTOR|bs|ks|okac\nSECTOR|BN|NR|\nSECTOR|BX|XX|ORBB\n");
+    CHECK(SectorAliasFor(sf, "ORBB", "bs") == "SR" && SectorAliasFor(sf, "OKAC", "BS") == "KS");
+    CHECK(SectorAliasFor(sf, "ORBB", "BN") == "NR" && SectorAliasFor(sf, "OKAC", "BN") == "NR");
+    CHECK(SectorAliasFor(sf, "OKAC", "BX").empty() && SectorAliasFor(sf, "", "BX") == "XX");
+    CHECK(SectorAliasFor(sf, "", "BS") == "KS" && SectorAliasFor(sf, "ORBB", "ZZ").empty());
 
     // sector indicator colour by flight plan state, named as in EuroScope's Symbology
     CHECK(std::string(SectorColourName(0)) == "non_concerned" && std::string(SectorColourName(1)) == "notified" &&

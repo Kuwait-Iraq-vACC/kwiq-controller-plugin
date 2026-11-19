@@ -635,8 +635,7 @@ public:
         EuroScopePlugIn::CController c = me.IsValid() && kwiq::Upper(me.GetCallsign()) == cs ? me : ControllerSelect(trackerCallsign);
         if (!c.IsValid() || !c.GetPositionIdentified() || !c.GetPositionId() || !*c.GetPositionId()) return "";
         std::lock_guard<std::mutex> g(mu_);
-        auto it = sectors_.find(kwiq::Upper(c.GetPositionId()));
-        return it == sectors_.end() ? std::string() : it->second;
+        return kwiq::SectorAliasFor(sectors_, sectorPkg_, c.GetPositionId());   // IDs are per sector file
     }
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_ && !reduced_; }
     bool Duplicate() const { return duplicate_; }
@@ -1786,6 +1785,7 @@ private:
         for (const std::string& p : { src, path, name, sf::DllPath() })
             if (pkg.empty() && !p.empty()) pkg = SectorPackage(p, "");
         if (pkg.empty()) pkg = SectorPackage("", callsign);
+        { std::lock_guard<std::mutex> g(mu_); sectorPkg_ = pkg; }     // the sector indicators' aliases follow it
         if (pkg.empty()) {
             { std::lock_guard<std::mutex> g(mu_); sf_ = SfStatus{}; }
             std::string key = "?pkg>" + (l.valid() ? l.Str() : std::string("?"));
@@ -2019,6 +2019,7 @@ private:
     std::string latest_, latestSha_;
     std::map<std::string, std::string> upstreamAirac_, sectorUrl_;   // per package: OKAC, ORBB
     std::string sectorPath_, motd_, lastSfKey_, myCallsign_, sectorName_;
+    std::string sectorPkg_;                                          // OKAC or ORBB, as CheckSectorFile found it; empty: not known
     std::string esAccepted_, esUrl_ = ES_SETUP_URL;                 // Core's euroscope.versions and euroscope.setup_url
     bool esConfigured_ = false;                                     // Core's config has arrived at least once
     std::map<std::string, std::string> lastErr_;

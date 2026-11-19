@@ -518,19 +518,32 @@ inline std::vector<size_t> SrdSearch(const SrdData& d, const std::string& adep, 
 // Core /api/plugin/sectors (plain text):  SECTOR|<ESE position ID>|<alias, max 4 chars>
 // Only the positions Core lists get an indicator, and the alias is what controllers see on the radar
 // (e.g. BS -> SR for ORBB_S_CTR). The ID is the one in the ESE's [POSITIONS], as EuroScope gives it.
-using SectorMap = std::unordered_map<std::string, std::string>;   // ESE position ID -> alias
+// ESE position IDs are per sector file (the same ID can be a different position in OKAC's and ORBB's ESE),
+// so Core sends SECTOR|<ID>|<alias>|<OKAC, ORBB or empty for both>. Keyed "<file>|<ID>", "|<ID>" for both.
+using SectorMap = std::unordered_map<std::string, std::string>;
 
 inline SectorMap ParseSectors(const std::string& body) {
     SectorMap m;
     for (const auto& line : SplitChar(body, '\n')) {
         auto f = SplitChar(Trim(line), '|');
         if (f[0] != "SECTOR" || f.size() < 3) continue;
-        std::string id = Upper(Trim(f[1])), alias = Upper(Trim(f[2]));
+        std::string id = Upper(Trim(f[1])), alias = Upper(Trim(f[2])), file = f.size() > 3 ? Upper(Trim(f[3])) : "";
         if (alias.size() > 4) alias.resize(4);
         if (id.empty() || alias.empty()) continue;
-        m[id] = alias;
+        m[file + "|" + id] = alias;
     }
     return m;
+}
+
+// The alias of a position ID in the loaded sector file (OKAC or ORBB): its own row, else the row for both.
+// Sector file not known: the row for both, else whichever file has the ID.
+inline std::string SectorAliasFor(const SectorMap& m, const std::string& sectorFile, const std::string& positionId) {
+    std::string id = Upper(positionId), file = Upper(sectorFile);
+    auto find = [&](const std::string& f) { auto it = m.find(f + "|" + id); return it == m.end() ? std::string() : it->second; };
+    std::string a = file.empty() ? std::string() : find(file);
+    if (a.empty()) a = find("");
+    if (a.empty() && file.empty()) { a = find("OKAC"); if (a.empty()) a = find("ORBB"); }
+    return a;
 }
 
 // The indicator is drawn in the colour of the aircraft's tag, which Core sets per EuroScope flight plan
