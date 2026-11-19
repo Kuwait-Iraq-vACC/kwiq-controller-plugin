@@ -439,6 +439,49 @@ int main() {
         CHECK(AssignForm(gnd, "OKBK_TWR") == "origin=OKBK&destination=OMDB&rules=I&requester=OKBK_TWR");
         Aircraft v = gnd; v.vfr = true;
         CHECK(AssignForm(v, "ORBI_N_APP") == "origin=OKBK&destination=OMDB&rules=V&requester=ORBI_N_APP");
+
+        // what the plugin remembers
+        Stored st;
+        Remember(st, gnd);                                          // first sight: a new plan, not a changed one
+        CHECK(!st.planChanged && !ForceNeeded(&st, gnd) && st.origin == "OKBK" && st.squawk.empty());
+        a = gnd; a.squawk = "4521";
+        Stored had; Remember(had, a);                               // a code it had before the plugin saw it
+        CHECK(had.squawk == "4521" && !had.byHand);
+        a.squawk = "2000"; Remember(had, a);                        // later looks don't overwrite it
+        CHECK(had.squawk == "4521");
+        // a plan change is kept until a code is set, even if nothing could be done when it was seen
+        a = gnd; a.destination = "OTHH";
+        Remember(st, a);
+        CHECK(st.planChanged && ForceNeeded(&st, a));
+        Remember(st, a);                                            // seen again: still changed
+        CHECK(ForceNeeded(&st, a) && Decide(twr, a, &st, codes) == Action::Assign);
+        CodeSet(st, "4522", false);
+        CHECK(!ForceNeeded(&st, a) && st.squawk == "4522");
+        v = a; v.vfr = true;                                        // flight rules count too: Core picks the range from them
+        Remember(st, v);
+        CHECK(ForceNeeded(&st, v));
+        CodeSet(st, "4523", false);
+        // a code from the menu is by hand, and so is one typed in EuroScope (or set on another scope)
+        CodeSeen(st, "4523");                                       // the plugin's own: nothing changes
+        CHECK(!st.byHand);
+        CodeSeen(st, "2000");
+        CHECK(st.byHand && st.squawk == "2000");
+        a = v; a.squawk = "2000";
+        CHECK(Decide(twr, a, &st, codes) == Action::None);          // not replaced every 5 seconds
+        CodeSeen(st, ""); CodeSeen(st, "99");                       // cleared or invalid: ignored
+        CHECK(st.squawk == "2000" && st.byHand);
+        Stored gone{ "OKBK", "OMDB", "4521", false, 100 };          // disconnected: the code to give back is kept
+        CodeSeen(gone, "1234");
+        CHECK(gone.squawk == "4521" && !gone.byHand);
+        Remember(gone, gnd);                                        // reconnected with the same plan
+        CHECK(gone.expires == 0 && Decide(twr, gnd, &gone, codes) == Action::Previous);
+        // Core's answer is set only if it is still wanted
+        CHECK(AnswerWanted(false, twr, gnd, nullptr, codes));
+        a = gnd; a.squawk = "4521";                                 // someone set a code meanwhile
+        CHECK(!AnswerWanted(false, twr, a, nullptr, codes) && AnswerWanted(true, twr, a, nullptr, codes));
+        CHECK(!AnswerWanted(false, twr, gnd, &st, codes));          // set by hand meanwhile (st.byHand)
+        CHECK(!AnswerWanted(false, twr, other, nullptr, codes) && !AnswerWanted(true, twr, other, nullptr, codes));
+        CHECK(!AnswerWanted(true, obs, gnd, nullptr, codes));
     }
 
     // api-settings.json, as UKCP keeps its key

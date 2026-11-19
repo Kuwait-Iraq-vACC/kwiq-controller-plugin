@@ -1691,10 +1691,12 @@ private:
         a.altitude = pos.GetFlightLevel();
         return true;
     }
-    void SetSquawk(EuroScopePlugIn::CFlightPlan& fp, const std::string& code, bool byHand) {
+    // Remembered first, so EuroScope's report of the new code is known to be the plugin's own
+    void SetSquawk(EuroScopePlugIn::CFlightPlan& fp, std::string code, bool byHand) {
+        kwiq::squawk::Aircraft a;
+        SquawkFacts(fp, kwiq::squawk::User{}, {}, kwiq::squawk::TopDown{}, a);
+        if (kwiq::squawk::Stored* st = SquawkStore(a)) kwiq::squawk::CodeSet(*st, code, byHand);
         fp.GetControllerAssignedData().SetSquawk(code.c_str());
-        auto it = sqStored_.find(fp.GetCallsign());
-        if (it != sqStored_.end()) { it->second.squawk = code; it->second.byHand = byHand; }
     }
     void SquawkQueue(SqJob job) {
         { std::lock_guard<std::mutex> g(sqMu_); sqJobs_.push_back(std::move(job)); }
@@ -1723,26 +1725,28 @@ private:
             Msg("You can only change the squawk of an aircraft you track or nobody tracks.", true);
             return;
         }
-        if (!kwiq::squawk::UrlSafeCallsign(a.callsign) || !sqBusy_.insert(a.callsign).second) return;
+        if (!kwiq::squawk::UrlSafeCallsign(a.callsign)) return;
+        if (!sqBusy_.insert(a.callsign).second) {
+            Msg("Core is still answering for " + a.callsign + ": try again in a moment.", false);
+            return;
+        }
         SqJob job;
         job.callsign = a.callsign;
         job.method = "DELETE";
         job.network = SquawkNetwork();
         job.previous = a.squawk;
         job.manual = true;
-        SquawkStore(a.callsign, a.origin, a.destination);
         SetSquawk(fp, code, true);
         SquawkQueue(std::move(job));
     }
 
-    // UKCP SquawkEventHandler::AttemptAssignment, then remember the plan for a reconnect
+    // Remember the plan (a change is kept until a code is set), then UKCP SquawkEventHandler::AttemptAssignment
     void SquawkAttempt(EuroScopePlugIn::CFlightPlan& fp, const kwiq::squawk::User& u, const std::vector<std::string>& online,
                        const kwiq::squawk::TopDown& td, const kwiq::squawk::CodeList& codes, std::time_t now) {
         using namespace kwiq::squawk;
         Aircraft a;
         bool facts = SquawkFacts(fp, u, online, td, a);
-        auto it = sqStored_.find(a.callsign);
-        const Stored* s = it == sqStored_.end() ? nullptr : &it->second;
+        const Stored* s = SquawkStore(a);
         bool others = a.tracked && !a.trackedByMe;                  // theirs to give a code
         auto retry = sqRetryAt_.find(a.callsign);
         bool waiting = retry != sqRetryAt_.end() && now < retry->second;
@@ -1753,15 +1757,12 @@ private:
             case Action::None:     break;
             }
         }
-        SquawkStore(a.callsign, a.origin, a.destination);
     }
-    void SquawkStore(const std::string& callsign, const std::string& origin, const std::string& destination) {
-        if (callsign.empty()) return;
-        kwiq::squawk::Stored& st = sqStored_[callsign];
-        if (st.origin != origin || st.destination != destination) st.byHand = false;   // a new plan: automatic again
-        st.origin = origin;
-        st.destination = destination;
-        st.expires = 0;
+    kwiq::squawk::Stored* SquawkStore(const kwiq::squawk::Aircraft& a) {
+        if (a.callsign.empty()) return nullptr;
+        kwiq::squawk::Stored& st = sqStored_[a.callsign];
+        kwiq::squawk::Remember(st, a);
+        return &st;
     }
 
     void SquawkTick(std::time_t now) {
@@ -1818,7 +1819,18 @@ private:
             }
             ClearError("Squawk");
             sqRetryAt_.erase(r.callsign);
-            if (fp.IsValid()) SetSquawk(fp, r.squawk, false);
+            if (!fp.IsValid()) continue;
+            // Not if someone else took the aircraft, or set a code, while Core was answering
+            kwiq::squawk::User u = SquawkUser();
+            kwiq::squawk::Aircraft a;
+            SquawkFacts(fp, u, {}, kwiq::squawk::TopDown{}, a);
+            auto st = sqStored_.find(r.callsign);
+            auto codes = SquawkCodes();
+            const kwiq::squawk::CodeList none;
+            if (kwiq::squawk::AnswerWanted(r.manual, u, a, st == sqStored_.end() ? nullptr : &st->second, codes ? *codes : none))
+                SetSquawk(fp, r.squawk, false);
+            else if (r.manual)
+                Msg("Core gave " + r.callsign + " " + r.squawk + ", but it was not set: you can no longer change its squawk.", true);
         }
     }
 
@@ -1916,7 +1928,7 @@ private:
             Msg("You can only change the squawk of an aircraft you track or nobody tracks.", true);
             return;
         }
-        SquawkStore(a.callsign, a.origin, a.destination);
+        SquawkStore(a);
         if (!SquawkRequest(a, false, true))
             Msg("A squawk for " + a.callsign + " has already been asked for.", false);
     }
@@ -1931,14 +1943,15 @@ public:
             SquawkAttempt(fp, u, OnlineControllers(), *td, *codes, std::time(nullptr));
             return;
         }
-        auto d = fp.GetFlightPlanData();
-        SquawkStore(fp.GetCallsign(), kwiq::Upper(d.GetOrigin()), kwiq::Upper(d.GetDestination()));
+        kwiq::squawk::Aircraft a;
+        SquawkFacts(fp, u, {}, kwiq::squawk::TopDown{}, a);
+        SquawkStore(a);
     }
-    // A code someone set: the one to give back if the pilot reconnects
+    // A code someone set: the one to give back if the pilot reconnects. One the plugin didn't set is by hand.
     virtual void OnFlightPlanControllerAssignedDataUpdate(EuroScopePlugIn::CFlightPlan fp, int type) override {
         if (duplicate_ || type != EuroScopePlugIn::CTR_DATA_TYPE_SQUAWK || !fp.IsValid()) return;
         auto it = sqStored_.find(fp.GetCallsign());
-        if (it != sqStored_.end()) it->second.squawk = fp.GetControllerAssignedData().GetSquawk();
+        if (it != sqStored_.end()) kwiq::squawk::CodeSeen(it->second, fp.GetControllerAssignedData().GetSquawk());
     }
     virtual void OnFlightPlanDisconnect(EuroScopePlugIn::CFlightPlan fp) override {
         if (duplicate_) return;

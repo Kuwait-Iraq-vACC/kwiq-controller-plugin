@@ -34,7 +34,9 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - No code is built in: the codes never assigned, and which of them count as a code the aircraft has (UKCP's `HasAssignedSquawk`), come from Core's `/squawk/non-assignable`.
 - UKCP's conspicuity option is Non-discrete, with the codes (2000, 7000 for VFR) set in Core. No code is held while Core is asked; an aircraft Core could not give a code is not asked for again for a minute.
 - Who gives departures their squawk comes from Core's top-down order (`/api/plugin/topdown`) instead of UKCP's airfield ownership.
-- A reconnecting aircraft only gets its old code back if its departure and destination are unchanged; a code set by hand is left alone until they change.
+- A reconnecting aircraft only gets its old code back if its departure, destination and flight rules are unchanged; a code set by hand is left alone until they change. A change of plan is remembered until a code is set (UKCP compares with the stored plan only at that moment), and the flight rules count as the plan, as Core picks the range from them.
+- A code typed in EuroScope, or set on another scope, counts as set by hand, like one from the menu (UKCP replaces a typed 2000 or 7000 on its next pass).
+- Core's answer is only set if it is still wanted: not if another controller has started tracking the aircraft, or a code was set, while the request was out (UKCP sets it regardless). A by-hand change while a request is out is refused with a message instead of being ignored.
 - Requests say whether they are from the live network or sweatbox.
 
 ## Changes made to the Slots-Plugin code
