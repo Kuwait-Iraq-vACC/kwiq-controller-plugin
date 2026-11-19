@@ -6,7 +6,7 @@
 //   * Settings come from Core per callsign pattern (kwiq::RdfRow). RDF's settings file, RDFStyle.json, per-ASR
 //     settings and their .RDF commands are gone; .RDF REFRESH and .RDF RELOAD stay, and .RDF DRAW ON|OFF is
 //     the controller's own switch (handled in KWIQPlugin.cpp).
-//   * No plog, MFC or cpp-httplib: TrackAudio's version is read with the plugin's libcurl.
+//   * No plog, MFC or cpp-httplib. TrackAudio's version isn't read or checked: the WebSocket is all it uses.
 //   * Messages are passed to the main thread instead of being shown from the WebSocket's thread.
 //   * Refuses to start next to another RDF or afv-euroscope-bridge in the same EuroScope.
 // The drawing, the random offsets, the channel matching and the AFV hidden windows are RDF's, unchanged.
@@ -24,11 +24,9 @@
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocket.h>
 #include <nlohmann/json.hpp>
-#include "VatsimAPI.h"                  // kwiq_net::HttpGetBinary
 
 namespace {
 
-constexpr auto TRACKAUDIO_PARAM_VERSION = "/*";
 constexpr auto TRACKAUDIO_PARAM_WS = "/ws";
 constexpr int TRACKAUDIO_TIMEOUT_SEC = 1;
 constexpr int TRACKAUDIO_HEARTBEAT_SEC = 30;
@@ -114,11 +112,10 @@ struct KwiqRdf::Impl {
     std::atomic<bool> wsOpen{ false }, endpointChanged{ false };
     std::atomic<std::time_t> afvSeenAt{ 0 };
     std::mutex mtxInfo;
-    std::string trackAudioVersion;              // as TrackAudio answers, e.g. "TrackAudio v1.3.0"
     std::vector<std::pair<std::string, bool>> pending;   // messages for the main thread
 
     // main thread only
-    bool wasLoggedOn = false, toldMissing = false, toldOld = false;
+    bool wasLoggedOn = false, toldMissing = false;
     std::time_t loggedOnAt = 0;
 
     void Say(const std::string& m, bool err) { std::lock_guard<std::mutex> g(mtxInfo); pending.emplace_back(m, err); }
@@ -266,13 +263,9 @@ struct KwiqRdf::Impl {
                 else if (type == "kStationStates") StationStatesHandler(value);
             } else if (msg->type == ix::WebSocketMessageType::Open) {
                 wsOpen = true;
-                std::string addr, body, err;
+                std::string addr;
                 { std::lock_guard<std::mutex> g(mtxEndpoint); addr = addressTrackAudio; }
-                if (kwiq_net::HttpGetBinary("http://" + addr + TRACKAUDIO_PARAM_VERSION, body, err, 4096, TRACKAUDIO_TIMEOUT_SEC + 1, nullptr)) {
-                    std::string v = kwiq::Trim(body);
-                    { std::lock_guard<std::mutex> g(mtxInfo); trackAudioVersion = v; }
-                    Say("RDF connected to " + (v.empty() ? std::string("TrackAudio") : v) + " on " + addr + ".", false);
-                }
+                Say("RDF connected to TrackAudio on " + addr + ".", false);
             } else if (msg->type == ix::WebSocketMessageType::Close) {
                 bool was = wsOpen.exchange(false);
                 if (was) Say("RDF: TrackAudio disconnected.", true);
@@ -432,13 +425,12 @@ void KwiqRdf::Tick(std::time_t now, const std::string& callsign, bool loggedOn,
         if (callsign != d_->forCallsign) { d_->forCallsign = callsign; d_->cur = kwiq::RdfFor(d_->rows, callsign); }
     }
     std::vector<std::pair<std::string, bool>> out;
-    std::string version;
-    { std::lock_guard<std::mutex> g(d_->mtxInfo); out.swap(d_->pending); version = d_->trackAudioVersion; }
+    { std::lock_guard<std::mutex> g(d_->mtxInfo); out.swap(d_->pending); }
     for (auto& m : out) msg(m.first, m.second);
     if (!d_->started) return;
     if (d_->endpointChanged.exchange(false)) d_->Connect();
 
-    // Once a session, 15 seconds after logging on: TrackAudio missing (and no AFV client), or too old
+    // Once a session, 15 seconds after logging on: TrackAudio missing (and no AFV client)
     if (loggedOn && !d_->wasLoggedOn) d_->loggedOnAt = now;
     d_->wasLoggedOn = loggedOn;
     if (!loggedOn || now - d_->loggedOnAt < 15) return;
@@ -446,10 +438,6 @@ void KwiqRdf::Tick(std::time_t now, const std::string& callsign, bool loggedOn,
     if (!d_->wsOpen && !afv && !d_->toldMissing) {
         d_->toldMissing = true;
         msg("TrackAudio is not running, so RDF and the TrackAudio bridge are not working. Start TrackAudio (1.3.0 Beta 5 or later).", true);
-    }
-    if (d_->wsOpen && !version.empty() && kwiq::VersionInText(version).valid && !kwiq::TrackAudioVersionOk(version) && !d_->toldOld) {
-        d_->toldOld = true;
-        msg(version + " is too old for RDF and the TrackAudio bridge. Update TrackAudio to 1.3.0 Beta 5 or later.", true);
     }
 }
 
@@ -522,10 +510,8 @@ bool KwiqRdf::Command(const std::string& cmd) {
 }
 
 kwiq::TrackAudioState KwiqRdf::TrackAudio() const {
-    std::string version;
-    { std::lock_guard<std::mutex> g(d_->mtxInfo); version = d_->trackAudioVersion; }
     bool inUse = d_->BridgeEnabled() || d_->DrawEnabled();
-    return kwiq::TrackAudioStatus(d_->started, inUse, d_->wsOpen, version, std::time(nullptr) - d_->afvSeenAt < 600);
+    return kwiq::TrackAudioStatus(d_->started, inUse, d_->wsOpen, std::time(nullptr) - d_->afvSeenAt < 600);
 }
 
 void KwiqRdf::Reconnect() {

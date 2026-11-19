@@ -468,39 +468,24 @@ int main() {
     RdfSettings none = RdfFor({}, "OKBK_TWR");
     CHECK(!none.draw && none.bridge && none.threshold == -1);
 
-    // TrackAudio 1.3.0 Beta 5 or later
-    CHECK(TrackAudioVersionOk("TrackAudio v1.3.0-beta.5") && TrackAudioVersionOk("1.3.0") && TrackAudioVersionOk("v1.4.0-beta.1"));
-    CHECK(TrackAudioVersionOk("1.3.0-rc.1") && !TrackAudioVersionOk("1.3.0-beta.4") && !TrackAudioVersionOk("1.2.9") && !TrackAudioVersionOk("TrackAudio"));
     // RDF edge cases (#52)
     CHECK(ParseRdf("").empty() && ParseRdf("RDF\r\nRDF| \r\n").empty());
     auto rcr = ParseRdf("RDF|okbk_twr|draw=1|radius=x|threshold=-5|colour=#00ff00|nokey\r\n");
     CHECK(rcr.size() == 1 && rcr[0].pattern == "OKBK_TWR" && rcr[0].s.draw && rcr[0].s.radius == 20 && rcr[0].s.threshold == -5 && rcr[0].s.colour == 0x00FF00);
     CHECK(WildcardMatch("", "") && !WildcardMatch("", "A") && WildcardMatch("**", "abc") && WildcardMatch("a*c", "abbbc") && !WildcardMatch("a*c", "abcd"));
-    CHECK(!VersionInText("").valid && !VersionInText("TrackAudio 1.2").valid && VersionInText("TrackAudio v1.3.0-beta.5").pre.size() == 2);
-    CHECK(TrackAudioVersionOk("TrackAudio v1.3.0") && TrackAudioVersionOk("v1.3.0-beta.10") && !TrackAudioVersionOk("v1.3.0-alpha.9"));
-    CHECK(TrackAudioVersionOk("TrackAudio V1.3.0-Beta.5") && !TrackAudioVersionOk("TrackAudio v1.3.0-BETA.4"));   // any case
-    // punctuation after the version, and pre-releases written without their dot
-    CHECK(TrackAudioVersionOk("TrackAudio v1.3.0.") && TrackAudioVersionOk("\"v1.3.0-beta.5\"") && TrackAudioVersionOk("TrackAudio v1.3.0-beta.5:"));
-    CHECK(VersionInText("TrackAudio v1.2.0.").valid && !TrackAudioVersionOk("TrackAudio v1.2.0.") && VersionInText("v1.3.0-").pre.empty());
-    CHECK(!TrackAudioVersionOk("TrackAudio v1.3.0-beta4") && !TrackAudioVersionOk("v1.3.0-beta1") && TrackAudioVersionOk("v1.3.0-beta5") && TrackAudioVersionOk("v1.3.0-rc1"));
-    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.2.0.", false) == TrackAudioState::TooOld);
 
     // the KWIQ menu's TrackAudio row
-    CHECK(TrackAudioStatus(false, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Off);       // RDF didn't start
-    CHECK(TrackAudioStatus(true, false, true, "TrackAudio v1.3.0", true) == TrackAudioState::Off);        // Core: bridge and drawing off
-    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.3.0", false) == TrackAudioState::Connected);
-    CHECK(TrackAudioStatus(true, true, true, "", false) == TrackAudioState::Connected);                    // no version (yet)
-    CHECK(TrackAudioStatus(true, true, true, "TrackAudio", false) == TrackAudioState::Connected);          // unreadable version
-    CHECK(TrackAudioStatus(true, true, true, "TrackAudio v1.3.0-beta.4", false) == TrackAudioState::TooOld);
-    CHECK(TrackAudioStatus(true, true, false, "TrackAudio v1.3.0-beta.4", false) == TrackAudioState::NotRunning);
-    CHECK(TrackAudioStatus(true, true, false, "", true) == TrackAudioState::AfvClient);
+    CHECK(TrackAudioStatus(false, true, true, false) == TrackAudioState::Off);       // RDF didn't start
+    CHECK(TrackAudioStatus(true, false, true, true) == TrackAudioState::Off);        // Core: bridge and drawing off
+    CHECK(TrackAudioStatus(true, true, true, false) == TrackAudioState::Connected);
+    CHECK(TrackAudioStatus(true, true, true, true) == TrackAudioState::Connected);                // TrackAudio comes first
+    CHECK(TrackAudioStatus(true, true, false, false) == TrackAudioState::NotRunning);
+    CHECK(TrackAudioStatus(true, true, false, true) == TrackAudioState::AfvClient);
     CHECK(std::string(TrackAudioStateText(TrackAudioState::Connected)) == "Connected" &&
-          std::string(TrackAudioStateText(TrackAudioState::TooOld)) == "Version too old" &&
           std::string(TrackAudioStateText(TrackAudioState::AfvClient)) == "AFV client" &&
           std::string(TrackAudioStateText(TrackAudioState::NotRunning)) == "Not running" &&
           std::string(TrackAudioStateText(TrackAudioState::Off)) == "Off");
     CHECK(TrackAudioClickAction(TrackAudioState::Connected) == TrackAudioClick::Resync &&
-          TrackAudioClickAction(TrackAudioState::TooOld) == TrackAudioClick::Resync &&
           TrackAudioClickAction(TrackAudioState::NotRunning) == TrackAudioClick::Reconnect &&
           TrackAudioClickAction(TrackAudioState::AfvClient) == TrackAudioClick::Reconnect &&
           TrackAudioClickAction(TrackAudioState::Off) == TrackAudioClick::None);
@@ -649,7 +634,7 @@ int main() {
         CHECK(px[8] == 100 && px[9] == 50 && px[10] == 25 && px[11] == 128);
     }
 
-    // Semantic Versioning (https://semver.org/): one comparison for the plugin, Core and TrackAudio
+    // Semantic Versioning (https://semver.org/): one comparison for the plugin and Core
     {
         // the whole ordering chain from semver.org section 11
         const char* chain[] = { "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2",
@@ -703,7 +688,6 @@ int main() {
         // version.h's own version is SemVer
         CHECK(ParseVersion(KWIQ_VERSION).valid && ParseVersion(KWIQ_VERSION).numbers == 3);
         CHECK(RunningVersion(KWIQ_VERSION).pre.size() == ParseVersion(KWIQ_VERSION).pre.size());   // not read as a test build
-        CHECK(VersionInText("TrackAudio v1.3.0-beta.5 (build 7)").valid && VersionInText("x1.3.0").valid == false);
     }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
