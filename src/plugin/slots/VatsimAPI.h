@@ -74,9 +74,6 @@ bool HttpGet(const std::string& url, std::string& body, std::string& err);
 // status, 0 if there was none; err is set for anything but 2xx.
 long HttpSend(const std::string& method, const std::string& url, const std::string& form, std::string& body,
               std::string& err);
-// Blocking binary GET with size cap / timeout; `cancel` (optional) aborts the transfer when set.
-bool HttpGetBinary(const std::string& url, std::string& body, std::string& err, size_t maxBytes,
-                   long timeoutSec, const std::atomic<bool>* cancel);
 void GlobalInit();
 void GlobalCleanup();
 // Requests to URLs starting with urlPrefix (Core) carry X-KWIQ-Key (when set) and X-KWIQ-Version.

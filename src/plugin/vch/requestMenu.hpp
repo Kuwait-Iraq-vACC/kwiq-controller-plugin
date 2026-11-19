@@ -5,7 +5,7 @@
 #include <map>
 #include "Constant.hpp"
 #include <thread>
-#include "internet.hpp"
+#include <string>
 
 using namespace std;
 using namespace EuroScopePlugIn;
@@ -102,7 +102,6 @@ public:
 
 	virtual void antiAmendSpam(CFlightPlan* flightPlan);
 
-	virtual void versionCheck();
 
 	virtual void displayMessage(string message);
 

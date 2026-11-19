@@ -7,7 +7,7 @@
 // The plugin defines KWIQ_NO_WINHTTP: it talks to Core with libcurl, and only uses the file helpers.
 #pragma once
 #include <windows.h>
-#ifndef KWIQ_NO_WINHTTP          // the plugin uses WinInet (VCH), which cannot be included with WinHTTP
+#ifndef KWIQ_NO_WINHTTP          // the plugin talks to Core with libcurl, so it leaves WinHTTP out
 #include <winhttp.h>
 #endif
 #include <algorithm>

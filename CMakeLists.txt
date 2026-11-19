@@ -82,7 +82,6 @@ add_library(KWIQPluginCore SHARED
     src/plugin/discord/discord.cpp     # DiscordEuroScope (Kirollos/DiscordEuroScope)
     src/plugin/push/push.cpp           # Core's push events (Laravel Reverb)
     src/plugin/vch/requestMenu.cpp     # VCH
-    src/plugin/vch/internet.cpp        # VCH
     src/plugin/vch/usefulStuff.cpp     # VCH
 )
 
@@ -97,7 +96,6 @@ target_link_libraries(KWIQPluginCore PRIVATE
     ixwebsocket::ixwebsocket                      # RDF: TrackAudio's WebSocket
     discord-rpc                                   # DiscordEuroScope
     crypt32 shlwapi bcrypt                        # ixwebsocket, mbedtls
-    wininet                                       # VCH
     winmm                                         # PlaySound (sector file alert)
     ws2_32                                        # API key from myKWIQ (src/plugin/keylink/keylink.cpp)
     version                                       # GetFileVersionInfo (EuroScope version check)
@@ -126,7 +124,7 @@ set_target_properties(KWIQPlugin PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugin")
 # Each KWIQ header must compile on its own (#41), e.g. windows.h before EuroScopePlugIn.h: one generated .cpp
 # per header, built at /W4 with the plugin's definitions. Nothing is linked from it.
 # Paths as they are included: src/utils's headers by name, src/plugin's from src/plugin
-set(KWIQ_HEADERS kwiq_logic.hpp kwiq_win.hpp version.h ui/kwiq_ui.hpp keylink/keylink.hpp slots/VatsimAPI.h rdf/rdf.hpp discord/discord.hpp push/push.hpp)
+set(KWIQ_HEADERS kwiq_logic.hpp kwiq_win.hpp version.h ownership/ownership_logic.hpp ui/kwiq_ui.hpp keylink/keylink.hpp slots/VatsimAPI.h rdf/rdf.hpp discord/discord.hpp push/push.hpp)
 set(KWIQ_HEADER_CHECKS "")
 foreach(h IN LISTS KWIQ_HEADERS)
     string(MAKE_C_IDENTIFIER "${h}" n)

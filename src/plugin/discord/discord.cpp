@@ -25,7 +25,7 @@ struct KwiqDiscord::Impl {
     explicit Impl(EuroScopePlugIn::CPlugIn* p) : es(p) {}
 
     std::mutex mu;                                  // guards cfg, coreOn (set from the worker thread)
-    kwiq::DiscordConfig cfg;
+    std::shared_ptr<const kwiq::DiscordConfig> cfg = std::make_shared<const kwiq::DiscordConfig>();   // replaced whole
     std::string body;                               // Core's last answer
     bool coreOn = false, cfgChanged = false;
     bool localOn = true;                            // main thread
@@ -58,7 +58,7 @@ void KwiqDiscord::Configure(const std::string& body, bool coreEnabled) {
     d_->coreOn = coreEnabled;
     if (body == d_->body) return;
     d_->body = body;
-    d_->cfg = kwiq::ParseDiscord(body);
+    d_->cfg = std::make_shared<const kwiq::DiscordConfig>(kwiq::ParseDiscord(body));
     d_->cfgChanged = true;
 }
 void KwiqDiscord::SetLocal(bool on) { d_->localOn = on; }
@@ -67,12 +67,13 @@ bool KwiqDiscord::Active() const { return d_->initialised; }
 
 void KwiqDiscord::Tick(std::time_t now, const std::string& eventName) {
     Impl& d = *d_;
-    kwiq::DiscordConfig cfg;
+    std::shared_ptr<const kwiq::DiscordConfig> cfgNow;          // shared, not copied every second
     bool coreOn, changed;
     {
         std::lock_guard<std::mutex> g(d.mu);
-        cfg = d.cfg; coreOn = d.coreOn; changed = d.cfgChanged; d.cfgChanged = false;
+        cfgNow = d.cfg; coreOn = d.coreOn; changed = d.cfgChanged; d.cfgChanged = false;
     }
+    const kwiq::DiscordConfig& cfg = *cfgNow;
     if (!coreOn || !d.localOn || cfg.appId.empty()) { d.Stop(); return; }
     if (d.initialised && cfg.appId != d.appId) d.Stop();
     if (!d.initialised) {
