@@ -1104,12 +1104,10 @@ private:
     }
     // ---- FIR exit (UK Controller Plugin: CachedAircraftFirExitGenerator) ----------------------
     // Where a flight leaves the vACC's airspace, from EuroScope's extracted route and Core's exit points.
-    // For a domestic destination only an external exit counts (the route leaves anyway: a mistyped destination such
-    // as ORSJ for OMSJ); airport-pair SRD rows still come first. Callers hold mu_.
+    // Only looked for when the destination is outside it; callers hold mu_.
     kwiq::AircraftExit FirExitLocked(EuroScopePlugIn::CFlightPlan& fp, const std::string& ades) {
-        kwiq::AircraftExit x = FirExitAnyLocked(fp);
-        if (kwiq::Domestic(ades, domesticPrefixes_)) x.internal.clear();
-        return x;
+        if (kwiq::Domestic(ades, domesticPrefixes_)) return {};
+        return FirExitAnyLocked(fp);
     }
     // The FPC only checks the route up to the first FIR exit point on it, internal (OKAC/ORBB) or external,
     // whatever the destination; empty when it has none
@@ -1154,11 +1152,8 @@ private:
             ades = kwiq::Upper(fp.GetFlightPlanData().GetDestination());
             {   // leaving the vACC's airspace: search to the FIR exit point (UKCP SrdSearchDialog)
                 std::lock_guard<std::mutex> g(mu_);
-                // airport-pair rows win, as in the SRD check
-                if (!srd_.pair.count(adep + "|" + ades)) {
-                    std::string end = kwiq::SrdEnd(ades, domesticPrefixes_, FirExitLocked(fp, ades));
-                    if (!end.empty()) ades = end;
-                }
+                std::string end = kwiq::SrdEnd(ades, domesticPrefixes_, FirExitLocked(fp, ades));
+                if (!end.empty()) ades = end;
             }
             int rfl = fp.GetFinalAltitude();
             if (rfl > 0) lvl = std::to_string(rfl / 100);

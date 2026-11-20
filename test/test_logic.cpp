@@ -193,9 +193,8 @@ int main() {
     CHECK(FindFirExit(two, dup).external == "DUP" && FindFirExit(two, dup).internal.empty());
     CHECK(ExitConeFor(two["BOUND"], 135) == nullptr && ExitConeFor(two["BOUND"], 0) != nullptr && !ExitConeFor(two["BOUND"], 0)->internal);
     CHECK(Domestic("OKBK", "OK,OR") && Domestic("orbi", "OK, OR") && !Domestic("LTBA", "OK,OR"));
-    CHECK(SrdEnd("ORBI", "OK,OR", {}) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
-    CHECK(SrdEnd("ORSJ", "OK,OR", nx) == "ROTAP");                 // leaves the airspace: a mistyped destination (OMSJ)
-    CHECK(SrdEnd("ORBI", "OK,OR", AircraftExit{ "SIDAD", "" }) == "ORBI");   // an internal exit: still domestic
+    CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
+    CHECK(SrdEnd("ORSJ", "OK,OR", nx) == "ORSJ");                  // an OR/OK destination is internal: shown as itself
     CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "SIDAD", "" }) == "SIDAD" && SrdEnd("LTBA", "OK,OR", {}) == "");
 
     // SRD check for a flight leaving the airspace: checked against ADEP to its FIR exit
