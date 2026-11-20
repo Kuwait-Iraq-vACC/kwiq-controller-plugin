@@ -194,6 +194,7 @@ int main() {
     CHECK(ExitConeFor(two["BOUND"], 135) == nullptr && ExitConeFor(two["BOUND"], 0) != nullptr && !ExitConeFor(two["BOUND"], 0)->internal);
     CHECK(Domestic("OKBK", "OK,OR") && Domestic("orbi", "OK, OR") && !Domestic("LTBA", "OK,OR"));
     CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
+    CHECK(SrdEnd("ORSJ", "OK,OR", nx) == "ORSJ");                  // an OR/OK destination is internal: shown as itself
     CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "SIDAD", "" }) == "SIDAD" && SrdEnd("LTBA", "OK,OR", {}) == "");
 
     // SRD check for a flight leaving the airspace: checked against ADEP to its FIR exit
@@ -265,11 +266,13 @@ int main() {
         g = f; g.sid = "SESRU";                                     // no number: not a SID, so checked by the route
         r = Check(rules, g);
         CHECK(r.Passed() && r.byRoute && r.sidPoint == "SESRU");
-        g = f; g.sid = ""; g.route = "XYZ UL999 ABC";               // no SID and no rule fits the route
-        CHECK(Check(rules, g).fails.size() == 1 && Check(rules, g).fails[0] == Fail::Sid);
+        g = f; g.sid = ""; g.route = "XYZ UL999 ABC";               // no SID and no rule fits the route: RTE
+        r = Check(rules, g);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Route && std::string(Code(r.fails[0])) == "RTE");
+        CHECK(Explain(r, g).find("route not valid out of OKKK, it must follow one of: M677 / G669") != std::string::npos);
         g = f; g.sid = "ABCDE1A"; g.route = "ABCDE1A ABCDE UL999 XYZ";   // a SID with no rules, a route no rule fits
         r = Check(rules, g);
-        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Sid && Explain(r, g).find("no rules for SID ABCDE") != std::string::npos);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Route && Explain(r, g).find("SID ABCDE has no rules of its own") != std::string::npos);
         g.route = "ABCDE1A ABCDE SESRU M677 XYZ";                  // ... that joins a route with rules
         CHECK(Check(rules, g).Passed());
         g = f; g.destination = "EGLL"; g.route = "SESRU G669 XYZ";  // not a listed destination: the next rule
@@ -331,9 +334,11 @@ int main() {
         CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Direction);
         o.sid = ""; o.route = "BGD DCT NOLDO B411 PAXAT"; o.rflFt = 33000;   // no SID, the VOR filed
         CHECK(Check(real, o).Passed());
-        o.route = "NOLDO UM999 PAXAT";                              // no rule fits: still SID
+        o.route = "NOLDO UM999 PAXAT";                              // no rule fits: the route is wrong (ORBI has no SIDs)
         r = Check(real, o);
-        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Sid);
+        CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Route);
+        CHECK(Explain(r, o) == "ORBI -> LTBA FL330: failed (route not valid out of ORBI, it must follow one of: "
+                               "NAMDI M860 NINVA / TAGRU L718 KABAN / NOLDO B411 PAXAT).");
         o.sid = "TAGRU1A"; o.route = "TAGRU1A TAGRU L718 KABAN"; o.rflFt = 43000;   // FL430 is an even level
         CHECK(Check(real, o).Passed());
         o.rflFt = 45000;                                            // FL450 is odd
@@ -354,13 +359,31 @@ int main() {
         CHECK(Check(real, n).fails.size() == 1 && Check(real, n).fails[0] == Fail::Sid);
         n.sid = "LAGLO1A"; n.route = "LAGLO1A LAGLO L718 KABAN";   // no LAGLO rules: the ALI ones
         CHECK(Check(real, n).Passed());
+        // Core's /fpc from the one SRD table: an airway option per line, and an SRD route keyed on its first point with
+        // its destination as the filter. The same results as the VFPC rules.
+        {
+            Rules one = ParseRules(
+                "FPC|OKKK|SESRU||ODD|||||M677||\nFPC|OKKK|SESRU||ODD|||||G669||\n"
+                "FPC|ORBI|BGD||ANY|240|410||LTBA|NOLDO B411 PAXAT||\n");
+            Flight k = f; k.route = "SESRU G669 XYZ";
+            CHECK(Check(one, k).Passed());
+            k.route = "SESRU UL999 XYZ";
+            CHECK(Check(one, k).fails.size() == 1 && Check(one, k).fails[0] == Fail::Sid);
+            Flight s = o; s.sid = ""; s.route = "NOLDO B411 PAXAT"; s.destination = "LTBA"; s.rflFt = 30000;
+            CHECK(Check(one, s).Passed());
+            s.destination = "EGLL";                                     // not the SRD route's destination
+            CHECK(Check(one, s).fails.size() == 1 && Check(one, s).fails[0] == Fail::Route);
+            s.destination = "LTBA"; s.rflFt = 43000;
+            CHECK(Check(one, s).fails.size() == 1 && Check(one, s).fails[0] == Fail::Max);
+        }
         // a fallback condition must match the route by airway, so a rule-less group never catches everything
         Rules loose = ParseRules("FPC|ORBI|BGD||ANY|||||||\nFPC|ORBI|XYZ||ANY|||||||\n");
         // levels too big for an int are clamped, not undefined (#86)
         Rules huge = ParseRules("FPC|ORBI|BGD||ANY|99999999999|99999999999|99999999999||||\n");
         CHECK(huge["ORBI"].sids["BGD"][0].minFl == INT_MAX && huge["ORBI"].sids["BGD"][0].forbidden[0] == INT_MAX);
         Flight l = o; l.sid = "NOLDO1A"; l.route = "NOLDO1A NOLDO B411 PAXAT";
-        CHECK(Check(loose, l).fails.size() == 1 && Check(loose, l).fails[0] == Fail::Sid);
+        CHECK(Check(loose, l).fails.size() == 1 && Check(loose, l).fails[0] == Fail::Route &&
+              Explain(Check(loose, l), l).find("it fits none of the airport's rules") != std::string::npos);
         l.route = "XYZ NOLDO B411 PAXAT";                           // a group whose point is on the route does count
         CHECK(Check(loose, l).Passed());
         // OKAC NIDAP: "DCT" is an airway option of its own
