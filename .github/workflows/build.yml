@@ -161,6 +161,10 @@ jobs:
               if ($text -notmatch [regex]::Escape($n)) { throw "export $n not found in $dll" }
             }
           }
+          # 0.5 copies update by taking the plugin out of KWIQPlugin.dll (its KWIQCORE resource), so it must be in it
+          if ((Get-Item build/Release/KWIQPlugin.dll).Length -le (Get-Item build/Release/KWIQPluginCore.dll).Length) {
+            throw "KWIQPlugin.dll does not carry KWIQPluginCore.dll (KWIQCORE), which 0.5 copies update from"
+          }
 
       # Releases carry all three: the packages ship KWIQPlugin.dll, and Core mirrors the updater and
       # the plugin for KWIQPluginUpdater.dll to download

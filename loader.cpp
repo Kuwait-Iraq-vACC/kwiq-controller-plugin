@@ -6,7 +6,8 @@
 //   2. The updater runs: it installs or updates the plugin (asking first) and itself, and says how the
 //      plugin is to start (in full, reduced after a declined update, or not at all: Core's kill switch).
 //   3. The plugin is loaded from bin.
-// This file never changes itself: a new loader comes with the next sector file packages.
+// This file never changes itself: a new loader comes with the next sector file packages. The one exception is
+// a 0.5 loader, which replaces itself with this one when it updates (the KWIQCORE resource, CMakeLists.txt).
 // Its message boxes are UKCP's (kwiq_win::Box): shown while EuroScope loads the plugin, as UKCP's loader does.
 
 #include "kwiq_win.hpp"
@@ -21,6 +22,14 @@ typedef int (*UpdaterRunFn)();
 
 static HMODULE gCore = nullptr;
 static CoreExitFn gCoreExit = nullptr;
+
+// This file (KWIQPlugin.dll)
+static std::string SelfPath() {
+    HMODULE m = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&SelfPath, &m);
+    char b[MAX_PATH] = {};
+    return m && GetModuleFileNameA(m, b, MAX_PATH) ? std::string(b) : std::string();
+}
 
 // Stands in when the plugin is not loaded, so EuroScope still gets a plugin, and says why in the chat
 class CKWIQUnavailable : public EuroScopePlugIn::CPlugIn {
@@ -78,9 +87,11 @@ void __declspec(dllexport) EuroScopePlugInInit(EuroScopePlugIn::CPlugIn** ppPlug
         Inactive(ppPlugInInstance, "");
         return;
     }
-    // Left by the updater replacing files that were in use, and by v0.5 and older
+    // Left by the updater replacing files that were in use, and by v0.5 and older: a 0.5 loader that updated
+    // to this one moved itself aside to KWIQPlugin.dll.old
     DeleteFileA((core + ".old").c_str());
     DeleteFileA((updater + ".old").c_str());
+    DeleteFileA((SelfPath() + ".old").c_str());
     MigrateOldInstall();
 
     if (!Exists(updater)) {
