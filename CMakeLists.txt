@@ -113,8 +113,17 @@ target_compile_definitions(KWIQPluginUpdater PRIVATE ${KWIQ_DEFINITIONS} NOMINMA
 target_link_libraries(KWIQPluginUpdater PRIVATE winhttp shell32)
 set_target_properties(KWIQPluginUpdater PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginUpdater")
 
-# KWIQPlugin.dll: the one file in the packages, loaded by EuroScope
-add_library(KWIQPlugin SHARED src/loader/loader.cpp)
+# KWIQPlugin.dll: the one file in the packages, loaded by EuroScope.
+# KWIQPluginCore.dll is also built into it, as the KWIQCORE resource, for 0.5 copies alone: their loader
+# updates by downloading the latest KWIQPlugin.dll from Core, taking the plugin out of that resource and
+# replacing itself with it. So a 0.5 copy (0.5.0.56 in the packages, or 0.5.0.115) moves on to this loader
+# without a new sector file. This loader never reads the resource. Keep it in every release: a 0.5 loader
+# that could not replace itself (a read-only sector file folder) keeps updating this way.
+file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/core_$<CONFIG>.rc
+     CONTENT "KWIQCORE RCDATA \"$<TARGET_FILE:KWIQPluginCore>\"
+")
+add_library(KWIQPlugin SHARED src/loader/loader.cpp ${CMAKE_CURRENT_BINARY_DIR}/core_$<CONFIG>.rc)
+add_dependencies(KWIQPlugin KWIQPluginCore)
 target_include_directories(KWIQPlugin PRIVATE ${KWIQ_SRC}/utils ${KWIQ_GENERATED})
 target_include_directories(KWIQPlugin SYSTEM PRIVATE ${KWIQ_THIRD_PARTY}/euroscope)
 target_compile_definitions(KWIQPlugin PRIVATE ${KWIQ_DEFINITIONS} NOMINMAX)

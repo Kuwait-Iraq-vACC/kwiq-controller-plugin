@@ -2236,8 +2236,10 @@ extern "C" __declspec(dllexport) void KWIQCoreStart(EuroScopePlugIn::CPlugIn** p
     gStartMode = mode == (int)kwiq::StartMode::Reduced ? mode : (int)kwiq::StartMode::Full;
     EuroScopePlugInInit(ppPlugInInstance);
 }
-// v0.5 loaders, which start the plugin in full
+// v0.5 loaders, which start the plugin in full. A 0.5 loader that has just updated starts this plugin straight
+// away from %APPDATA%\KWIQ\plugin, before the new loader has run, so the API key is moved here first.
 extern "C" __declspec(dllexport) void KWIQCoreInit(EuroScopePlugIn::CPlugIn** ppPlugInInstance) {
+    kwiq_win::MigrateOldInstall();          // the key; the old plugin file is in use, so it stays until next time
     KWIQCoreStart(ppPlugInInstance, (int)kwiq::StartMode::Full);
 }
 extern "C" __declspec(dllexport) void KWIQCoreExit() {
