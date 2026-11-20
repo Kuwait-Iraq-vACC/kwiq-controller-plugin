@@ -5,11 +5,9 @@
 #include <windows.h>
 #include <shellapi.h>       // ShellExecute
 #include <commctrl.h>       // the SRD search and event routes lists (link comctl32)
-#include <atomic>
-#include <chrono>
+#include <algorithm>
 #include <cstring>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 #include "kwiq_res.h"       // kwiq.rc: the SRD Search and Event Routes dialogs
@@ -273,61 +271,118 @@ void ShowEvent(const std::string& title, const std::vector<kwiq::EventRoute>& ro
 // ---- Message boxes ---------------------------------------------------------------------------------
 // Every popup is a plain Windows message box, shown the way the UK Controller Plugin shows its own
 // (kwiq_win::Box: MessageBoxW, owned by EuroScope's active window, on EuroScope's thread) (#55).
-// The one exception is the API key setup: it waits while the controller signs in to myKWIQ, up to the
-// 15 minutes the listener waits, so it runs on a thread of its own and EuroScope keeps going. It is
-// not owned by EuroScope, so MB_SETFOREGROUND | MB_TOPMOST keep it in front. OK opens the page again
-// and the box comes back until the key arrives; the plugin then closes it, so it can't be dismissed (#18).
-class KeySetupBox {
-public:
-    ~KeySetupBox() { Close(); }
-    bool Open() const { return running_; }
-    void Show() {
-        if (running_) return;
-        if (thread_.joinable()) thread_.join();
-        closing_ = false;
-        reopen_ = false;
-        running_ = true;
-        thread_ = std::thread(&KeySetupBox::Run, this);
-    }
-    // True once after each OK: the plugin opens myKWIQ's page again (main thread)
-    bool TakeReopen() { return reopen_.exchange(false); }
-    // Closes the box (OK, as if clicked) and waits for its thread, which takes a few milliseconds
-    void Close() {
-        closing_ = true;
-        while (running_) {                       // the box may not be up yet: ask until the thread ends
-            DWORD id = threadId_;
-            if (id) EnumThreadWindows(id, CloseBox, 0);
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        if (thread_.joinable()) thread_.join();
-    }
-
-private:
-    static BOOL CALLBACK CloseBox(HWND h, LPARAM) { PostMessageW(h, WM_COMMAND, IDOK, 0); return TRUE; }
-    void Run() {
-        threadId_ = GetCurrentThreadId();
-        try {
-            while (!closing_) {
-                MessageBoxW(nullptr,
-                            L"Sign in to myKWIQ in your browser and click Connect EuroScope. The link is also on your "
-                            L"clipboard.\r\n\r\nThis message closes once your API key is connected. Select OK to open the "
-                            L"page again.\r\n\r\nNeed help? discord.kuwait-iraqvacc.net",
-                            L"KWIQ API Key Setup", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
-                if (!closing_) reopen_ = true;
-            }
-        } catch (...) {}
-        running_ = false;
-    }
-    std::thread thread_;
-    std::atomic<bool> running_{ false }, closing_{ false }, reopen_{ false };
-    std::atomic<DWORD> threadId_{ 0 };
+//
+// The one exception is the API key setup, which is the window 0.5.0.56 had: a message box look (title
+// bar, information icon, message on white, a grey strip with the button), but it can't be closed or
+// moved. It has no X (and Alt+F4 does nothing), its title bar doesn't drag, and its one button, Reopen
+// Browser, opens myKWIQ's page again. It stays on top without taking the keyboard from EuroScope, and
+// EuroScope keeps running behind it. The plugin closes it once the API key arrives (#18). Made and used on
+// EuroScope's thread, so EuroScope's own message loop runs it.
+static const char* const kKeySetupClass = "KWIQKeySetupWnd";
+enum { KS_W = 440, KS_PAD = 22, KS_ICON = 32, KS_BTN_W = 112, KS_BTN_H = 28, KS_FOOT = 48, ID_KS_REOPEN = 1 };
+static const char* const kKeySetupText =
+    "Sign in to myKWIQ in your browser and click Connect EuroScope. This window closes once your API key "
+    "is connected. The link is also on your clipboard. Help: discord.kuwait-iraqvacc.net";
+struct KeySetupWin {
+    HWND hwnd = nullptr;
+    bool reopen = false;                          // Reopen Browser was clicked; the plugin takes it (KeyPromptReopen)
+    bool registered = false;
+    HFONT font = nullptr;                         // the font Windows uses in its own message boxes
 };
-static KeySetupBox gKeyBox;
+static KeySetupWin gKeySetup;
 
-void ShowKeyPrompt() { gKeyBox.Show(); }
-bool KeyPromptOpen() { return gKeyBox.Open(); }
-bool KeyPromptReopen() { return gKeyBox.TakeReopen(); }
-void CloseKeyPrompt() { gKeyBox.Close(); }
+static LRESULT CALLBACK KeySetupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    try {
+        switch (m) {
+        case WM_ERASEBKGND: return 1;
+        case WM_MOUSEACTIVATE: return MA_NOACTIVATE;              // never takes the keyboard from EuroScope
+        case WM_NCHITTEST: {                                      // the title bar doesn't drag it
+            LRESULT hit = DefWindowProcA(h, m, w, l);
+            return hit == HTCAPTION ? HTCLIENT : hit;
+        }
+        case WM_SYSCOMMAND:
+            if ((w & 0xFFF0) == SC_MOVE || (w & 0xFFF0) == SC_CLOSE) return 0;
+            break;
+        case WM_CLOSE: return 0;                                  // only the plugin closes it, once the key arrives
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            RECT rc; GetClientRect(h, &rc);
+            RECT body = rc, foot = rc;
+            body.bottom = rc.bottom - KS_FOOT; foot.top = body.bottom;
+            FillRect(dc, &body, (HBRUSH)GetStockObject(WHITE_BRUSH));
+            HBRUSH grey = CreateSolidBrush(RGB(240, 240, 240));
+            FillRect(dc, &foot, grey); DeleteObject(grey);
+            DrawIcon(dc, KS_PAD, KS_PAD, LoadIconA(nullptr, MAKEINTRESOURCEA(32516)));   // IDI_INFORMATION
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(0, 0, 0));
+            HGDIOBJ old = SelectObject(dc, gKeySetup.font);
+            RECT tb = { KS_PAD + KS_ICON + 14, KS_PAD + 6, rc.right - KS_PAD, body.bottom - KS_PAD };
+            DrawTextA(dc, kKeySetupText, -1, &tb, DT_WORDBREAK | DT_LEFT | DT_NOPREFIX);
+            SelectObject(dc, old);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (LOWORD(w) == ID_KS_REOPEN) gKeySetup.reopen = true;
+            return 0;
+        case WM_NCDESTROY:
+            if (gKeySetup.hwnd == h) { gKeySetup.hwnd = nullptr; gKeySetup.reopen = false; }
+            break;
+        }
+    } catch (...) {}
+    return DefWindowProcA(h, m, w, l);
+}
+
+void ShowKeyPrompt() {
+    if (gKeySetup.hwnd) return;
+    PrepareDialog();
+    if (!gKeySetup.registered) {
+        WNDCLASSEXA wc; ZeroMemory(&wc, sizeof(wc));
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = KeySetupProc;
+        wc.hInstance = gMod;
+        wc.hCursor = LoadCursorA(nullptr, MAKEINTRESOURCEA(32512));      // IDC_ARROW
+        wc.lpszClassName = kKeySetupClass;
+        if (!RegisterClassExA(&wc)) return;
+        gKeySetup.registered = true;
+    }
+    if (!gKeySetup.font) {
+        NONCLIENTMETRICSA ncm; ZeroMemory(&ncm, sizeof(ncm));
+        ncm.cbSize = sizeof(ncm);
+        gKeySetup.font = SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)
+            ? CreateFontIndirectA(&ncm.lfMessageFont) : nullptr;
+    }
+    HFONT font = gKeySetup.font ? gKeySetup.font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    if (!gKeySetup.font) gKeySetup.font = font;
+
+    // As tall as the message needs
+    HDC dc = GetDC(nullptr);
+    HGDIOBJ old = SelectObject(dc, font);
+    RECT tr = { 0, 0, KS_W - 2 * KS_PAD - KS_ICON - 14, 0 };
+    DrawTextA(dc, kKeySetupText, -1, &tr, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+    SelectObject(dc, old);
+    ReleaseDC(nullptr, dc);
+    int bodyH = (std::max)((int)(tr.bottom - tr.top) + 12, (int)KS_ICON) + 2 * KS_PAD;
+
+    // No WS_SYSMENU: no X in the title bar
+    DWORD style = WS_POPUP | WS_CAPTION, ex = WS_EX_TOPMOST | WS_EX_DLGMODALFRAME | WS_EX_NOACTIVATE;
+    RECT rc = { 0, 0, KS_W, bodyH + KS_FOOT };
+    AdjustWindowRectEx(&rc, style, FALSE, ex);
+    int ww = rc.right - rc.left, wh = rc.bottom - rc.top, x = 0, y = 0;
+    Centre(ww, wh, x, y);
+    HWND h = CreateWindowExA(ex, kKeySetupClass, "KWIQ API Key Setup", style, x, y, ww, wh, nullptr, nullptr, gMod, nullptr);
+    if (!h) return;
+    gKeySetup.hwnd = h;
+    gKeySetup.reopen = false;
+    HWND b = Child("BUTTON", "Reopen Browser", BS_DEFPUSHBUTTON, KS_W - KS_PAD - KS_BTN_W, bodyH + (KS_FOOT - KS_BTN_H) / 2,
+                   KS_BTN_W, KS_BTN_H, h, ID_KS_REOPEN);
+    SendMessageA(b, WM_SETFONT, (WPARAM)font, TRUE);
+    ShowWindow(h, SW_SHOWNOACTIVATE);
+}
+bool KeyPromptOpen() { return gKeySetup.hwnd != nullptr; }
+bool KeyPromptReopen() { bool r = gKeySetup.reopen; gKeySetup.reopen = false; return r; }
+void CloseKeyPrompt() { if (gKeySetup.hwnd) DestroyWindow(gKeySetup.hwnd); }
 
 // ---- Procedure notifications window (KWIQ menu > Notifications) --------------------------------
 // The list on the left (unread first marked *), the selected one's text on the right, and Mark read /
@@ -450,7 +505,10 @@ void UpdateNotices(const std::vector<kwiq::ProcedureNotice>& items) {
 void Shutdown() {
     if (gNotices.hwnd) DestroyWindow(gNotices.hwnd);
     if (gNoticesReg && gMod) { UnregisterClassA(kNoticesClass, gMod); gNoticesReg = false; }
-    gKeyBox.Close();                                     // its thread must end before the plugin does
+    CloseKeyPrompt();
+    if (gKeySetup.registered && gMod) { UnregisterClassA(kKeySetupClass, gMod); gKeySetup.registered = false; }
+    if (gKeySetup.font && gKeySetup.font != (HFONT)GetStockObject(DEFAULT_GUI_FONT)) DeleteObject(gKeySetup.font);
+    gKeySetup.font = nullptr;
 }
 
 } // namespace kwiq_ui

@@ -955,9 +955,9 @@ private:
                           MB_OK | MB_ICONINFORMATION);
             return;
         }
-        // The listener gives up after 15 minutes; the setup stays, so start a new one for the next OK
+        // The listener gives up after 15 minutes; the setup stays, so start a new one for the next Reopen Browser
         if (kwiq_ui::KeyPromptOpen() && !keyLink_.Running()) keyLink_.Start();
-        if (kwiq_ui::KeyPromptReopen()) OpenConnectPage();   // OK in the setup box: the page again
+        if (kwiq_ui::KeyPromptReopen()) OpenConnectPage();   // Reopen Browser: the page again
         if (now - startedAt_ < 5) return;                    // let EuroScope settle first
 
         std::string reason;
