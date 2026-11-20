@@ -398,9 +398,12 @@ inline bool Domestic(const std::string& airport, const std::string& prefixes) {
 }
 // What SRD destination to use for a flight: its destination when it stays in the vACC's airspace, else where
 // it leaves it (UKCP SrdSearchDialog::PrepopulateSearch); empty when that is not known
+// A route that leaves the vACC's airspace ends at its exit even when the filed destination looks domestic (a typo
+// such as ORSJ for OMSJ); a domestic flight with no external exit keeps its airport.
 inline std::string SrdEnd(const std::string& ades, const std::string& prefixes, const AircraftExit& exit) {
+    if (!exit.external.empty()) return exit.external;
     if (Domestic(ades, prefixes)) return ades;
-    return !exit.external.empty() ? exit.external : exit.internal;
+    return exit.internal;
 }
 
 // SRD rows that apply to a flight. Airport-pair rows (ADEP|ADES) take precedence. Then, for a flight
