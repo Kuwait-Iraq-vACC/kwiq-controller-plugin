@@ -1,7 +1,7 @@
 // fpc_logic.hpp - flight plan check (FPC), adapted from VFPC (https://github.com/hpeter2/VFPC, from
 // https://github.com/DrFreas/VFPC; analyzeFP.cpp validizeSid and getFails; GPL-3.0): the rules the vACC
 // keeps in VFPC's Sid.json, per departure airport and SID. Separate from the SRD check in kwiq_logic.hpp.
-// Pure logic (no Windows / EuroScope dependencies), unit-tested in tests/test_logic.cpp.
+// Pure logic (no Windows / EuroScope dependencies), unit-tested in test/test_logic.cpp.
 // License: GPL-3.0-or-later
 #pragma once
 
@@ -51,9 +51,9 @@ inline Rules ParseRules(const std::string& body) {
         c.suffix = Upper(Trim(f[3]));
         std::string dir = Upper(Trim(f[4]));
         c.direction = dir.empty() ? "ANY" : dir;
-        c.minFl = std::atoi(Trim(f[5]).c_str());
-        c.maxFl = std::atoi(Trim(f[6]).c_str());
-        for (const auto& fl : SplitList(f[7])) c.forbidden.push_back(std::atoi(fl.c_str()));
+        c.minFl = ToInt(Trim(f[5]));                    // ToInt, not atoi: clamped rather than undefined when too big
+        c.maxFl = ToInt(Trim(f[6]));
+        for (const auto& fl : SplitList(f[7])) c.forbidden.push_back(ToInt(fl));
         c.destinations = SplitList(f[8]);
         for (const auto& a : SplitList(f[9])) {
             auto toks = a == "DCT" ? std::vector<std::string>{ "DCT" } : NormaliseRoute(a);   // DCT alone is an option
@@ -76,12 +76,14 @@ struct Flight {
     char engine = 0;                                    // EuroScope's engine type: P, T, J, E
     char capability = 0;                                // EuroScope's equipment code
     bool vfr = false;
+    std::string firExit;                                // the first FIR exit point on the route: only checked up to it
 };
-enum class Fail { Sid, Engine, Direction, Min, Max, Forbidden, Navigation };
+enum class Fail { Sid, Route, Engine, Direction, Min, Max, Forbidden, Navigation };
 // VFPC's tag codes
 inline const char* Code(Fail f) {
     switch (f) {
     case Fail::Sid:        return "SID";
+    case Fail::Route:      return "RTE";
     case Fail::Engine:     return "ENG";
     case Fail::Direction:  return "E/O";
     case Fail::Min:        return "MIN";
@@ -99,6 +101,7 @@ struct Result {
     bool noSid = false;                                 // the flight plan has no SID set yet
     std::vector<Fail> fails;
     std::vector<std::string> notes;                     // what was checked, for Explain FPC result
+    std::string checkedTo;                              // the FIR exit point the route was checked up to
     bool Passed() const { return checked && fails.empty(); }
     // VFPC shows the forbidden-level failure in yellow when it is the only one
     bool WarningOnly() const { return fails.size() == 1 && fails[0] == Fail::Forbidden; }
@@ -170,6 +173,29 @@ inline void Apply(const Condition& c, const Flight& f, Result& r) {
     }
 }
 
+// The airway runs the airport's rules allow for a destination, for the RTE failure: "A B C / D E F", at most 6
+inline std::string ValidRoutes(const AirportRules& ar, const std::string& dest) {
+    std::vector<std::string> seen;
+    size_t more = 0;
+    for (const auto& key : ar.order)
+        for (const auto& c : ar.sids.at(key)) {
+            bool destOk = c.destinations.empty();
+            for (const auto& d : c.destinations) if (dest.compare(0, d.size(), d) == 0) destOk = true;
+            if (!destOk) continue;
+            for (const auto& a : c.airways) {
+                if (a.size() == 1 && a[0] == "DCT") continue;
+                std::string run;
+                for (const auto& t : a) run += (run.empty() ? "" : " ") + t;
+                if (std::find(seen.begin(), seen.end(), run) != seen.end()) continue;
+                if (seen.size() < 6) seen.push_back(run); else more++;
+            }
+        }
+    std::string out;
+    for (const auto& s : seen) out += (out.empty() ? "" : " / ") + s;
+    if (more) out += " / +" + std::to_string(more) + " more";
+    return out;
+}
+
 // VFPC validizeSid, with two differences so that valid flight plans pass:
 // - When the SID's first waypoint has no rules at the airport, or no SID is set yet (EuroScope only sets one once a
 //   runway is active), the rules are found by the route: first the rules of a point on the filed route, then any
@@ -193,9 +219,17 @@ inline Result Check(const Rules& rules, const Flight& f) {
     r.noSid = point.empty() || (suffix.empty() && point != "VCT");
 
     std::string dest = Upper(f.destination), viaDest, viaAirway;
+    // The route only up to the first FIR exit point: what comes after it is not the vACC's to check
+    std::string exitPt = Upper(Trim(f.firExit));
     auto filed = NormaliseRoute(f.route);
+    auto cut = exitPt.empty() ? filed.end() : std::find(filed.begin(), filed.end(), exitPt);
+    if (cut != filed.end()) { filed.erase(cut + 1, filed.end()); r.checkedTo = exitPt; }
     bool hasDct = false;
-    for (const auto& t : SplitWs(f.route)) if (Upper(t) == "DCT") { hasDct = true; break; }
+    for (const auto& raw : SplitWs(f.route)) {
+        std::string t = Upper(raw);
+        if (t == "DCT") { hasDct = true; break; }
+        if (!r.checkedTo.empty() && t.substr(0, t.find('/')) == r.checkedTo) break;
+    }
     auto decide = [&](const std::string& key, const Condition& c) {
         r.sidPoint = key;
         if (!viaDest.empty()) r.notes.push_back("destination " + viaDest);
@@ -234,10 +268,15 @@ inline Result Check(const Rules& rules, const Flight& f) {
         for (const auto& c : ar.sids.at(key))
             if (!c.airways.empty() && Fits(c, sfx, dest, filed, hasDct, viaDest, viaAirway)) return decide(key, c);
     }
+    // Nothing fits: the route is wrong (RTE), not the SID. Many airports (all of ORBB's) have no SID rules at all.
     r.byRoute = false;
-    if (r.noSid) return fail(Fail::Sid, "no SID in the flight plan, and no rule at " + apt->first + " fits the route");
-    r.sidPoint = point;
-    return fail(Fail::Sid, "no rules for SID " + point + " at " + apt->first + ", and none fits the route");
+    if (!r.noSid) r.sidPoint = point;
+    std::string why = "route not valid out of " + apt->first;
+    std::string valid = ValidRoutes(ar, dest);
+    why += valid.empty() ? ": it fits none of the airport's rules" : ", it must follow one of: " + valid;
+    fail(Fail::Route, why);
+    if (!r.noSid) r.notes.push_back("SID " + point + " has no rules of its own");
+    return r;
 }
 
 // Explain FPC result (VFPC checkFPDetail)
@@ -248,6 +287,7 @@ inline std::string Explain(const Result& r, const Flight& f) {
     std::string sid = Upper(Trim(f.sid));
     std::string s = head + (r.noSid ? "" : " SID " + sid) + (r.Passed() ? ": passed" : ": failed");
     std::vector<std::string> notes;
+    if (!r.checkedTo.empty()) notes.push_back("route checked up to FIR exit " + r.checkedTo);
     if (r.byRoute) notes.push_back(std::string(r.noSid ? "no SID set, " : "") + "rules for " + r.sidPoint + " by the route");
     notes.insert(notes.end(), r.notes.begin(), r.notes.end());
     for (size_t i = 0; i < notes.size(); i++) s += (i ? ", " : " (") + notes[i];

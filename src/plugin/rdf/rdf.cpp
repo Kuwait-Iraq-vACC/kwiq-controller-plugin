@@ -479,9 +479,9 @@ void KwiqRdf::Draw(EuroScopePlugIn::CRadarScreen* screen, HDC hDC) {
                 continue;
             }
         }
-        // off screen or too small: a line from the middle of the radar screen
+        // off screen or too small: a line from the middle of the radar area (upstream RDF leaves out its left and top)
         POINT oldPoint;
-        MoveToEx(hDC, (area.right - area.left) / 2, (area.bottom - area.top) / 2, &oldPoint);
+        MoveToEx(hDC, area.left + (area.right - area.left) / 2, area.top + (area.bottom - area.top) / 2, &oldPoint);
         LineTo(hDC, p.x, p.y);
         MoveToEx(hDC, oldPoint.x, oldPoint.y, nullptr);
     }

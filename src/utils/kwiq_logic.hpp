@@ -1,5 +1,5 @@
 // kwiq_logic.hpp - pure logic for the KWIQ plugin (no Windows / EuroScope dependencies).
-// Route matching, event routes, SRD (shared by the SRD check and SRD search). Unit-tested in tests/test_logic.cpp.
+// Route matching, event routes, SRD (shared by the SRD check and SRD search). Unit-tested in test/test_logic.cpp.
 // License: GPL-3.0-or-later
 #pragma once
 
@@ -120,6 +120,7 @@ inline bool RouteMatches(const std::string& wantRte, const std::string& filedRte
 }
 
 // ---- Event routes ----------------------------------------------------------
+inline bool IsNavaidIdent(const std::string& s);
 
 struct EventRoute { std::string date, adep, ades, rte; std::vector<std::string> tokens; }; // date = YYYY-MM-DD UTC
 struct EventData {
@@ -170,6 +171,43 @@ inline RouteResult CheckEventRoute(const EventData& ev, const std::string& adep,
 inline RouteResult CheckEventRoute(const EventData& ev, const std::string& adep, const std::string& ades,
                                    const std::string& filedRte, const std::string& today) {
     return CheckEventRoute(ev, adep, ades, NormaliseRoute(filedRte), today);
+}
+// A SID or STAR name: 2 to 5 letters, a digit, at most one letter (NOLDO1A, LOVEK1A, BGD2)
+inline bool IsProcedureName(const std::string& t) {
+    size_t i = 0;
+    while (i < t.size() && std::isalpha((unsigned char)t[i])) i++;
+    if (i < 2 || i > 5 || i >= t.size() || !std::isdigit((unsigned char)t[i])) return false;
+    size_t rest = t.size() - i - 1;
+    return rest == 0 || (rest == 1 && std::isalpha((unsigned char)t.back()));
+}
+// The filed route is the event route exactly (both normalised, so DCT and speed/level changes never count),
+// except that a SID before it and a STAR after it are allowed, and so is leaving out the aerodrome VOR at
+// either end, as for the SRD (#9). Anything else filed, left out or in another order is not.
+inline bool EventRouteExact(const std::vector<std::string>& want, std::vector<std::string> filed) {
+    if (want.empty()) return true;                                  // an event route with nothing to check
+    if (!filed.empty() && filed.front() != want.front() && IsProcedureName(filed.front())) filed.erase(filed.begin());
+    if (!filed.empty() && filed.back() != want.back() && IsProcedureName(filed.back())) filed.pop_back();
+    auto same = [&](size_t from, size_t to) {
+        return from < to && to - from == filed.size() && std::equal(filed.begin(), filed.end(), want.begin() + (std::ptrdiff_t)from);
+    };
+    bool front = want.size() > 1 && IsNavaidIdent(want.front()), back = want.size() > 1 && IsNavaidIdent(want.back());
+    return same(0, want.size()) || (front && same(1, want.size())) || (back && same(0, want.size() - 1)) ||
+           (front && back && same(1, want.size() - 1));
+}
+// The FPC's event check: None when the flight has no event route today, Ok when its route is one of them
+// exactly (EventRouteExact), Check when it is none of them
+inline RouteResult CheckEventRouteExact(const EventData& ev, const std::string& adep, const std::string& ades,
+                                        const std::vector<std::string>& filed, const std::string& today,
+                                        std::string* expected = nullptr) {
+    if (!ev.active) return RouteResult::None;
+    bool pair = false;
+    for (const auto& r : ev.routes) {
+        if ((!r.date.empty() && r.date != today) || r.adep != adep || r.ades != ades) continue;
+        if (!pair && expected) *expected = r.rte;
+        pair = true;
+        if (EventRouteExact(r.tokens, filed)) return RouteResult::Ok;
+    }
+    return pair ? RouteResult::Check : RouteResult::None;
 }
 
 // Core /api/plugin/event (plain text):
@@ -477,22 +515,35 @@ inline std::vector<size_t> SrdSearch(const SrdData& d, const std::string& adep, 
 
 
 // ---- Sector indicators -------------------------------------------------------
-// Core /api/plugin/sectors (plain text):  SECTOR|<ESE position ID>|<alias, max 4 chars>
+// Core /api/plugin/sectors (plain text):  SECTOR|<ESE position ID>|<alias, max 4 chars>|<sector file>
 // Only the positions Core lists get an indicator, and the alias is what controllers see on the radar
 // (e.g. BS -> SR for ORBB_S_CTR). The ID is the one in the ESE's [POSITIONS], as EuroScope gives it.
-using SectorMap = std::unordered_map<std::string, std::string>;   // ESE position ID -> alias
+// ESE position IDs are per sector file (the same ID can be a different position in OKAC's and ORBB's ESE),
+// so Core sends SECTOR|<ID>|<alias>|<OKAC, ORBB or empty for both>. Keyed "<file>|<ID>", "|<ID>" for both.
+using SectorMap = std::unordered_map<std::string, std::string>;
 
 inline SectorMap ParseSectors(const std::string& body) {
     SectorMap m;
     for (const auto& line : SplitChar(body, '\n')) {
         auto f = SplitChar(Trim(line), '|');
         if (f[0] != "SECTOR" || f.size() < 3) continue;
-        std::string id = Upper(Trim(f[1])), alias = Upper(Trim(f[2]));
+        std::string id = Upper(Trim(f[1])), alias = Upper(Trim(f[2])), file = f.size() > 3 ? Upper(Trim(f[3])) : "";
         if (alias.size() > 4) alias.resize(4);
         if (id.empty() || alias.empty()) continue;
-        m[id] = alias;
+        m[file + "|" + id] = alias;
     }
     return m;
+}
+
+// The alias of a position ID in the loaded sector file (OKAC or ORBB): its own row, else the row for both.
+// Sector file not known: the row for both, else whichever file has the ID.
+inline std::string SectorAliasFor(const SectorMap& m, const std::string& sectorFile, const std::string& positionId) {
+    std::string id = Upper(positionId), file = Upper(sectorFile);
+    auto find = [&](const std::string& f) { auto it = m.find(f + "|" + id); return it == m.end() ? std::string() : it->second; };
+    std::string a = file.empty() ? std::string() : find(file);
+    if (a.empty()) a = find("");
+    if (a.empty() && file.empty()) { a = find("OKAC"); if (a.empty()) a = find("ORBB"); }
+    return a;
 }
 
 // The indicator is drawn in the colour of the aircraft's tag, which Core sets per EuroScope flight plan
@@ -780,7 +831,8 @@ inline bool LooksLikeX86Dll(const std::string& d) {
     auto u8 = [&](size_t i) { return (unsigned)(unsigned char)d[i]; };
     if (d.size() < 0x200 || d[0] != 'M' || d[1] != 'Z') return false;
     size_t pe = u8(0x3C) | (u8(0x3D) << 8) | (u8(0x3E) << 16) | ((size_t)u8(0x3F) << 24);
-    if (pe + 24 > d.size() || d.compare(pe, 4, std::string("PE\0\0", 4)) != 0) return false;
+    // pe > size - 24, not pe + 24 > size: in the 32-bit updater pe + 24 can wrap past zero
+    if (pe > d.size() - 24 || d.compare(pe, 4, std::string("PE\0\0", 4)) != 0) return false;
     unsigned machine = u8(pe + 4) | (u8(pe + 5) << 8), chr = u8(pe + 22) | (u8(pe + 23) << 8);
     return machine == 0x014c && (chr & 0x2000) != 0;          // I386 + IMAGE_FILE_DLL
 }
@@ -1070,7 +1122,7 @@ inline int QnhFromMetar(const std::string& metar) {
     while (in >> tok) {
         if (tok == "RMK") break;
         while (!tok.empty() && tok.back() == '=') tok.pop_back();
-        if (tok.size() == 5 && (tok[0] == 'Q' || tok[0] == 'A') && std::all_of(tok.begin() + 1, tok.end(), ::isdigit)) {
+        if (tok.size() == 5 && (tok[0] == 'Q' || tok[0] == 'A') && AllDigits(tok, 1, 4)) {   // no ::isdigit on a plain char
             int v = std::atoi(tok.c_str() + 1);
             return tok[0] == 'Q' ? v : (int)std::floor(v / 100.0 * 33.8639);
         }
@@ -1125,51 +1177,6 @@ inline std::string QnhMessage(const std::string& icao, int qnh, int prevQnh, int
     if (trl > 0 && prevTrl > 0 && prevTrl != trl) m += " TRL FL" + std::to_string(trl) + " (was FL" + std::to_string(prevTrl) + ")";
     else if (trl > 0 && prevQnh <= 0) m += " TRL FL" + std::to_string(trl);
     return m;
-}
-
-// ---- top-down (shared by the QNH monitor and procedure notifications) --------------------------------
-// Core /api/plugin/topdown: TOPDOWN|<airport>|<position>,<position>,...  lowest first,
-// e.g. TOPDOWN|OKBK|OKBK_DEL,OKBK_GND,OKBK_TWR,OKBK_APP,OKAC_CTR
-// A position (OKBK_TWR) is worked by OKBK_TWR, OKBK_1_TWR, OKBK_N_TWR: same prefix and suffix.
-using TopDownOrders = std::map<std::string, std::vector<std::string>>;
-inline bool TopDownPositionMatches(const std::string& position, const std::string& callsign) {
-    size_t a = position.find('_'), b = callsign.find('_');
-    if (a == std::string::npos || b == std::string::npos) return false;
-    return Upper(position.substr(0, a)) == Upper(callsign.substr(0, b)) &&
-           Upper(position.substr(position.rfind('_') + 1)) == Upper(callsign.substr(callsign.rfind('_') + 1));
-}
-inline TopDownOrders ParseTopDownOrders(const std::string& body) {
-    TopDownOrders td;
-    for (const auto& line : SplitChar(body, '\n')) {
-        auto f = SplitChar(Trim(line), '|');
-        if (f.size() < 3 || f[0] != "TOPDOWN" || !IsAirportCode(Upper(Trim(f[1])))) continue;
-        std::vector<std::string> order;
-        for (const auto& p : SplitChar(f[2], ',')) { std::string x = Upper(Trim(p)); if (x.find('_') != std::string::npos) order.push_back(x); }
-        if (!order.empty()) td[Upper(Trim(f[1]))] = order;
-    }
-    return td;
-}
-// The airport is the user's: the lowest position in its top-down order that anyone is on is one the user
-// is on (online = the other controllers' callsigns). An airport with no order: its own positions only.
-inline bool CoveredByMe(const TopDownOrders& td, const std::string& airport, const std::string& me,
-                        const std::vector<std::string>& online) {
-    if (airport.empty() || me.empty()) return false;
-    auto it = td.find(airport);
-    std::vector<std::string> order = it != td.end() ? it->second
-        : std::vector<std::string>{ airport + "_DEL", airport + "_GND", airport + "_TWR", airport + "_APP" };
-    for (const auto& pos : order) {
-        if (TopDownPositionMatches(pos, me)) return true;
-        for (const auto& cs : online) if (TopDownPositionMatches(pos, cs)) return false;
-    }
-    return false;
-}
-// Every airport Core has an order for (and the user's own) that the user covers now
-inline std::vector<std::string> AirportsCovered(const TopDownOrders& td, const std::string& me, const std::vector<std::string>& online) {
-    std::vector<std::string> out;
-    for (const auto& kv : td) if (CoveredByMe(td, kv.first, me, online)) out.push_back(kv.first);
-    std::string own = Upper(me.substr(0, me.find('_')));
-    if (IsAirportCode(own) && !td.count(own) && CoveredByMe(td, own, me, online)) out.push_back(own);
-    return out;
 }
 
 // ---- procedure notifications ---------------------------------------------------------------------

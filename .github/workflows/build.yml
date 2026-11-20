@@ -14,7 +14,7 @@ name: build
 # manual run on another branch: a test pre-release named after the branch, version <version>-dev.<run>.
 #                A release that failed (or was left incomplete) is tried again by the next push or manual run.
 # A pull request is only released when it changes what goes into the DLL (sources, resources,
-# CMakeLists.txt, vcpkg.json, libs/). Anything else (tests, docs, workflows) is still tested and built,
+# CMakeLists.txt, vcpkg.json, src/, resource/, third_party/). Anything else (tests, docs, workflows) is still tested and built,
 # but not released. A manual run always releases (on main, still only a version not yet released).
 on:
   push:
@@ -23,9 +23,10 @@ on:
     types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
+# Read only by default: the test and build jobs compile the pull request's code. Only the jobs that publish get
+# more, each in its own permissions block.
 permissions:
-  contents: write        # to create releases
-  pull-requests: write   # to comment on a pull request when its test build is published
+  contents: read
 
 concurrency:
   group: build-${{ github.event.pull_request.number || github.ref }}
@@ -56,7 +57,7 @@ jobs:
             echo "Could not compare with $BASE, releasing anyway"; echo "release=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "$changed"
-          if echo "$changed" | grep -qE '^(libs/.*|[^/]+\.(cpp|c|h|hpp|rc|bmp)|CMakeLists\.txt|vcpkg\.json)$'; then
+          if echo "$changed" | grep -qE '^(src/.*|resource/.*\.(rc|h|bmp)|third_party/.*|CMakeLists\.txt|vcpkg\.json)$'; then
             echo "release=true" >> "$GITHUB_OUTPUT"
           else
             echo "No changes to the DLL's inputs, so no release"; echo "release=false" >> "$GITHUB_OUTPUT"
@@ -69,8 +70,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Logic tests
         run: |
-          g++ -std=c++17 -Wall -Wextra -I. tests/test_logic.cpp -o test_logic
+          g++ -std=c++17 -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic
           ./test_logic
+      # The same tests with AddressSanitizer and UndefinedBehaviorSanitizer: an out-of-bounds read, an overflow or
+      # other undefined behaviour in the pure logic fails the build
+      - name: Logic tests (sanitizers)
+        run: |
+          g++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer \
+            -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic_san
+          ./test_logic_san
 
   build:
     needs: test
@@ -94,7 +102,7 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN: ${{ github.run_number }}
         run: |
-          v=$(sed -n 's/^#define KWIQ_VERSION "\(.*\)"/\1/p' version.h)
+          v=$(sed -n 's/^#define KWIQ_VERSION "\(.*\)"/\1/p' src/utils/version.h)
           # semver.org's own pattern: no leading zeros in numbers, including numeric pre-release identifiers
           n='(0|[1-9][0-9]*)'; id='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
           semver="^$n\\.$n\\.$n(-$id(\\.$id)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\$"
@@ -134,13 +142,13 @@ jobs:
           cmake --build build --config Release 2>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-      # Every compiler warning, once each (#41). Vendored code (libs/, vcpkg, VCH, the Slots-Plugin's
-      # VatsimAPI.*) may have some; KWIQ's own files must have none.
+      # Every compiler warning, once each (#41). Vendored code (third_party/, vcpkg, src/plugin/vch,
+      # src/plugin/slots) may have some; KWIQ's own files must have none.
       - name: Compiler warnings
         run: |
           $all = @(Select-String -Path build.log -Pattern ': warning C\d+' |
                    ForEach-Object { ($_.Line -replace '\s*\[[^\]]*\]\s*$', '').Trim() } | Sort-Object -Unique)
-          $vendored = '(?i)\\(libs|vcpkg_installed)\\|\\(requestMenu|internet|usefulStuff|Constant|stdafx|targetver|Config|VatsimAPI)\.(cpp|hpp|h)\('
+          $vendored = '(?i)[\\/](third_party|vcpkg_installed|vch|slots)[\\/]'
           $own = @($all | Where-Object { $_ -notmatch $vendored })
           "$($all.Count) warning(s), $($own.Count) of them in KWIQ's own files"
           foreach ($w in $all) { if ($w -match $vendored) { "  vendored: $w" } else { "::warning::$w" } }
@@ -184,6 +192,9 @@ jobs:
       needs.changes.outputs.release == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # to create releases
+      pull-requests: write   # to say on a pull request that its test build is published
     outputs:
       published: ${{ steps.main.outputs.published }}
     env:
@@ -237,9 +248,16 @@ jobs:
           gh release delete "$tag" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$tag" KWIQPlugin.dll KWIQPluginUpdater.dll KWIQPluginCore.dll --prerelease --target "$SHA" --title "$title" \
             --notes "For testing only. Core does not offer pre-releases to controllers. Built from ${SHA:0:7}."
+          # One comment per pull request, edited on every push, not a new one each time
           if [ -n "$PR" ]; then
             url=$(gh release view "$tag" --json url -q .url)
-            gh pr comment "$PR" --body "Test build $VERSION has been published as a pre-release: [$tag]($url) (built from ${SHA:0:7})."
+            marker="<!-- kwiq-test-build -->"
+            body="$marker
+          Test build $VERSION has been published as a pre-release: [$tag]($url) (built from ${SHA:0:7})."
+            id=$(gh api --paginate "repos/$GH_REPO/issues/$PR/comments" \
+                   --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | tail -n 1)
+            if [ -n "$id" ]; then gh api -X PATCH "repos/$GH_REPO/issues/comments/$id" -f body="$body" > /dev/null
+            else gh pr comment "$PR" --body "$body"; fi
           fi
 
   changelog:
@@ -249,6 +267,8 @@ jobs:
     needs: release
     if: needs.release.outputs.published == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read         # reads the releases; the docs repository is written with DOCS_REPO_TOKEN
     env:
       GH_TOKEN: ${{ github.token }}
       DOCS_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
@@ -310,6 +330,8 @@ jobs:
     # a closed pull request no longer needs its test build
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # to delete the test pre-release and its tag
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
