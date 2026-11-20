@@ -455,15 +455,10 @@ public:
             if (ItemCode == KWIQ_ITEM_EVENT_ROUTE) {
                 if (e.ev == RouteResult::Ok) { txt = ui.ok; colour = ui.cOk; }
                 else if (e.ev == RouteResult::Check) txt = ui.chk;
-            } else if (ItemCode == KWIQ_ITEM_SRD) {
-                switch (e.srd) {
-                case SrdResult::Ok:    txt = ui.ok; colour = ui.cOk; break;
-                case SrdResult::Route: txt = "RTE"; break;
-                case SrdResult::Min:   txt = "MIN"; break;
-                case SrdResult::Max:   txt = "MAX"; break;
-                default: break;
-                }
-            } else if (e.fpcVfr) { txt = "VFR"; colour = ui.cOk; }
+            }
+            // The SRD and the FPC are one route check now (Core serves both from the SRD): the SRD item, kept so
+            // existing tag layouts still work, shows the same as the FPC item
+            else if (e.fpcVfr) { txt = "VFR"; colour = ui.cOk; }
             else if (fpcDisabled_.count(FlightPlan.GetCallsign())) { txt = "-"; colour = RGB(128, 128, 128); }   // VFPC's grey
             else if (e.evExact == kwiq::RouteResult::Check) txt = "EVT";        // an event flight off its event route
             else if (e.fpcChecked) {
@@ -1052,7 +1047,6 @@ private:
         std::string adep, ades, rte, sid, planType, today;
         kwiq::RouteResult ev = kwiq::RouteResult::None;
         kwiq::RouteResult evExact = kwiq::RouteResult::None;       // the FPC's event check: Check shows EVT
-        kwiq::SrdResult srd = kwiq::SrdResult::None;
         bool fpcChecked = false, fpcVfr = false, fpcWarn = false;   // the flight plan check: empty code = passed
         std::string fpcCode;
     };
@@ -1076,7 +1070,6 @@ private:
               e.today == today && e.adep == o && e.ades == a && e.rte == r && e.sid == sid && e.planType == planType)) {
             auto toks = kwiq::NormaliseRoute(r);
             e.ev  = kwiq::CheckEventRoute(ev_, o, a, toks, today);
-            e.srd = kwiq::CheckSrd(srd_, o, a, toks, rfl, FirExitLocked(fp, a));
             e.evExact = kwiq::CheckEventRouteExact(ev_, o, a, toks, today);
             kwiq::fpc::Result f = kwiq::fpc::Check(fpcRules_, FpcFlight(fp, FpcExitLocked(fp)));
             e.fpcChecked = f.checked; e.fpcVfr = f.vfr; e.fpcWarn = f.WarningOnly();
@@ -1160,19 +1153,8 @@ private:
         }
         kwiq_ui::ShowSrd(adep, ades, lvl);                   // modal, as UKCP's: returns once it is closed
     }
-    void ExplainSrdSelected() {
-        auto fp = FlightPlanSelectASEL();
-        if (!fp.IsValid()) return;
-        auto d = fp.GetFlightPlanData();
-        std::string msg;
-        {
-            std::lock_guard<std::mutex> g(mu_);
-            std::string ades = kwiq::Upper(d.GetDestination());
-            msg = "SRD: " + kwiq::ExplainSrd(srd_, kwiq::Upper(d.GetOrigin()), ades, d.GetRoute(), fp.GetFinalAltitude(),
-                                             FirExitLocked(fp, ades));
-        }
-        DisplayUserMessage("KWIQ Controller Plugin", fp.GetCallsign(), msg.c_str(), true, true, false, false, false);
-    }
+    // The SRD item is the FPC's route check now, so it is explained the same way
+    void ExplainSrdSelected() { ExplainFpcSelected(); }
     // VFPC checkFPDetail
     void ExplainFpcSelected() {
         auto fp = FlightPlanSelectASEL();

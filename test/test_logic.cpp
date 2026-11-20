@@ -359,6 +359,23 @@ int main() {
         CHECK(Check(real, n).fails.size() == 1 && Check(real, n).fails[0] == Fail::Sid);
         n.sid = "LAGLO1A"; n.route = "LAGLO1A LAGLO L718 KABAN";   // no LAGLO rules: the ALI ones
         CHECK(Check(real, n).Passed());
+        // Core's /fpc from the one SRD table: an airway option per line, and an SRD route keyed on its first point with
+        // its destination as the filter. The same results as the VFPC rules.
+        {
+            Rules one = ParseRules(
+                "FPC|OKKK|SESRU||ODD|||||M677||\nFPC|OKKK|SESRU||ODD|||||G669||\n"
+                "FPC|ORBI|BGD||ANY|240|410||LTBA|NOLDO B411 PAXAT||\n");
+            Flight k = f; k.route = "SESRU G669 XYZ";
+            CHECK(Check(one, k).Passed());
+            k.route = "SESRU UL999 XYZ";
+            CHECK(Check(one, k).fails.size() == 1 && Check(one, k).fails[0] == Fail::Sid);
+            Flight s = o; s.sid = ""; s.route = "NOLDO B411 PAXAT"; s.destination = "LTBA"; s.rflFt = 30000;
+            CHECK(Check(one, s).Passed());
+            s.destination = "EGLL";                                     // not the SRD route's destination
+            CHECK(Check(one, s).fails.size() == 1 && Check(one, s).fails[0] == Fail::Route);
+            s.destination = "LTBA"; s.rflFt = 43000;
+            CHECK(Check(one, s).fails.size() == 1 && Check(one, s).fails[0] == Fail::Max);
+        }
         // a fallback condition must match the route by airway, so a rule-less group never catches everything
         Rules loose = ParseRules("FPC|ORBI|BGD||ANY|||||||\nFPC|ORBI|XYZ||ANY|||||||\n");
         // levels too big for an int are clamped, not undefined (#86)

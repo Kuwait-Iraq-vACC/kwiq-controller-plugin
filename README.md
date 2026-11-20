@@ -45,12 +45,12 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | ... / Event Flag | `EV` if the pilot has a VATCAN slot |
 | ... / Event Slot | the slot time |
 | ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `RTE`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV`; red `EVT` for an event flight off its event route; grey `-` when disabled with Open FPC menu |
-| ... / SRD | `OK`, `RTE`, `MIN` or `MAX` against the SRD |
+| ... / SRD | the same as FPC: the SRD and the flight plan check are one route check now (kept so existing tag layouts still work) |
 | ... / Sector Indicator | the alias of the position tracking the aircraft (also drawn above it) |
 | ... / RDF state | `!` while the aircraft transmits |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
 
-Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** or **Open FPC menu** (left button on FPC), **Explain SRD result** (left button on SRD), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
+Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** or **Open FPC menu** (left button on FPC), **Explain SRD result** (left button on SRD; the same as Explain FPC result), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
@@ -119,7 +119,9 @@ As EuroScope starts, the plugin reads the version of the running EuroScope from 
 OKAC and ORBB are released separately, so Core holds a current AIRAC for each (`sectorfile.airac.okac` and `sectorfile.airac.orbb`, e.g. `2610/02`), filled by `php artisan sectorfile:sync` from `AIRAC_VERSION.txt` in each package's repository, falling back to the tag of its latest release. The plugin compares the loaded sector file with its own package's version: the package is taken from the sector file's path (the OKAC or ORBB folder or file nearest it), otherwise from the controller's callsign (OR... is ORBB, OK... is OKAC). The plugin reads the local version only from `AIRAC_VERSION.txt`, which the packages keep in `OKAC\Plugins` and `ORBB\Plugins`: it looks in the folder given with `.kwiq sectorfile` (or that file's folder), otherwise in the plugin's folder and its three parents, each with its `Plugins` folder. Without that file the version is not checked and no alert is shown. "2610/2" and "2610/02" are treated as equal.
 
 ## SRD check and FIR exit points
-The SRD item checks the filed route and level against the SRD rows for the flight:
+**The SRD and the flight plan check are one now.** Core keeps one table, its SRD, with the FPC's fields on each route (SID point, suffix, destinations, even/odd, forbidden levels, engines, equipment), and serves both `/api/plugin/srd` (SRD Search) and `/api/plugin/fpc` (the route check) from it. The SRD and FPC items both show the FPC result, and Explain SRD result is Explain FPC result. Each SRD route that starts at an airport is checked by the FPC: keyed on its SID point, or on its first point when it has none, with its destination as the destination filter. SRD Search lists every route, the FPC's included (`ORBI` to `PAXAT`: `BGD NOLDO B411 PAXAT`), with its FPC fields in the notes. The rest of this section describes the plugin's own SRD matching, which SRD Search's results still follow.
+
+The plugin's SRD matching checks the filed route and level against the SRD rows for the flight:
 1. Rows for its departure and destination airports, if there are any.
 2. For a flight whose destination is outside the vACC's airspace (not `srd.domestic_prefixes`, default `OK,OR`), rows from its departure airport to the point where it leaves the airspace, as the UK Controller Plugin does. If there are none for that point, rows to the point where it leaves OKAC for ORBB or the other way round.
 3. Otherwise, en-route rows whose two ends are both on the filed route.
