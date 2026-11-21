@@ -286,6 +286,10 @@ int main() {
         g.engine = 'P';
         r = Check(rules, g);
         CHECK(r.fails.size() == 2 && r.fails[0] == Fail::Engine && r.fails[1] == Fail::Max);
+        // the tag cycles through them, two seconds each
+        CHECK(std::string(CodeAt(r.fails, 0)) == "ENG" && std::string(CodeAt(r.fails, 1999)) == "ENG" &&
+              std::string(CodeAt(r.fails, 2000)) == "MAX" && std::string(CodeAt(r.fails, 4000)) == "ENG");
+        CHECK(std::string(CodeAt({}, 5000)).empty() && std::string(CodeAt({ Fail::Min }, 123456)) == "MIN");
 
         Flight b; b.origin = "ORBI"; b.destination = "LTBA"; b.sid = "BGD1A"; b.route = "BGD DELMI DCT RUKAM B411 MURIB";
         b.rflFt = 26000; b.engine = 'J'; b.capability = 'R';
@@ -347,6 +351,9 @@ int main() {
         o.rflFt = 47000;                                            // FL470 is even, but above FL460
         r = Check(real, o);
         CHECK(r.fails.size() == 1 && r.fails[0] == Fail::Max);
+        o.rflFt = 64000; o.route = "NOLDO1A NOLDO B411 PAXAT"; o.sid = "NOLDO1A";   // even and above FL600: both, cycling
+        r = Check(real, o);
+        CHECK(r.fails.size() == 2 && std::string(CodeAt(r.fails, 0)) == "E/O" && std::string(CodeAt(r.fails, 2000)) == "MAX");
         o.rflFt = 41000; o.route = "NOLDO1A NOLDO B411 PAXAT"; o.sid = "NOLDO1A";   // FL410 is odd
         CHECK(Check(real, o).Passed());
         CHECK(!EvenLevel(41000) && EvenLevel(43000) && !EvenLevel(45000) && EvenLevel(47000) && EvenLevel(40000) && !EvenLevel(39000));

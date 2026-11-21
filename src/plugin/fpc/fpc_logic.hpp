@@ -93,6 +93,13 @@ inline const char* Code(Fail f) {
     }
     return "FPL";
 }
+// The FPC item shows one failure at a time, cycling through them: e.g. E/O and MAX for an even level above the
+// highest allowed one. Each is shown for kCycleMs; nowMs is any millisecond clock (GetTickCount).
+constexpr unsigned long long kCycleMs = 2000;
+inline const char* CodeAt(const std::vector<Fail>& fails, unsigned long long nowMs) {
+    if (fails.empty()) return "";
+    return Code(fails[(size_t)((nowMs / kCycleMs) % fails.size())]);
+}
 struct Result {
     bool checked = false;                               // the departure airport has rules (VFR: always)
     bool vfr = false;
