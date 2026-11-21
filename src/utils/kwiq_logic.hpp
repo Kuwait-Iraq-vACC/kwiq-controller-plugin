@@ -398,9 +398,11 @@ inline bool Domestic(const std::string& airport, const std::string& prefixes) {
 }
 // What SRD destination to use for a flight: its destination when it stays in the vACC's airspace, else where
 // it leaves it (UKCP SrdSearchDialog::PrepopulateSearch); empty when that is not known
+// The first exit on the route is where the flight leaves the departure's FIR: an OKKK departure to Europe leaves
+// OKAC at TASMI (internal), before it leaves ORBB at KABAN, and OKKK's routes end at TASMI.
 inline std::string SrdEnd(const std::string& ades, const std::string& prefixes, const AircraftExit& exit) {
     if (Domestic(ades, prefixes)) return ades;
-    return !exit.external.empty() ? exit.external : exit.internal;
+    return !exit.internal.empty() ? exit.internal : exit.external;
 }
 
 // SRD rows that apply to a flight. Airport-pair rows (ADEP|ADES) take precedence. Then, for a flight
