@@ -44,7 +44,7 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | KWIQ Controller Plugin / Event Route | green `OK` or red `CHK` on event days for event ADEP/ADES pairs |
 | ... / Event Flag | `EV` if the pilot has a VATCAN slot |
 | ... / Event Slot | the slot time |
-| ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `RTE`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV`; red `EVT` for an event flight off its event route; grey `-` when disabled with Open FPC menu |
+| ... / FPC | the flight plan check (VFPC's rules): `OK`, `VFR`, or what failed: `SID`, `RTE`, `ENG`, `E/O`, `MIN`, `MAX`, `FLR`, `NAV`; orange `EVT` for an event flight off its event route, green `EVT` on it; grey `-` when disabled with Open FPC menu |
 | ... / SRD | the same as FPC: the SRD and the flight plan check are one route check now (kept so existing tag layouts still work) |
 | ... / Sector Indicator | the alias of the position tracking the aircraft (also drawn above it) |
 | ... / RDF state | `!` while the aircraft transmits |
@@ -148,7 +148,7 @@ When the SID's first waypoint has no rules at the airport, or the flight plan ha
 
 The route is only checked up to the first FIR exit point on it (Core's FIR exits, internal or external, found as for the SRD), whatever the destination: what is filed after it isn't the vACC's to check. **Explain FPC result** then says `route checked up to FIR exit PAXAT`.
 
-**Event flights:** when the flight has an event route today (Core's event routes for its ADEP/ADES on that UTC day), the FPC item shows red `EVT` if the filed route isn't one of them exactly. Only these may differ: `DCT`, speed/level changes (`N0450F350`, `NOLDO/N0450F350`), a SID before the route and a STAR after it, and the aerodrome VOR at either end (as for the SRD). An extra point, a missing one or another order is `EVT`. This compares the whole route, not only up to the FIR exit. A flight on its event route shows the usual FPC result. The Event Route item keeps its looser check (`OK` while every event-route point is filed, in order). **Explain FPC result** says which event route was expected.
+**Event flights:** when the flight has an event route today (Core's event routes for its ADEP/ADES on that UTC day), the FPC item shows orange `EVT` if the filed route isn't one of them exactly, and green `EVT` if it is (the colour of a wrong one is `ui.colour_event_wrong` in Core, `#FF8C00` by default). Only these may differ: `DCT`, speed/level changes (`N0450F350`, `NOLDO/N0450F350`), a SID before the route and a STAR after it, and the aerodrome VOR at either end (as for the SRD). An extra point, a missing one or another order is `EVT`. This compares the whole route, not only up to the FIR exit. A flight on its event route shows green `EVT` instead of the usual FPC result; **Explain FPC result** still lists the FPC's checks. The Event Route item keeps its looser check (`OK` while every event-route point is filed, in order). **Explain FPC result** says which event route was expected.
 
 | Field | Kind | What it does | Fails as |
 |---|---|---|---|
