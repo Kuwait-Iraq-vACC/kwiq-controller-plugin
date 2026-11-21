@@ -463,9 +463,10 @@ public:
             else if (e.evExact == kwiq::RouteResult::Check) txt = "EVT";        // an event flight off its event route
             else if (e.fpcChecked) {
                 // VFPC: VFR and passed in green, the first failure in red, a forbidden level alone in yellow
-                if (e.fpcCode.empty()) { txt = ui.ok; colour = ui.cOk; }
+                // several failures: one at a time, cycling (E/O, then MAX, ...)
+                if (e.fpcFails.empty()) { txt = ui.ok; colour = ui.cOk; }
                 else {
-                    txt = e.fpcCode;
+                    txt = kwiq::fpc::CodeAt(e.fpcFails, GetTickCount64());
                     colour = e.fpcWarn ? ui.cWarn : ui.cBad;
                 }
             }
@@ -1047,8 +1048,8 @@ private:
         std::string adep, ades, rte, sid, planType, today;
         kwiq::RouteResult ev = kwiq::RouteResult::None;
         kwiq::RouteResult evExact = kwiq::RouteResult::None;       // the FPC's event check: Check shows EVT
-        bool fpcChecked = false, fpcVfr = false, fpcWarn = false;   // the flight plan check: empty code = passed
-        std::string fpcCode;
+        bool fpcChecked = false, fpcVfr = false, fpcWarn = false;   // the flight plan check: no failures = passed
+        std::vector<kwiq::fpc::Fail> fpcFails;                      // every failure, in the order they were found
     };
 
     // Draw-path checks, cached per callsign: only recomputed when the flight plan, the UTC day
@@ -1073,7 +1074,7 @@ private:
             e.evExact = kwiq::CheckEventRouteExact(ev_, o, a, toks, today);
             kwiq::fpc::Result f = kwiq::fpc::Check(fpcRules_, FpcFlight(fp, FpcExitLocked(fp)));
             e.fpcChecked = f.checked; e.fpcVfr = f.vfr; e.fpcWarn = f.WarningOnly();
-            e.fpcCode = f.fails.empty() ? std::string() : kwiq::fpc::Code(f.fails[0]);
+            e.fpcFails = f.fails;
             e.evGen = evGen_; e.srdGen = srdGen_; e.exitGen = exitGen_; e.fpcGen = fpcGen_;
             e.rfl = rfl; e.filedRfl = filedRfl; e.engine = engine; e.capability = capability; e.today = today;
             e.adep = o; e.ades = a; e.rte = r; e.sid = sid; e.planType = planType; e.valid = true;
