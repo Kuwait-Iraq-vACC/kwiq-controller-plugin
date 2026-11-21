@@ -77,6 +77,13 @@ inline bool HasAssignedSquawk(const CodeList& list, const std::string& s) {
     return !r || r->countsAsAssigned;
 }
 
+// The conspicuity codes (Core's squawk.conspicuity and squawk.conspicuity_vfr) and the holding code are never a
+// code an aircraft has, nor one Core may give, even if Core's list leaves them out: added as "doesn't count"
+inline void AddNoCodes(CodeList& list, const std::vector<std::string>& codes) {
+    for (const auto& c : codes)
+        if (ValidSquawk(c) && !FindCode(list, c)) list.push_back({ c, c, "conspicuity", "not on Core's list", false });
+}
+
 // ---- the rules (UKCP SquawkAssignment) ---------------------------------------------------------
 struct User {
     bool controller = false;          // logged on as a controller (not an observer), live or sweatbox
@@ -98,6 +105,8 @@ struct Stored {
     bool vfr = false;
     bool planChanged = false;         // departure, destination or rules changed since the code was set: a code
                                       // Core holds for the callsign may be for the old plan, so ask for a new one
+    bool mine = false;                // tracked by the user at the last look
+    bool assumed = false;             // the user took it on with no code: a new one from Core, whatever came before
 };
 
 constexpr int UNTRACKED_MAX_SPEED = 30;               // kt: untracked aircraft only get a code on the ground
@@ -147,9 +156,12 @@ inline bool ChangeAllowed(const User& u, const Aircraft& a) {
     return u.controller && (a.trackedByMe || !a.tracked);
 }
 
-enum class Action { None, Previous, Assign };
+enum class Action { None, Previous, Assign, Assumed };
 // UKCP SquawkEventHandler::AttemptAssignment, without the UK's circuit and local codes
+// Assumed with no code (blank, or a code on Core's list such as 2000): always a new code from Core, not one Core
+// holds for the callsign, a reconnect's old code, or a code someone set by hand
 inline Action Decide(const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
+    if (s && s->assumed && a.trackedByMe && AssignmentNeeded(u, a, codes)) return Action::Assumed;
     if (PreviousNeeded(u, a, s, codes)) return Action::Previous;
     if (s && s->byHand && !ForceNeeded(s, a)) return Action::None;
     if (AssignmentNeeded(u, a, codes)) return Action::Assign;
@@ -158,8 +170,12 @@ inline Action Decide(const User& u, const Aircraft& a, const Stored* s, const Co
 
 // ---- what the plugin remembers (UKCP StoredFlightplan) -------------------------------------------
 // Every look at a flight plan. A new plan makes the plugin automatic again for it (UKCP: until the plan changes).
-inline void Remember(Stored& st, const Aircraft& a) {
+// codes: Core's list, to see that an aircraft assumed with a code (or given one later) needs no new one
+inline void Remember(Stored& st, const Aircraft& a, const CodeList* codes = nullptr) {
     if (PlanDiffers(st, a)) { st.byHand = false; st.planChanged = true; }
+    if (a.trackedByMe && !st.mine) st.assumed = true;           // kept until a code is set, or it isn't the user's
+    if (!a.trackedByMe || (codes && HasCode(*codes, a.squawk))) st.assumed = false;
+    st.mine = a.trackedByMe;
     st.origin = a.origin;
     st.destination = a.destination;
     st.vfr = a.vfr;
@@ -171,6 +187,7 @@ inline void CodeSet(Stored& st, const std::string& code, bool byHand) {
     st.squawk = code;
     st.byHand = byHand;
     st.planChanged = false;
+    st.assumed = false;
 }
 // EuroScope reports a code. One the plugin didn't set was set by a controller, here (typed in EuroScope) or on
 // another scope: leave it alone like a code set from the menu. Ignored: a cleared or invalid code, the holding
@@ -182,6 +199,7 @@ inline void CodeSeen(Stored& st, const std::string& code, const CodeList& codes,
     st.squawk = code;
     st.byHand = true;
     st.planChanged = false;
+    st.assumed = false;                                         // chosen after the assume: kept
 }
 // Core's answer arrived: set it only if it is still wanted. One the controller asked for: if they may still change
 // the code. An automatic one: also only if the aircraft still has no code and no controller has set one by hand
@@ -189,18 +207,23 @@ inline void CodeSeen(Stored& st, const std::string& code, const CodeList& codes,
 inline bool AnswerWanted(bool manual, const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
     if (!ChangeAllowed(u, a)) return false;
     if (manual) return true;
-    return !HasCode(codes, a.squawk) && !(s && s->byHand);
+    if (HasCode(codes, a.squawk)) return false;
+    return !(s && s->byHand) || (s->assumed && a.trackedByMe);  // assumed: a code set by hand before doesn't stop it
 }
 
 // ---- Core ------------------------------------------------------------------------------------------
-// /api/plugin/squawk-assignment/<callsign> answers SQUAWK|<code>; anything else, or a code on Core's own
-// non-assignable list, is no code
-inline std::string ParseSquawk(const std::string& body, const CodeList& codes) {
+// /api/plugin/squawk-assignment/<callsign> answers SQUAWK|<code>: the code as sent, or empty
+inline std::string AnsweredSquawk(const std::string& body) {
     for (const auto& line : SplitChar(body, '\n')) {
         auto f = SplitChar(Trim(line), '|');
-        if (f.size() >= 2 && f[0] == "SQUAWK" && AllowedSquawk(codes, Trim(f[1]))) return Trim(f[1]);
+        if (f.size() >= 2 && f[0] == "SQUAWK") return Trim(f[1]);
     }
     return "";
+}
+// Core's answer, or empty if it is no code to set: on Core's own non-assignable list, or the holding code
+inline std::string ParseSquawk(const std::string& body, const CodeList& codes) {
+    std::string code = AnsweredSquawk(body);
+    return AllowedSquawk(codes, code) && code != HOLDING_SQUAWK ? code : "";
 }
 // ERROR|<message> in an error response, else empty
 inline std::string ParseError(const std::string& body) {

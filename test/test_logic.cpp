@@ -651,6 +651,46 @@ int main() {
         CHECK(!sp.byHand && Decide(sbx, spawn, &sp, codes) == Action::Assign);
         CodeSeen(sp, "4521", codes, true);                          // a real code still is
         CHECK(sp.byHand && sp.squawk == "4521");
+
+        // assumed on a non-assignable code (KAC792 on 2000): always a new code from Core
+        Aircraft kac = gnd; kac.callsign = "KAC792"; kac.deliveryByMe = false;
+        kac.groundSpeed = 300; kac.fromOrigin = 40; kac.altitude = 15000;
+        Stored ks; Remember(ks, kac);                               // untracked: nothing
+        CodeSeen(ks, "2000", codes, false);                         // 2000 set by someone earlier: by hand
+        kac.squawk = "2000";
+        CHECK(ks.byHand && !ks.assumed && Decide(ctr, kac, &ks, codes) == Action::None);
+        kac.tracked = kac.trackedByMe = true;                       // the user assumes it
+        Remember(ks, kac);
+        CHECK(ks.assumed && Decide(ctr, kac, &ks, codes) == Action::Assumed);   // by hand doesn't stop it
+        Aircraft held = kac; held.squawk = HOLDING_SQUAWK;          // Core answers: still wanted
+        CHECK(AnswerWanted(false, ctr, held, &ks, codes));
+        Remember(ks, held);                                         // later looks while waiting: still assumed
+        CHECK(ks.assumed);
+        CodeSet(ks, "4521", false);
+        CHECK(!ks.assumed);
+        kac.squawk = "";                                            // blank, a reconnect's code stored: still a new one
+        Stored kr{ "OKBK", "OMDB", "4521", false, 0 }; Remember(kr, kac);
+        CHECK(Decide(ctr, kac, &kr, codes) == Action::Assumed);
+        kac.squawk = "4521"; Stored kd; kd.mine = false; Remember(kd, kac);   // assumed with a real code: kept
+        CHECK(Decide(ctr, kac, &kd, codes) == Action::None);
+        Stored kt; Remember(kt, kac, &codes);                      // assumed with a real code, with Core's list
+        CHECK(!kt.assumed);
+        Aircraft typed = kac; typed.squawk = "";
+        Stored ky; Remember(ky, typed);
+        CHECK(ky.assumed);
+        CodeSeen(ky, "2000", codes, false);                         // the user typed 2000 after assuming: kept
+        typed.squawk = "2000";
+        CHECK(!ky.assumed && Decide(ctr, typed, &ky, codes) == Action::None);
+        Aircraft gone2 = kac; gone2.tracked = gone2.trackedByMe = false;      // released again: no longer assumed
+        Remember(kd, gone2);
+        CHECK(!kd.assumed);
+        // Core's list without 2000: 2000, 7000 and the holding code still never count, and Core can't give them
+        CodeList thin = ParseNonAssignable("NONASSIGNABLE|7700|7700|emergency|1|Mayday\n");
+        CHECK(HasCode(thin, "2000") && ParseSquawk("SQUAWK|2000", thin) == "2000");
+        AddNoCodes(thin, { "2000", "7000", HOLDING_SQUAWK, "bad" });
+        CHECK(thin.size() == 3 && !HasCode(thin, "2000") && !HasCode(thin, "7000") && HasCode(thin, "7700"));
+        CHECK(ParseSquawk("SQUAWK|2000", thin) == "" && ParseSquawk("SQUAWK|7000", CodeList()) == "" &&
+              ParseSquawk("SQUAWK|4521", thin) == "4521" && AnsweredSquawk("SQUAWK|2000\n") == "2000");
     }
 
     // api-settings.json, as UKCP keeps its key
