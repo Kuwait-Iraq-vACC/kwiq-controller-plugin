@@ -1362,6 +1362,7 @@ private:
             switch (Decide(u, a, s, codes)) {
             case Action::Previous: SquawkRequest(fp, a, true, false, s->byHand ? s->squawk : ""); break;
             case Action::Assign:   SquawkRequest(fp, a, !ForceNeeded(s, a), false); break;
+            case Action::Assumed:  SquawkRequest(fp, a, false, false); break;    // a new code, never one Core holds
             case Action::None:     break;
             }
         }
@@ -1369,7 +1370,8 @@ private:
     kwiq::squawk::Stored* SquawkStore(const kwiq::squawk::Aircraft& a) {
         if (a.callsign.empty()) return nullptr;
         kwiq::squawk::Stored& st = sqStored_[a.callsign];
-        kwiq::squawk::Remember(st, a);
+        auto codes = SquawkCodes();
+        kwiq::squawk::Remember(st, a, codes.get());
         return &st;
     }
 
@@ -1398,7 +1400,12 @@ private:
         for (auto fp = FlightPlanSelectFirst(); fp.IsValid(); fp = FlightPlanSelectNext(fp)) {
             const char* tracker = fp.GetTrackingControllerCallsign();
             if (kwiq::squawk::HasCode(*codes, fp.GetControllerAssignedData().GetSquawk()) ||
-                (tracker && *tracker && !fp.GetTrackingControllerIsMe())) continue;
+                (tracker && *tracker && !fp.GetTrackingControllerIsMe())) {
+                kwiq::squawk::Aircraft a;                           // still note who tracks it, so an assume is seen
+                SquawkFacts(fp, a);
+                SquawkStore(a);
+                continue;
+            }
             SquawkAttempt(fp, u, *codes, now);
         }
     }
@@ -1490,7 +1497,7 @@ private:
         }
         if (job.lookupFirst) {
             long code = kwiq_net::HttpSend("GET", url, "", body, err);
-            if (code == 200) r.squawk = kwiq::squawk::ParseSquawk(body, list);
+            if (code == 200) r.squawk = kwiq::squawk::ParseSquawk(body, list);   // a 2000 Core holds: ask for a new one
             if (!r.squawk.empty()) return r;
             if (code != 200 && code != 404) { r.error = SquawkWhy(body, err); return r; }
             // Core holds none: a reconnect's code set by hand comes back (Core never held it), else a new one
@@ -1498,7 +1505,10 @@ private:
         }
         kwiq_net::HttpSend(job.method, url, job.form, body, err);
         if (!err.empty()) r.error = SquawkWhy(body, err);
-        else if ((r.squawk = kwiq::squawk::ParseSquawk(body, list)).empty()) r.error = "Core sent no usable squawk";
+        else if ((r.squawk = kwiq::squawk::ParseSquawk(body, list)).empty()) {
+            std::string sent = kwiq::squawk::AnsweredSquawk(body);
+            r.error = sent.empty() ? "Core sent no squawk" : "Core sent " + sent + ", which is never assigned";
+        }
         return r;
     }
 
@@ -1926,6 +1936,8 @@ private:
                 if (code == 200 || code == 404) {          // 404: Core has no list (yet)
                     ClearError("Squawk codes");
                     squawk::CodeList list = code == 200 ? squawk::ParseNonAssignable(body) : squawk::CodeList();
+                    // 2000, 7000 and the holding code never count, even if Core's list misses them
+                    if (!list.empty()) squawk::AddNoCodes(list, { ConspicuityCode(false), ConspicuityCode(true), squawk::HOLDING_SQUAWK });
                     std::shared_ptr<const squawk::CodeList> p;
                     if (!list.empty()) p = std::make_shared<const squawk::CodeList>(std::move(list));
                     sqHaveCodes_ = p != nullptr;
