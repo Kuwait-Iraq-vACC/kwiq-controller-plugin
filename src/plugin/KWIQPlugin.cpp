@@ -246,6 +246,7 @@ struct UiCfg {
     std::string ok = "OK", chk = "CHK", ev = "EV";
     COLORREF cOk = RGB(0, 190, 0), cBad = RGB(230, 30, 30), cEv = RGB(0, 170, 255), cSector = RGB(255, 255, 255);
     COLORREF cWarn = RGB(220, 220, 0);                               // FPC: only a forbidden level (VFPC's yellow)
+    COLORREF cEvtWrong = RGB(255, 140, 0);                           // FPC: an event flight off its event route
     std::map<std::string, COLORREF> cStates;                         // sector indicator per tag state (SectorColourName)
     // outdated sector file alert
     bool alertOn = true;
@@ -460,7 +461,9 @@ public:
             // existing tag layouts still work, shows the same as the FPC item
             else if (e.fpcVfr) { txt = "VFR"; colour = ui.cOk; }
             else if (fpcDisabled_.count(FlightPlan.GetCallsign())) { txt = "-"; colour = RGB(128, 128, 128); }   // VFPC's grey
-            else if (e.evExact == kwiq::RouteResult::Check) txt = "EVT";        // an event flight off its event route
+            // An event flight: orange EVT off its event route, green EVT on it
+            else if (e.evExact == kwiq::RouteResult::Check) { txt = "EVT"; colour = ui.cEvtWrong; }
+            else if (e.evExact == kwiq::RouteResult::Ok) { txt = "EVT"; colour = ui.cOk; }
             else if (e.fpcChecked) {
                 // VFPC: VFR and passed in green, the first failure in red, a forbidden level alone in yellow
                 // several failures: one at a time, cycling (E/O, then MAX, ...)
@@ -1167,10 +1170,14 @@ private:
             msg = kwiq::fpc::Explain(kwiq::fpc::Check(fpcRules_, f), f);
             std::string want;
             auto d = fp.GetFlightPlanData();
-            if (!f.vfr && kwiq::CheckEventRouteExact(ev_, kwiq::Upper(d.GetOrigin()), kwiq::Upper(d.GetDestination()),
-                                                     kwiq::NormaliseRoute(d.GetRoute()), kwiq::TodayUtc(), &want) == kwiq::RouteResult::Check)
-                msg = "EVT: the route is not today's event route " + want + " (only DCT, speed/level changes, a SID or "
+            kwiq::RouteResult evt = f.vfr ? kwiq::RouteResult::None
+                : kwiq::CheckEventRouteExact(ev_, kwiq::Upper(d.GetOrigin()), kwiq::Upper(d.GetDestination()),
+                                             kwiq::NormaliseRoute(d.GetRoute()), kwiq::TodayUtc(), &want);
+            if (evt == kwiq::RouteResult::Check)
+                msg = "EVT (orange): the route is not today's event route " + want + " (only DCT, speed/level changes, a SID or "
                       "STAR, and the aerodrome VOR at an end may differ). " + msg;
+            else if (evt == kwiq::RouteResult::Ok)
+                msg = "EVT (green): on today's event route. " + msg;
         }
         if (fpcDisabled_.count(fp.GetCallsign())) msg += " Disabled for this flight: Enable in Open FPC menu to show it again.";
         // its own chat tab, "KWIQ FPC", opened when it is not open yet
@@ -1704,6 +1711,7 @@ private:
         u.cEv = (COLORREF)ParseColour(c.Get("ui.colour_event"), u.cEv);
         u.cSector = (COLORREF)ParseColour(c.Get("ui.colour_sector"), u.cSector);
         u.cWarn = (COLORREF)ParseColour(c.Get("ui.colour_warn"), u.cWarn);
+        u.cEvtWrong = (COLORREF)ParseColour(c.Get("ui.colour_event_wrong"), u.cEvtWrong);
         for (int i = 0; i < 8; i++) {
             std::string n = SectorColourName(i);
             unsigned long v = ParseColour(c.Get("ui.colour_sector_" + n), 0xFFFFFFFFul);
