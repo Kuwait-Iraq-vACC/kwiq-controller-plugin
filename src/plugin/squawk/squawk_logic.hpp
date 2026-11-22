@@ -96,6 +96,7 @@ struct Aircraft {
     bool deliveryByMe = false;        // the user provides Delivery at the origin (ownership::AirfieldOwnership)
     double fromOrigin = 0;            // nm from the departure airport
     int groundSpeed = 0, altitude = 0;                          // kt, ft
+    bool inMySector = false;          // inside one of the user's sectors (EuroScope's sector entry is 0)
 };
 // What the plugin remembers about a flight plan, so a pilot who reconnects gets the same code back
 struct Stored {
@@ -105,8 +106,8 @@ struct Stored {
     bool vfr = false;
     bool planChanged = false;         // departure, destination or rules changed since the code was set: a code
                                       // Core holds for the callsign may be for the old plan, so ask for a new one
-    bool mine = false;                // tracked by the user at the last look
-    bool assumed = false;             // the user took it on with no code: a new one from Core, whatever came before
+    bool chosen = false;              // the code was chosen in the KWIQ menu (Conspicuity, Manual): kept even when the
+                                      // user tracks the aircraft
 };
 
 constexpr int UNTRACKED_MAX_SPEED = 30;               // kt: untracked aircraft only get a code on the ground
@@ -129,11 +130,18 @@ inline bool Possible(const User& u, const Aircraft& a) {
 // UKCP GeneralAssignmentNeeded: no code yet, and either tracked by the user or waiting on the ground at an
 // airport the user gives departures their squawk. On sweatbox, where aircraft spawn anywhere (often in the air)
 // with 2000, also any aircraft nobody tracks.
+// Waiting at the departure airport: slow and close to it
+inline bool OnGroundAtOrigin(const Aircraft& a) {
+    return a.groundSpeed <= UNTRACKED_MAX_SPEED && a.fromOrigin <= UNTRACKED_MAX_FROM_ORIGIN;
+}
+// Not in UKCP: an airborne aircraft nobody tracks (often uncorrelated, so it can't be assumed yet) that is inside
+// the user's sector also gets a code. One still on the ground is left to whoever provides Delivery.
 inline bool AssignmentNeeded(const User& u, const Aircraft& a, const CodeList& codes) {
     if (!Possible(u, a) || HasCode(codes, a.squawk)) return false;
     if (a.trackedByMe) return true;
     if (u.sweatbox && !a.tracked) return true;
-    return a.groundSpeed <= UNTRACKED_MAX_SPEED && a.fromOrigin <= UNTRACKED_MAX_FROM_ORIGIN && a.deliveryByMe;
+    if (!a.tracked && a.inMySector && !OnGroundAtOrigin(a)) return true;
+    return OnGroundAtOrigin(a) && a.deliveryByMe;
 }
 // The plan differs from the one stored (a plan never stored with a departure or destination is new, not changed)
 inline bool PlanDiffers(const Stored& s, const Aircraft& a) {
@@ -156,12 +164,13 @@ inline bool ChangeAllowed(const User& u, const Aircraft& a) {
     return u.controller && (a.trackedByMe || !a.tracked);
 }
 
-enum class Action { None, Previous, Assign, Assumed };
-// UKCP SquawkEventHandler::AttemptAssignment, without the UK's circuit and local codes
-// Assumed with no code (blank, or a code on Core's list such as 2000): always a new code from Core, not one Core
-// holds for the callsign, a reconnect's old code, or a code someone set by hand
+enum class Action { None, Previous, Assign, Tracked };
+// UKCP SquawkEventHandler::AttemptAssignment, without the UK's circuit and local codes.
+// Tracked by the user with no code (blank, or a code on Core's list such as 2000): always a new code from Core, not
+// one Core holds for the callsign, a reconnect's old code, or a code typed in EuroScope or set on another scope.
+// Only a code the user chose in the KWIQ menu is kept.
 inline Action Decide(const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
-    if (s && s->assumed && a.trackedByMe && AssignmentNeeded(u, a, codes)) return Action::Assumed;
+    if (a.trackedByMe && AssignmentNeeded(u, a, codes)) return s && s->chosen ? Action::None : Action::Tracked;
     if (PreviousNeeded(u, a, s, codes)) return Action::Previous;
     if (s && s->byHand && !ForceNeeded(s, a)) return Action::None;
     if (AssignmentNeeded(u, a, codes)) return Action::Assign;
@@ -170,24 +179,20 @@ inline Action Decide(const User& u, const Aircraft& a, const Stored* s, const Co
 
 // ---- what the plugin remembers (UKCP StoredFlightplan) -------------------------------------------
 // Every look at a flight plan. A new plan makes the plugin automatic again for it (UKCP: until the plan changes).
-// codes: Core's list, to see that an aircraft assumed with a code (or given one later) needs no new one
-inline void Remember(Stored& st, const Aircraft& a, const CodeList* codes = nullptr) {
-    if (PlanDiffers(st, a)) { st.byHand = false; st.planChanged = true; }
-    if (a.trackedByMe && !st.mine) st.assumed = true;           // kept until a code is set, or it isn't the user's
-    if (!a.trackedByMe || (codes && HasCode(*codes, a.squawk))) st.assumed = false;
-    st.mine = a.trackedByMe;
+inline void Remember(Stored& st, const Aircraft& a) {
+    if (PlanDiffers(st, a)) { st.byHand = false; st.chosen = false; st.planChanged = true; }
     st.origin = a.origin;
     st.destination = a.destination;
     st.vfr = a.vfr;
     st.expires = 0;
     if (st.squawk.empty() && ValidSquawk(a.squawk)) st.squawk = a.squawk;   // a code it had before the plugin saw it
 }
-// The plugin sets a code (Core's, a previous one, or one the controller chose in the menu)
-inline void CodeSet(Stored& st, const std::string& code, bool byHand) {
+// The plugin sets a code (Core's, a previous one, or one the controller chose in the menu: chosen)
+inline void CodeSet(Stored& st, const std::string& code, bool byHand, bool chosen = false) {
     st.squawk = code;
     st.byHand = byHand;
+    st.chosen = chosen;
     st.planChanged = false;
-    st.assumed = false;
 }
 // EuroScope reports a code. One the plugin didn't set was set by a controller, here (typed in EuroScope) or on
 // another scope: leave it alone like a code set from the menu. Ignored: a cleared or invalid code, the holding
@@ -198,8 +203,8 @@ inline void CodeSeen(Stored& st, const std::string& code, const CodeList& codes,
     if (sweatbox && !HasAssignedSquawk(codes, code)) return;
     st.squawk = code;
     st.byHand = true;
+    st.chosen = false;                                          // not from the menu: replaced if the user tracks it
     st.planChanged = false;
-    st.assumed = false;                                         // chosen after the assume: kept
 }
 // Core's answer arrived: set it only if it is still wanted. One the controller asked for: if they may still change
 // the code. An automatic one: also only if the aircraft still has no code and no controller has set one by hand
@@ -208,7 +213,8 @@ inline bool AnswerWanted(bool manual, const User& u, const Aircraft& a, const St
     if (!ChangeAllowed(u, a)) return false;
     if (manual) return true;
     if (HasCode(codes, a.squawk)) return false;
-    return !(s && s->byHand) || (s->assumed && a.trackedByMe);  // assumed: a code set by hand before doesn't stop it
+    if (a.trackedByMe) return !(s && s->chosen);                // tracked: only a menu choice meanwhile stops it
+    return !(s && s->byHand);
 }
 
 // ---- Core ------------------------------------------------------------------------------------------

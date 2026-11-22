@@ -579,7 +579,7 @@ int main() {
         Aircraft trk = gnd;                                         // tracked by the user, airborne, far away
         trk.tracked = trk.trackedByMe = true; trk.deliveryByMe = false;
         trk.groundSpeed = 450; trk.fromOrigin = 120; trk.altitude = 30000;
-        CHECK(Decide(ctr, trk, nullptr, codes) == Action::Assign);
+        CHECK(Decide(ctr, trk, nullptr, codes) == Action::Tracked);
 
         Aircraft other = gnd; other.tracked = true;
         CHECK(ChangeAllowed(twr, gnd) && !ChangeAllowed(twr, other) && !ChangeAllowed(obs, gnd));
@@ -659,38 +659,50 @@ int main() {
         CodeSeen(sp, "4521", codes, true);                          // a real code still is
         CHECK(sp.byHand && sp.squawk == "4521");
 
-        // assumed on a non-assignable code (KAC792 on 2000): always a new code from Core
+        // airborne in the user's sector, nobody tracking it (uncorrelated, so it can't be assumed): a code
+        Aircraft entering = gnd; entering.deliveryByMe = false; entering.squawk = "2000";
+        entering.groundSpeed = 420; entering.fromOrigin = 150; entering.altitude = 24000; entering.inMySector = true;
+        CHECK(Decide(ctr, entering, nullptr, codes) == Action::Assign);
+        a = entering; a.inMySector = false;                         // not in it yet
+        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
+        a = entering; a.tracked = true;                             // someone else's
+        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
+        a = entering; a.squawk = "4521";                            // has a code
+        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
+        a = gnd; a.deliveryByMe = false; a.inMySector = true;       // on the ground in the sector: Delivery's
+        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
+        a.deliveryByMe = true;
+        CHECK(Decide(ctr, a, nullptr, codes) == Action::Assign);
+        a = entering; a.altitude = 0;                               // no position
+        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
+
+        // tracked by the user with no code (KAC792 assumed on 2000): always a new code from Core
         Aircraft kac = gnd; kac.callsign = "KAC792"; kac.deliveryByMe = false;
         kac.groundSpeed = 300; kac.fromOrigin = 40; kac.altitude = 15000;
-        Stored ks; Remember(ks, kac);                               // untracked: nothing
-        CodeSeen(ks, "2000", codes, false);                         // 2000 set by someone earlier: by hand
+        Stored ks; Remember(ks, kac);
+        CodeSeen(ks, "2000", codes, false);                         // 2000 typed earlier, or set on another scope
         kac.squawk = "2000";
-        CHECK(ks.byHand && !ks.assumed && Decide(ctr, kac, &ks, codes) == Action::None);
-        kac.tracked = kac.trackedByMe = true;                       // the user assumes it
-        Remember(ks, kac);
-        CHECK(ks.assumed && Decide(ctr, kac, &ks, codes) == Action::Assumed);   // by hand doesn't stop it
+        CHECK(ks.byHand && !ks.chosen && Decide(ctr, kac, &ks, codes) == Action::None);   // untracked: left alone
+        kac.tracked = kac.trackedByMe = true;                       // the user tracks it
+        CHECK(Decide(ctr, kac, &ks, codes) == Action::Tracked);     // by hand doesn't stop it
         Aircraft held = kac; held.squawk = HOLDING_SQUAWK;          // Core answers: still wanted
         CHECK(AnswerWanted(false, ctr, held, &ks, codes));
-        Remember(ks, held);                                         // later looks while waiting: still assumed
-        CHECK(ks.assumed);
-        CodeSet(ks, "4521", false);
-        CHECK(!ks.assumed);
-        kac.squawk = "";                                            // blank, a reconnect's code stored: still a new one
+        CodeSeen(ks, "1200", codes, false);                         // typed again while tracked: still replaced
+        CHECK(Decide(ctr, kac, &ks, codes) == Action::Tracked);
+        kac.squawk = "";                                            // blank, a reconnect's code stored: a new one
         Stored kr{ "OKBK", "OMDB", "4521", false, 0 }; Remember(kr, kac);
-        CHECK(Decide(ctr, kac, &kr, codes) == Action::Assumed);
-        kac.squawk = "4521"; Stored kd; kd.mine = false; Remember(kd, kac);   // assumed with a real code: kept
-        CHECK(Decide(ctr, kac, &kd, codes) == Action::None);
-        Stored kt; Remember(kt, kac, &codes);                      // assumed with a real code, with Core's list
-        CHECK(!kt.assumed);
-        Aircraft typed = kac; typed.squawk = "";
-        Stored ky; Remember(ky, typed);
-        CHECK(ky.assumed);
-        CodeSeen(ky, "2000", codes, false);                         // the user typed 2000 after assuming: kept
-        typed.squawk = "2000";
-        CHECK(!ky.assumed && Decide(ctr, typed, &ky, codes) == Action::None);
-        Aircraft gone2 = kac; gone2.tracked = gone2.trackedByMe = false;      // released again: no longer assumed
-        Remember(kd, gone2);
-        CHECK(!kd.assumed);
+        CHECK(Decide(ctr, kac, &kr, codes) == Action::Tracked);
+        kac.squawk = "4521";                                        // a real code: kept
+        CHECK(Decide(ctr, kac, &kr, codes) == Action::None);
+        // the one exception: a code the user chose in the KWIQ menu (Conspicuity, Manual)
+        Stored km; Remember(km, kac); CodeSet(km, "2000", true, true);
+        kac.squawk = "2000";
+        CHECK(km.chosen && Decide(ctr, kac, &km, codes) == Action::None);
+        held.squawk = HOLDING_SQUAWK;
+        CHECK(!AnswerWanted(false, ctr, held, &km, codes));         // chosen while Core was answering: kept
+        Aircraft refiled = kac; refiled.destination = "OTHH";       // until the plan changes
+        Remember(km, refiled);
+        CHECK(!km.chosen && Decide(ctr, refiled, &km, codes) == Action::Tracked);
         // Core's list without 2000: 2000, 7000 and the holding code still never count, and Core can't give them
         CodeList thin = ParseNonAssignable("NONASSIGNABLE|7700|7700|emergency|1|Mayday\n");
         CHECK(HasCode(thin, "2000") && ParseSquawk("SQUAWK|2000", thin) == "2000");
