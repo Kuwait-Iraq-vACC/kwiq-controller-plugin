@@ -96,7 +96,6 @@ struct Aircraft {
     bool deliveryByMe = false;        // the user provides Delivery at the origin (ownership::AirfieldOwnership)
     double fromOrigin = 0;            // nm from the departure airport
     int groundSpeed = 0, altitude = 0;                          // kt, ft
-    bool inMySector = false;          // inside one of the user's sectors (EuroScope's sector entry is 0)
 };
 // What the plugin remembers about a flight plan, so a pilot who reconnects gets the same code back
 struct Stored {
@@ -134,13 +133,12 @@ inline bool Possible(const User& u, const Aircraft& a) {
 inline bool OnGroundAtOrigin(const Aircraft& a) {
     return a.groundSpeed <= UNTRACKED_MAX_SPEED && a.fromOrigin <= UNTRACKED_MAX_FROM_ORIGIN;
 }
-// Not in UKCP: an airborne aircraft nobody tracks (often uncorrelated, so it can't be assumed yet) that is inside
-// the user's sector also gets a code. One still on the ground is left to whoever provides Delivery.
+// Nothing for untracked aircraft in the air, wherever they are (a procedural area included): an aircraft coming
+// into radar airspace without a code gets one when the controller assumes it.
 inline bool AssignmentNeeded(const User& u, const Aircraft& a, const CodeList& codes) {
     if (!Possible(u, a) || HasCode(codes, a.squawk)) return false;
     if (a.trackedByMe) return true;
     if (u.sweatbox && !a.tracked) return true;
-    if (!a.tracked && a.inMySector && !OnGroundAtOrigin(a)) return true;
     return OnGroundAtOrigin(a) && a.deliveryByMe;
 }
 // The plan differs from the one stored (a plan never stored with a departure or destination is new, not changed)

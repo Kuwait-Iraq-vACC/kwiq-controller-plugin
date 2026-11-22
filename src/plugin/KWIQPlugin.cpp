@@ -1287,7 +1287,6 @@ private:
         a.trackedByMe = fp.GetTrackingControllerIsMe();
         a.fromOrigin = fp.GetDistanceFromOrigin();
         a.deliveryByMe = ownership_.DeliveryControlProvidedByUser(a.origin);   // UKCP SquawkAssignment
-        a.inMySector = fp.GetSectorEntryMinutes() == 0;
         EuroScopePlugIn::CRadarTarget rt = fp.GetCorrelatedRadarTarget();
         if (!rt.IsValid()) {
             // Uncorrelated (e.g. squawking 2000 with correlation by squawk): the target with its callsign, if that

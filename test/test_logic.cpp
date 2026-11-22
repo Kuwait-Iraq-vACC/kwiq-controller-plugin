@@ -659,21 +659,13 @@ int main() {
         CodeSeen(sp, "4521", codes, true);                          // a real code still is
         CHECK(sp.byHand && sp.squawk == "4521");
 
-        // airborne in the user's sector, nobody tracking it (uncorrelated, so it can't be assumed): a code
+        // airborne, nobody tracking it (uncorrelated, or in the procedural area): nothing until it is assumed
         Aircraft entering = gnd; entering.deliveryByMe = false; entering.squawk = "2000";
-        entering.groundSpeed = 420; entering.fromOrigin = 150; entering.altitude = 24000; entering.inMySector = true;
-        CHECK(Decide(ctr, entering, nullptr, codes) == Action::Assign);
-        a = entering; a.inMySector = false;                         // not in it yet
-        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
+        entering.groundSpeed = 420; entering.fromOrigin = 150; entering.altitude = 24000;
+        CHECK(Decide(ctr, entering, nullptr, codes) == Action::None);
+        a = entering; a.tracked = a.trackedByMe = true;             // assumed: a new code, wherever it is
+        CHECK(Decide(ctr, a, nullptr, codes) == Action::Tracked);
         a = entering; a.tracked = true;                             // someone else's
-        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
-        a = entering; a.squawk = "4521";                            // has a code
-        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
-        a = gnd; a.deliveryByMe = false; a.inMySector = true;       // on the ground in the sector: Delivery's
-        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
-        a.deliveryByMe = true;
-        CHECK(Decide(ctr, a, nullptr, codes) == Action::Assign);
-        a = entering; a.altitude = 0;                               // no position
         CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
 
         // tracked by the user with no code (KAC792 assumed on 2000): always a new code from Core
