@@ -434,6 +434,20 @@ int main() {
           std::string(SectorColourName(2)) == "information" && std::string(SectorColourName(3)) == "transfer_to_me_initiated" &&
           std::string(SectorColourName(4)) == "assumed" && std::string(SectorColourName(5)) == "assumed" &&
           std::string(SectorColourName(7)) == "redundant" && std::string(SectorColourName(42)) == "non_concerned");
+    // ... read from the profile's Symbology file first
+    {
+        auto sym = ParseSymbologyColours("SYMBOLOGY\r\nSYMBOLSIZE\r\nAirports:symbol:9474192:0.1:0:0:7\r\n"
+                                         "Datablock:non concerned:9474192:3.5:0:0:7\r\nDatablock:assumed:65280:3.5:0:0:7\r\n"
+                                         "Datablock:transfer to me initiated:16777215:3.5:0:0:7\r\nDatablock:notified:x:3.5\r\n"
+                                         "Datablock:redundant:99999999999:3.5\r\nDatablock::5\r\nDatablock:information\r\n");
+        CHECK(sym.size() == 3 && sym["non_concerned"] == 9474192 && sym["assumed"] == 65280 &&
+              sym["transfer_to_me_initiated"] == 16777215 && !sym.count("symbol") && !sym.count("notified"));
+        CHECK(ParseSymbologyColours("").empty());
+        std::string prf = "Settings\tSettingsfileSYMBOLOGY\t\\ORBB\\Settings\\Symbology.txt\r\nSettings\tsector\t\\x.sct\r\n";
+        CHECK(PrfSymbologyPath(prf, "C:\\ES\\ORBB-2610\\ORBB_CTR.prf") == "C:\\ES\\ORBB-2610\\ORBB\\Settings\\Symbology.txt");
+        CHECK(PrfSymbologyPath("Settings\tSettingsfileSYMBOLOGY\tD:\\S\\Sym.txt\n", "C:\\a.prf") == "D:\\S\\Sym.txt");
+        CHECK(PrfSymbologyPath("Settings\tsector\t\\x.sct\n", "C:\\a.prf").empty() && PrfSymbologyPath("", "").empty());
+    }
 
 
     // Core config

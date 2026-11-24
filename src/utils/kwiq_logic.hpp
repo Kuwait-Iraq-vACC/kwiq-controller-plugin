@@ -561,6 +561,50 @@ inline const char* SectorColourName(int state) {
     }
 }
 
+// The tag colours EuroScope really uses come from the profile's Symbology file, so they are read from it
+// first and Core's colours are only the fallback. The file has one item per line,
+//   Datablock:<item>:<colour>:<size>:<line weight>:<line style>:<text align>
+// with the colour a decimal COLORREF (0x00BBGGRR), e.g. "Datablock:assumed:65280:3.5:0:0:7".
+// Returns the Datablock colours keyed as SectorColourName names them ("transfer to me initiated" ->
+// "transfer_to_me_initiated"); malformed lines are skipped.
+inline std::map<std::string, unsigned long> ParseSymbologyColours(const std::string& text) {
+    std::map<std::string, unsigned long> out;
+    for (const auto& raw : SplitChar(text, '\n')) {
+        std::vector<std::string> f = SplitChar(Trim(raw), ':');
+        if (f.size() < 3) continue;
+        std::string cls = Trim(f[0]), item = Trim(f[1]), num = Trim(f[2]);
+        std::transform(cls.begin(), cls.end(), cls.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+        if (cls != "datablock" || item.empty() || num.empty() || num.size() > 10) continue;
+        if (!std::all_of(num.begin(), num.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) continue;
+        unsigned long long v = std::strtoull(num.c_str(), nullptr, 10);
+        if (v > 0xFFFFFFull) continue;
+        std::string key;
+        for (unsigned char c : item) key += c == ' ' ? '_' : (char)std::tolower(c);
+        out[key] = (unsigned long)v;
+    }
+    return out;
+}
+
+// The Symbology file a EuroScope profile (.prf) uses, from its line
+//   Settings<TAB>SettingsfileSYMBOLOGY<TAB><path>
+// A path starting with a single backslash is relative to the profile's folder, as EuroScope writes it.
+// Empty when the profile names none.
+inline std::string PrfSymbologyPath(const std::string& prfText, const std::string& prfPath) {
+    for (const auto& raw : SplitChar(prfText, '\n')) {
+        std::vector<std::string> f = SplitChar(Trim(raw), '\t');
+        if (f.size() < 3 || Trim(f[0]) != "Settings" || Trim(f[1]) != "SettingsfileSYMBOLOGY") continue;
+        std::string p = Trim(f[2]);
+        if (p.empty()) return "";
+        bool absolute = (p.size() >= 2 && p[1] == ':') || p.compare(0, 2, "\\\\") == 0;
+        if (absolute) return p;
+        size_t i = prfPath.find_last_of("\\/");
+        std::string dir = i == std::string::npos ? std::string() : prfPath.substr(0, i);
+        if (p[0] != '\\' && p[0] != '/') p = "\\" + p;
+        return dir + p;
+    }
+    return "";
+}
+
 // ---- Core-managed configuration ---------------------------------------------
 // Core /api/plugin/config (plain text):  KEY|value   one per line.
 // Anything missing falls back to the built-in default, so the plugin still works if Core is down.
