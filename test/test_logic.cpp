@@ -1060,6 +1060,9 @@ int main() {
         CHECK(RunningVersion(KWIQ_VERSION).pre.size() == ParseVersion(KWIQ_VERSION).pre.size());   // not read as a test build
     }
 
+    // the squawk decision's name in the plugin's log
+    CHECK(std::string(squawk::ActionName(squawk::Action::Tracked)) == "tracked" && std::string(squawk::ActionName(squawk::Action::None)) == "none");
+    CHECK(std::string(squawk::ActionName(squawk::Action::Previous)) == "previous" && std::string(squawk::ActionName(squawk::Action::Assign)) == "assign");
     // ---- the plugin's own log (kwiq_log.hpp): line format, file names, pruning, safe URLs ----
     {
         using namespace kwiq::log;

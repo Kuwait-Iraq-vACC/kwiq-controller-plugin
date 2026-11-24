@@ -162,6 +162,15 @@ inline bool ChangeAllowed(const User& u, const Aircraft& a) {
 }
 
 enum class Action { None, Previous, Assign, Tracked };
+// As written in the plugin's log
+inline const char* ActionName(Action a) {
+    switch (a) {
+    case Action::Previous: return "previous";
+    case Action::Assign:   return "assign";
+    case Action::Tracked:  return "tracked";
+    default:               return "none";
+    }
+}
 // UKCP SquawkEventHandler::AttemptAssignment, without the UK's circuit and local codes.
 // A code that doesn't count (blank, or on Core's list without "counts as assigned") is always replaced, whoever set
 // it. Tracked by the user with one: always a new code from Core, not one Core holds for the callsign or a

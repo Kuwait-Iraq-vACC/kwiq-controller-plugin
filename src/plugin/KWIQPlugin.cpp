@@ -489,7 +489,12 @@ public:
         case KWIQ_FUNC_SRD_EXPLAIN:  ExplainSrdSelected(); return;
         case KWIQ_FUNC_SRD_SEARCH:   OpenSrdWindow(Pt); return;
         case KWIQ_FUNC_SQUAWK_MENU:    SquawkMenu(Area); return;
-        case KWIQ_FUNC_SQUAWK_ASSIGN:  SquawkForce(); return;
+        case KWIQ_FUNC_SQUAWK_ASSIGN: {
+            EuroScopePlugIn::CFlightPlan sel = FlightPlanSelectASEL();
+            kwiq::log::Write("MENU", { { "squawk", "recycle" }, { "cs", sel.IsValid() && sel.GetCallsign() ? sel.GetCallsign() : "" } });
+            SquawkForce();
+            return;
+        }
         case KWIQ_FUNC_SQUAWK_PICK:    SquawkPick(sItemString ? sItemString : "", Area); return;
         case KWIQ_FUNC_SQUAWK_MANUAL:  SquawkManual(sItemString ? kwiq::Trim(sItemString) : ""); return;
         }
@@ -1409,7 +1414,13 @@ private:
     bool SquawkRequest(EuroScopePlugIn::CFlightPlan& fp, const kwiq::squawk::Aircraft& a, bool lookupFirst, bool manual,
                        const std::string& fallback = "") {
         using namespace kwiq::squawk;
-        if (!UrlSafeCallsign(a.callsign) || !sqBusy_.insert(a.callsign).second) return false;   // one request at a time
+        if (!UrlSafeCallsign(a.callsign)) return false;
+        if (!sqBusy_.insert(a.callsign).second) {                  // one request at a time
+            kwiq::log::Write("SQUAWK", { { "cs", a.callsign }, { "busy", "1" } });
+            return false;
+        }
+        kwiq::log::Write("SQUAWK", { { "cs", a.callsign }, { "request", "PUT" }, { "lookup", lookupFirst ? "1" : "0" },
+                                     { "manual", manual ? "1" : "0" }, { "previous", a.squawk } });
         SqJob job;
         job.callsign = a.callsign;
         job.method = "PUT";
@@ -1464,14 +1475,37 @@ private:
         bool others = a.tracked && !a.trackedByMe;                  // theirs to give a code
         auto retry = sqRetryAt_.find(a.callsign);
         bool waiting = retry != sqRetryAt_.end() && now < retry->second;
-        if (facts && !others && !waiting && sqLoggedIn_ && now - sqLoginAt_ >= LOGIN_DELAY_SECONDS) {
-            switch (Decide(u, a, s, codes)) {
+        bool login = !sqLoggedIn_ || now - sqLoginAt_ < LOGIN_DELAY_SECONDS;
+        Action act = facts && !others && !waiting && !login ? Decide(u, a, s, codes) : Action::None;
+        SquawkLogDecision(a, s, codes, act, !facts ? "nofacts" : others ? "others" : waiting ? "waiting" : login ? "login" : "");
+        if (facts && !others && !waiting && !login) {
+            switch (act) {
             case Action::Previous: SquawkRequest(fp, a, true, false, s->byHand ? s->squawk : ""); break;
             case Action::Assign:   SquawkRequest(fp, a, !ForceNeeded(s, a), false); break;
             case Action::Tracked:  SquawkRequest(fp, a, false, false); break;    // a new code, never one Core holds
             case Action::None:     break;
             }
         }
+    }
+    // One line per decision that asks Core; one that asks nothing only when it differs from the last for that
+    // aircraft (or every time with .kwiq log verbose), so an aircraft left without a code shows once, not every 5 s
+    void SquawkLogDecision(const kwiq::squawk::Aircraft& a, const kwiq::squawk::Stored* s, const kwiq::squawk::CodeList& codes,
+                           kwiq::squawk::Action act, const char* skip) {
+        using namespace kwiq::squawk;
+        if (a.callsign.empty()) return;
+        kwiq::log::Fields f = {
+            { "cs", a.callsign }, { "decide", ActionName(act) }, { "code", a.squawk }, { "counts", HasCode(codes, a.squawk) ? "1" : "0" },
+            { "tracked", a.trackedByMe ? "me" : a.tracked ? "other" : "none" }, { "byhand", s && s->byHand ? "1" : "0" },
+            { "planchanged", ForceNeeded(s, a) ? "1" : "0" }, { "delivery", a.deliveryByMe ? "1" : "0" } };
+        if (*skip) f.push_back({ "skip", skip });
+        std::string key;
+        for (const auto& kv : f) key += kv.first + "=" + kv.second + " ";
+        bool show = act != Action::None || kwiq::log::Verbose() || sqLogChanges_.Changed("SQUAWK " + a.callsign, key);
+        if (!show) return;
+        f.push_back({ "gs", std::to_string(a.groundSpeed) });
+        f.push_back({ "alt", std::to_string(a.altitude) });
+        f.push_back({ "fromorigin", std::to_string((int)a.fromOrigin) });
+        kwiq::log::Write("SQUAWK", f);
     }
     kwiq::squawk::Stored* SquawkStore(const kwiq::squawk::Aircraft& a) {
         if (a.callsign.empty()) return nullptr;
@@ -1494,6 +1528,7 @@ private:
         // Squawk assignment is on in Core but Core sent no list of codes never to assign: say so once
         if (sqEnabled_ && sqCodesTried_ && !sqHaveCodes_ && !sqToldNoCodes_) {
             sqToldNoCodes_ = true;
+            kwiq::log::Write("SQUAWK", { { "list", "none" } });
             Msg("Squawk assignment is off: Core has not sent its list of codes never to assign.", true);
         }
         // EuroScope says nothing when the user assumes an aircraft, so look at them all
@@ -1517,6 +1552,7 @@ private:
             sqBusy_.erase(r.callsign);
             EuroScopePlugIn::CFlightPlan fp = FlightPlanSelect(r.callsign.c_str());
             if (r.released) {
+                kwiq::log::Write("SQUAWK", { { "cs", r.callsign }, { "result", r.error.empty() ? "released" : "release-failed" } }, r.error);
                 // Core still holds the old code: put it back, so EuroScope and Core agree (UKCP does the same)
                 if (r.error.empty()) continue;
                 Msg("Core could not release the squawk of " + r.callsign + " (" + r.error + "), so it is back to " +
@@ -1525,6 +1561,7 @@ private:
                 continue;
             }
             if (!r.error.empty()) {
+                kwiq::log::Write("SQUAWK", { { "cs", r.callsign }, { "result", "error" } }, r.error);
                 SquawkUnhold(fp, r.previous);
                 sqRetryAt_[r.callsign] = now + SQ_RETRY_SECONDS;
                 if (r.manual) Msg("Core could not assign a squawk to " + r.callsign + ": " + r.error, true);
@@ -1542,9 +1579,12 @@ private:
             auto codes = SquawkCodes();
             const kwiq::squawk::CodeList none;
             if (kwiq::squawk::AnswerWanted(r.manual, u, a, st == sqStored_.end() ? nullptr : &st->second, codes ? *codes : none)) {
+                kwiq::log::Write("SQUAWK", { { "cs", r.callsign }, { "result", "set" }, { "code", r.squawk } });
                 SetSquawk(fp, r.squawk, r.byHand);
                 continue;
             }
+            kwiq::log::Write("SQUAWK", { { "cs", r.callsign }, { "result", "not-wanted" }, { "code", r.squawk }, { "now", a.squawk },
+                                         { "tracked", a.trackedByMe ? "me" : a.tracked ? "other" : "none" } });
             SquawkUnhold(fp, r.previous);
             if (r.manual)
                 Msg("Core gave " + r.callsign + " " + r.squawk + ", but it was not set: you can no longer change its squawk.", true);
@@ -1632,6 +1672,10 @@ private:
     }
     void SquawkPick(const std::string& option, RECT area) {
         EuroScopePlugIn::CFlightPlan fp;
+        {
+            EuroScopePlugIn::CFlightPlan sel = FlightPlanSelectASEL();
+            kwiq::log::Write("MENU", { { "squawk", kwiq::Lower(option) }, { "cs", sel.IsValid() && sel.GetCallsign() ? sel.GetCallsign() : "" } });
+        }
         if (option == "Assign") SquawkForce();
         else if (!SquawkTarget(fp)) return;
         else if (option == "Manual") {
@@ -1642,6 +1686,7 @@ private:
     void SquawkManual(const std::string& code) {
         EuroScopePlugIn::CFlightPlan fp;
         if (!SquawkTarget(fp)) return;
+        kwiq::log::Write("MENU", { { "squawk", "manual" }, { "cs", fp.GetCallsign() ? fp.GetCallsign() : "" }, { "code", code } });
         if (!kwiq::squawk::ValidSquawk(code)) { Msg("\"" + code + "\" is not a squawk: four digits, 0 to 7.", true); return; }
         SquawkReplace(fp, code);
     }
@@ -1694,8 +1739,12 @@ public:
         if (it == sqStored_.end()) return;
         auto codes = SquawkCodes();
         const kwiq::squawk::CodeList none;
-        kwiq::squawk::CodeSeen(it->second, fp.GetControllerAssignedData().GetSquawk(), codes ? *codes : none,
+        std::string before = it->second.squawk, seen = fp.GetControllerAssignedData().GetSquawk();
+        kwiq::squawk::CodeSeen(it->second, seen, codes ? *codes : none,
                                GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX);
+        if (seen != before)
+            kwiq::log::Write("SQUAWK", { { "cs", fp.GetCallsign() }, { "seen", seen }, { "byhand", it->second.squawk == seen && it->second.byHand ? "1" : "0" },
+                                         { "counts", codes && kwiq::squawk::HasCode(*codes, seen) ? "1" : "0" } });
     } catch (...) {}
     virtual void OnFlightPlanDisconnect(EuroScopePlugIn::CFlightPlan fp) override try {
         if (!fp.IsValid() || !fp.GetCallsign()) return;
@@ -2052,6 +2101,14 @@ private:
                     std::shared_ptr<const squawk::CodeList> p;
                     if (!list.empty()) p = std::make_shared<const squawk::CodeList>(std::move(list));
                     sqHaveCodes_ = p != nullptr;
+                    // Which codes Core says don't count, once each time the list changes (worker thread)
+                    std::string rows;
+                    if (p) for (const auto& r : *p)
+                        rows += r.first + (r.first == r.last ? "" : "-" + r.last) + ":" + r.category + ":" + (r.countsAsAssigned ? "1" : "0") + " ";
+                    if (sqLogList_ != rows) {
+                        sqLogList_ = rows;
+                        kwiq::log::Write("SQUAWK", { { "list", p ? std::to_string(p->size()) : "none" } }, rows);
+                    }
                     std::lock_guard<std::mutex> g(mu_);
                     sqCodes_ = std::move(p);
                 } else fail("Squawk codes", err);          // unreachable: keep the list from the last answer, if any
@@ -2167,6 +2224,8 @@ private:
     std::unordered_map<std::string, kwiq::squawk::Stored> sqStored_;   // main thread only
     std::unordered_set<std::string> sqBusy_;                        // main thread only: callsigns waiting for Core
     std::unordered_map<std::string, std::time_t> sqRetryAt_;        // main thread only: not before, after Core failed
+    kwiq::log::Changes sqLogChanges_;                               // main thread only: squawk decisions already logged
+    std::string sqLogList_;                                         // Core worker only: the code list last logged
     std::time_t sqLastPass_ = 0, sqLoginAt_ = 0;                    // main thread only
     bool sqLoggedIn_ = false;                                       // main thread only: UKCP's idea of logged in
     std::mutex sqMu_;                                               // guards the four below
