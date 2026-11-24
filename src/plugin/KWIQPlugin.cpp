@@ -1521,7 +1521,8 @@ private:
     }
 
     // ---- squawk menu and functions (main thread) ---------------------------------------------
-    // UKCP SquawkAssignmentMenu, without the UK's local and circuit codes: Assign, Conspicuity, Manual
+    // UKCP SquawkAssignmentMenu, without the UK's local and circuit codes: Assign, Manual. No Conspicuity: a code
+    // that doesn't count is replaced by automatic assignment anyway
     bool SquawkTarget(EuroScopePlugIn::CFlightPlan& fp) {
         if (!SquawkOn()) { Msg("Squawk assignment is " + SquawkOffWhy() + ".", false); return false; }
         if (!SquawkUser().controller) { Msg("Squawks can only be assigned when logged on as a controller.", false); return false; }
@@ -1533,18 +1534,14 @@ private:
         if (!SquawkTarget(fp)) return;
         const char* tracker = fp.GetTrackingControllerCallsign();
         if (tracker && *tracker && !fp.GetTrackingControllerIsMe()) return;
-        bool vfr = std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0;
         OpenPopupList(area, "Assign Squawk", 1);
         AddPopupListElement("Assign", "", KWIQ_FUNC_SQUAWK_PICK);
-        AddPopupListElement("Conspicuity", ConspicuityCode(vfr).c_str(), KWIQ_FUNC_SQUAWK_PICK);
         AddPopupListElement("Manual", "", KWIQ_FUNC_SQUAWK_PICK);
     }
     void SquawkPick(const std::string& option, RECT area) {
         EuroScopePlugIn::CFlightPlan fp;
         if (option == "Assign") SquawkForce();
         else if (!SquawkTarget(fp)) return;
-        else if (option == "Conspicuity")
-            SquawkReplace(fp, ConspicuityCode(std::strcmp(fp.GetFlightPlanData().GetPlanType(), "V") == 0));
         else if (option == "Manual") {
             RECT box = { area.left, area.top, area.left + 50, area.top + 25 };
             OpenPopupEdit(box, KWIQ_FUNC_SQUAWK_MANUAL, fp.GetControllerAssignedData().GetSquawk());
