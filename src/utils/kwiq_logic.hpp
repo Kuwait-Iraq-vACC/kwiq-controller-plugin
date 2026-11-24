@@ -405,11 +405,13 @@ inline bool Domestic(const std::string& airport, const std::string& prefixes) {
     }
     return false;
 }
-// What SRD destination to use for a flight: its destination when it stays in the vACC's airspace, else where
-// it leaves it (UKCP SrdSearchDialog::PrepopulateSearch); empty when that is not known
+// What SRD destination to use for a flight: its destination when it stays in the vACC's airspace, else the
+// first FIR exit point on its route, internal (OKAC/ORBB) or external, as the FPC checks up to (UKCP
+// SrdSearchDialog::PrepopulateSearch); empty when that is not known. An internal exit is only ever found
+// before the external one, so it is the first when there is one.
 inline std::string SrdEnd(const std::string& ades, const std::string& prefixes, const AircraftExit& exit) {
     if (Domestic(ades, prefixes)) return ades;
-    return !exit.external.empty() ? exit.external : exit.internal;
+    return !exit.internal.empty() ? exit.internal : exit.external;
 }
 
 // SRD rows that apply to a flight. Airport-pair rows (ADEP|ADES) take precedence. Then, for a flight

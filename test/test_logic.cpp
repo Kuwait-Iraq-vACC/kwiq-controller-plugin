@@ -196,7 +196,9 @@ int main() {
     CHECK(FindFirExit(two, dup).external == "DUP" && FindFirExit(two, dup).internal.empty());
     CHECK(ExitConeFor(two["BOUND"], 135) == nullptr && ExitConeFor(two["BOUND"], 0) != nullptr && !ExitConeFor(two["BOUND"], 0)->internal);
     CHECK(Domestic("OKBK", "OK,OR") && Domestic("orbi", "OK, OR") && !Domestic("LTBA", "OK,OR"));
-    CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
+    CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "SIDAD");   // the first exit, as the FPC
+    CHECK(SrdEnd("OMDB", "OK,OR", AircraftExit{ "SIDAD", "RABAP" }) == "SIDAD");   // ORBI BGD DCT NOLDO P975 SESRU: not RABAP
+    CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "", "ROTAP" }) == "ROTAP");
     CHECK(SrdEnd("ORSJ", "OK,OR", nx) == "ORSJ");                  // an OR/OK destination is internal: shown as itself
     CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "SIDAD", "" }) == "SIDAD" && SrdEnd("LTBA", "OK,OR", {}) == "");
 
