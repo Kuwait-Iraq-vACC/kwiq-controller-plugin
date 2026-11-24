@@ -156,6 +156,15 @@ inline std::vector<EventRoute> RoutesForDate(const EventData& ev, const std::str
     for (const auto& r : ev.routes) if (r.date.empty() || r.date == today) out.push_back(r);
     return out;
 }
+// The event's name for Discord's {event} and event filter: on while Core has an active event, unless it has
+// routes and none of them is for today (UTC), as for an event Core lists days ahead. An event without routes
+// still counts, as everywhere else in the plugin.
+inline std::string EventNameForDate(const EventData& ev, const std::string& today) {
+    if (!ev.active) return "";
+    if (ev.routes.empty()) return ev.name;
+    for (const auto& r : ev.routes) if (r.date.empty() || r.date == today) return ev.name;
+    return "";
+}
 // None = no event / no route for this ADEP-ADES pair today (show nothing). Allocation-free.
 inline RouteResult CheckEventRoute(const EventData& ev, const std::string& adep, const std::string& ades,
                                    const std::vector<std::string>& filed, const std::string& today) {

@@ -373,7 +373,7 @@ public:
         }
         {
             std::string eventName;
-            { std::lock_guard<std::mutex> g(mu_); if (ev_.active && !kwiq::RoutesForDate(ev_, TodayCached()).empty()) eventName = ev_.name; }
+            { std::lock_guard<std::mutex> g(mu_); eventName = kwiq::EventNameForDate(ev_, TodayCached()); }
             discord_.Tick(now, eventName);
         }
         TickQnhAndNotices(now);
