@@ -584,8 +584,7 @@ public:
         // Arguments come from the trimmed line, so a leading space doesn't shift them (#46)
         const std::string line = kwiq::Trim(sCommandLine);
         std::string c = kwiq::Upper(line);
-        if (c.compare(0, 5, ".KWIQ") == 0)                  // never the key itself
-            kwiq::log::Write("CMD", {}, c == ".KWIQ KEY" || c.compare(0, 10, ".KWIQ KEY ") != 0 ? line : ".kwiq key ***");
+        if (c.compare(0, 5, ".KWIQ") == 0) kwiq::log::Write("CMD", {}, kwiq::log::SafeCommand(line));   // never a key
         if (c == ".KWIQ LOG") {
             std::string dir = kwiq::log::Global().Dir();
             if (dir.empty()) { Msg("The plugin log could not be started.", true); return true; }

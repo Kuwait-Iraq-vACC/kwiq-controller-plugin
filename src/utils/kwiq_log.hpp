@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <ctime>
 #include <cstdio>
+#include <cctype>
 #include <cstdint>
 #include <chrono>
 #include <functional>
@@ -103,6 +104,29 @@ inline std::string SafeUrl(const std::string& url) {
     return u;
 }
 
+// A command line fit for the log: never an API key, however the command was typed. Any word starting kwiq_ (a
+// key) and every word after one naming a key (.kwiq key <key>, .kwiqkey <key> ...) is masked; spaces are folded.
+inline std::string SafeCommand(const std::string& line) {
+    std::string out, word;
+    bool afterKey = false;
+    auto lower = [](std::string w) { for (auto& c : w) c = (char)std::tolower((unsigned char)c); return w; };
+    auto flush = [&] {
+        if (word.empty()) return;
+        std::string l = lower(word);
+        bool mask = afterKey || l.compare(0, 5, "kwiq_") == 0;
+        if (!out.empty()) out += ' ';
+        out += mask ? std::string("***") : word;
+        if (l.find("key") != std::string::npos) afterKey = true;
+        word.clear();
+    };
+    for (char c : line) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') flush();
+        else word += c;
+    }
+    flush();
+    return out;
+}
+
 // Results asked for on every tag refresh (FPC, sector indicator) are logged only when they change
 class Changes {
 public:
@@ -138,30 +162,18 @@ public:
     Writer& operator=(const Writer&) = delete;
 
     // The first folder that can be created and written to; old log files there are deleted. False: no log at all.
+    // Never throws: a log that can't be started must never stop the plugin from loading
     bool Start(const std::vector<std::string>& dirs, int keepDays = 7, std::uintmax_t capBytes = std::uintmax_t(20) << 20,
-               size_t maxQueue = 10000) {
-        namespace fs = std::filesystem;
-        Stop();
-        for (const auto& d : dirs) {
-            if (d.empty()) continue;
-            std::error_code ec;
-            fs::create_directories(fs::path(d), ec);
-            fs::path probe = fs::path(d) / ".kwiq-log-probe";
-            { std::ofstream f(probe, std::ios::binary | std::ios::app); if (!f) continue; }
-            fs::remove(probe, ec);
+               size_t maxQueue = 10000) noexcept {
+        try { return StartOrThrow(dirs, keepDays, capBytes, maxQueue); }
+        catch (...) {
+            try { Stop(); } catch (...) {}
             std::lock_guard<std::mutex> g(mu_);
-            dir_ = d;
-            break;
+            dir_.clear();
+            return false;
         }
-        std::lock_guard<std::mutex> g(mu_);
-        if (dir_.empty()) return false;
-        cap_ = capBytes;
-        maxQueue_ = maxQueue;
-        quit_ = false;
-        Prune(keepDays);
-        thread_ = std::thread([this] { Run(); });
-        return true;
     }
+
     void Write(const std::string& area, const Fields& f, const std::string& text = "") {
         auto tp = clock_();
         std::time_t secs = std::chrono::system_clock::to_time_t(tp);
@@ -192,14 +204,40 @@ public:
     void Hold(bool on) { { std::lock_guard<std::mutex> g(mu_); held_ = on; } cv_.notify_all(); }
 
 private:
+    bool StartOrThrow(const std::vector<std::string>& dirs, int keepDays, std::uintmax_t capBytes, size_t maxQueue) {
+        namespace fs = std::filesystem;
+        Stop();
+        { std::lock_guard<std::mutex> g(mu_); dir_.clear(); capped_.clear(); }
+        for (const auto& d : dirs) {
+            if (d.empty()) continue;
+            std::error_code ec;
+            fs::create_directories(fs::path(d), ec);
+            fs::path probe = fs::path(d) / ".kwiq-log-probe";
+            { std::ofstream f(probe, std::ios::binary | std::ios::app); if (!f) continue; }
+            fs::remove(probe, ec);
+            std::lock_guard<std::mutex> g(mu_);
+            dir_ = d;
+            break;
+        }
+        std::lock_guard<std::mutex> g(mu_);
+        if (dir_.empty()) return false;
+        cap_ = capBytes;
+        maxQueue_ = maxQueue;
+        quit_ = false;
+        Prune(keepDays);
+        thread_ = std::thread([this] { Run(); });
+        return true;
+    }
     struct Item { std::string file, line; std::tm utc; int ms; };
     void Prune(int keepDays) {                                       // mu_ held
         namespace fs = std::filesystem;
         std::tm today = UtcOf(std::chrono::system_clock::to_time_t(clock_()));
         std::error_code ec;
         for (fs::directory_iterator it(fs::path(dir_), ec), end; !ec && it != end; it.increment(ec)) {
-            std::string n = it->path().filename().string();
-            if (Expired(n, today, keepDays)) { std::error_code rm; fs::remove(it->path(), rm); }
+            try {                                                    // a name the code page can't show: skipped
+                std::string n = it->path().filename().u8string();
+                if (Expired(n, today, keepDays)) { std::error_code rm; fs::remove(it->path(), rm); }
+            } catch (...) {}
         }
     }
     void Run() {
@@ -209,12 +247,13 @@ private:
             size_t dropped = 0;
             {
                 std::unique_lock<std::mutex> l(mu_);
-                cv_.wait(l, [this] { return quit_ || (!held_ && (!queue_.empty() || pendingDrop_)); });
+                // Lines dropped are said with the next line written, so only lines wake the thread
+                cv_.wait(l, [this] { return quit_ || (!held_ && !queue_.empty()); });
                 if (held_ && !quit_) continue;
+                if (queue_.empty()) { if (quit_) return; continue; }
                 batch.swap(queue_);
                 dropped = pendingDrop_;
                 pendingDrop_ = 0;
-                if (batch.empty() && !dropped && quit_) return;
             }
             try {
                 std::string open;
@@ -228,26 +267,34 @@ private:
                     }
                     return f ? &f : nullptr;
                 };
-                auto put = [&](const std::string& name, const std::string& line, const std::tm& utc, int ms) {
-                    if (capped_ == name) return;
+                size_t lost = 0, carry = 0;                          // couldn't be written (file locked): counted
+                auto put = [&](const std::string& name, const std::string& line, const std::tm& utc, int ms) -> bool {
+                    if (capped_ == name) return true;
                     std::error_code ec;
                     std::uintmax_t size = 0;
                     if (open != name || !f.is_open()) { auto s = fs::file_size(fs::path(dir_) / name, ec); size = ec ? 0 : s; }
                     else { f.flush(); auto s = fs::file_size(fs::path(dir_) / name, ec); size = ec ? 0 : s; }
                     std::ofstream* o = to(name);
-                    if (!o) return;
+                    if (!o) return false;
                     if (size + line.size() + 1 > cap_) {
                         *o << FormatLine(utc, ms, "LOG", { { "cap", "20MB" } }, "log full for today") << '\n';
                         capped_ = name;
-                        return;
+                        return true;
                     }
                     *o << line << '\n';
+                    return true;
                 };
-                if (dropped && !batch.empty())
-                    put(batch.front().file, FormatLine(batch.front().utc, batch.front().ms, "LOG", { { "dropped", std::to_string(dropped) } }, ""),
-                        batch.front().utc, batch.front().ms);
-                for (const auto& it : batch) put(it.file, it.line, it.utc, it.ms);
+                if (dropped && !batch.empty() &&
+                    !put(batch.front().file, FormatLine(batch.front().utc, batch.front().ms, "LOG", { { "dropped", std::to_string(dropped) } }, ""),
+                         batch.front().utc, batch.front().ms))
+                    carry = dropped;                                 // said with the next batch that can be written
+                for (const auto& it : batch) if (!put(it.file, it.line, it.utc, it.ms)) lost++;
                 if (f.is_open()) f.flush();
+                if (lost || carry) {
+                    std::lock_guard<std::mutex> g(mu_);
+                    dropped_ += lost;
+                    pendingDrop_ += lost + carry;
+                }
             } catch (...) {}                                         // a log that can't be written never stops the plugin
         }
     }

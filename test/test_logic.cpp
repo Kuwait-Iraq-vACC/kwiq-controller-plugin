@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <atomic>
+#include <thread>
 using namespace kwiq;
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -1187,6 +1188,34 @@ int main() {
             w.Stop();
             CHECK(lines(d / "KWIQPlugin-20261125.log").size() == 1000);
         }
+        {   // final review 1: starting the log can never throw out into the plugin's constructor
+            Writer w(clock);
+            static_assert(noexcept(w.Start({})), "Writer::Start must not throw");
+        }
+        {   // final review 2: a day's file that can't be opened (locked) loses lines, counted and said once it can
+            const fs::path d = root / "locked";
+            fs::create_directories(d);
+            *now = at(2026, 11, 26, 9, 0, 0, 0);
+            fs::create_directories(d / "KWIQPlugin-20261126.log");   // a folder in its place: can't be opened
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            w.Write("A", {});
+            w.Write("B", {});
+            for (int i = 0; i < 200 && w.Dropped() < 2; i++) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            CHECK(w.Dropped() == 2);
+            fs::remove_all(d / "KWIQPlugin-20261126.log");
+            w.Write("C", {});
+            w.Stop();
+            auto l = lines(d / "KWIQPlugin-20261126.log");
+            CHECK(l.size() == 2 && l[0] == "09:00:00.000 LOG dropped=2" && l[1] == "09:00:00.000 C");
+        }
+        // final review 3: never the API key in a command line, however it is typed
+        CHECK(SafeCommand(".kwiq key kwiq_abc123") == ".kwiq key ***");
+        CHECK(SafeCommand(".kwiq  key\tkwiq_abc123") == ".kwiq key ***");
+        CHECK(SafeCommand(".kwiq keys KWIQ_abc123") == ".kwiq keys ***");
+        CHECK(SafeCommand(".kwiqkey kwiq_abc") == ".kwiqkey ***" && SafeCommand(".kwiq connect kwiq_x") == ".kwiq connect ***");
+        CHECK(SafeCommand(".kwiq key abc123") == ".kwiq key ***" && SafeCommand(".kwiq key") == ".kwiq key");
+        CHECK(SafeCommand(".kwiq squawk") == ".kwiq squawk" && SafeCommand(".kwiq qnh ORBI") == ".kwiq qnh ORBI");
         kwiq::log::Write("MSG", {}, "the global log isn't started: nothing");   // never throws
         fs::remove_all(root, ec);
     }
