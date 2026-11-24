@@ -203,6 +203,58 @@ static std::string FindSound(const std::string& file, const std::vector<std::str
     }
     return "";
 }
+// ---- the profile's Symbology file (the sector indicator's tag colours) -------------------------
+// EuroScope does not tell plugins the profile it loaded, so: the .prf on EuroScope's command line (a profile
+// opened from Explorer), else the newest .prf in the package near the sector file or KWIQPlugin.dll whose
+// Symbology file exists. Empty when none is found; Core's colours are used then.
+static std::string CommandLinePrf() {
+    const char* cl = GetCommandLineA();
+    if (!cl) return "";
+    std::string s = cl;
+    for (size_t i = 0; i < s.size();) {
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) i++;
+        std::string tok;
+        if (i < s.size() && s[i] == '"') {
+            size_t e = s.find('"', i + 1);
+            tok = s.substr(i + 1, e == std::string::npos ? std::string::npos : e - i - 1);
+            i = e == std::string::npos ? s.size() : e + 1;
+        } else {
+            size_t e = s.find_first_of(" \t", i);
+            tok = s.substr(i, e == std::string::npos ? std::string::npos : e - i);
+            i = e == std::string::npos ? s.size() : e;
+        }
+        if (tok.size() > 4 && _stricmp(tok.c_str() + tok.size() - 4, ".prf") == 0 && FileExists(tok)) return tok;
+    }
+    return "";
+}
+static std::string SymbologyOf(const std::string& prf) {
+    std::string p = kwiq::PrfSymbologyPath(ReadHead(prf, 262144), prf);
+    return !p.empty() && FileExists(p) ? p : "";
+}
+static std::string FindSymbology(const std::vector<std::string>& starts) {
+    std::string cl = CommandLinePrf();
+    if (!cl.empty()) { std::string p = SymbologyOf(cl); if (!p.empty()) return p; }
+    std::string best;
+    ULONGLONG bestTime = 0;
+    for (const auto& s : starts) {
+        std::string d = s;
+        for (int up = 0; up < 4 && !d.empty(); up++, d = ParentOf(d)) {
+            WIN32_FIND_DATAA fd;
+            HANDLE h = FindFirstFileA((d + "\\*.prf").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) continue;
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                ULONGLONG t = ((ULONGLONG)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+                if (!best.empty() && t <= bestTime) continue;
+                std::string p = SymbologyOf(d + "\\" + fd.cFileName);
+                if (!p.empty()) { best = p; bestTime = t; }
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+    }
+    return best;
+}
+
 static kwiq::Airac Local(const std::string& userPath, std::string& src) {
     if (!userPath.empty()) {
         // A folder, AIRAC_VERSION.txt itself, or any file in the package's folder (the .ese, say)
@@ -362,6 +414,7 @@ public:
             if (sq && *sq == '0') sqAuto_ = false;
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
+        if (now - lastSymbologyRead_ >= 30) { lastSymbologyRead_ = now; ReadSymbology(); }
         TickConnection(now);
         SquawkTick(now);
         TickKeySetup(now);
@@ -901,16 +954,36 @@ public:
         case KWIQ_MENU_HIDE:         ShowButton(false); return;
         }
     }
-    // Sector indicator colour per flight plan state (FLIGHT_PLAN_STATE_*): Core's colour for that state,
-    // else Core's sector colour
+    // Sector indicator colour per flight plan state (FLIGHT_PLAN_STATE_*), as its tag: the profile's Symbology
+    // colour for that state, else Core's colour for it, else Core's sector colour
     std::array<COLORREF, 8> SectorColours() {
         std::lock_guard<std::mutex> g(mu_);
         std::array<COLORREF, 8> a;
         for (int i = 0; i < 8; i++) {
-            auto it = ui_->cStates.find(kwiq::SectorColourName(i));
-            a[i] = it == ui_->cStates.end() ? ui_->cSector : it->second;
+            std::string n = kwiq::SectorColourName(i);
+            auto sym = symbology_.find(n);
+            auto it = ui_->cStates.find(n);
+            a[i] = sym != symbology_.end() ? (COLORREF)sym->second : it == ui_->cStates.end() ? ui_->cSector : it->second;
         }
         return a;
+    }
+    // main thread, every 30 s: find the profile's Symbology file and read its Datablock colours when it changed
+    void ReadSymbology() {
+        std::string path;
+        { std::lock_guard<std::mutex> g(mu_); path = sectorPath_; }
+        std::vector<std::string> starts;
+        if (!path.empty()) starts.push_back(sf::IsDir(path) ? path : sf::ParentOf(path));
+        starts.push_back(sf::DllDir());
+        std::string file = sf::FindSymbology(starts);
+        FILETIME ft{};
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (!file.empty() && GetFileAttributesExA(file.c_str(), GetFileExInfoStandard, &fa)) ft = fa.ftLastWriteTime;
+        ULONGLONG t = ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+        if (file == symbologyFile_ && t == symbologyTime_) return;
+        symbologyFile_ = file; symbologyTime_ = t;
+        auto colours = file.empty() ? std::map<std::string, unsigned long>() : kwiq::ParseSymbologyColours(sf::ReadHead(file, 262144));
+        std::lock_guard<std::mutex> g(mu_);
+        symbology_ = colours;
     }
 
     virtual EuroScopePlugIn::CRadarScreen* OnRadarScreenCreated(const char* sDisplayName, bool NeedRadarContent,
@@ -2014,7 +2087,7 @@ private:
     bool justConnected_ = false;                                    // main thread only: logged on since the last key check
     std::string esVersion_;                                         // the running EuroScope's, read once at start
     bool esChecked_ = false;                                        // main thread only
-    std::time_t startedAt_ = 0, lastNameRead_ = 0;
+    std::time_t startedAt_ = 0, lastNameRead_ = 0, lastSymbologyRead_ = 0;
     HANDLE instanceLock_ = nullptr;
     bool duplicate_ = false;
     const bool reduced_ = gStartMode == (int)kwiq::StartMode::Reduced;   // set by the loader before construction
@@ -2045,6 +2118,9 @@ private:
     std::map<std::string, std::string> upstreamAirac_, sectorUrl_;   // per package: OKAC, ORBB
     std::string sectorPath_, motd_, lastSfKey_, myCallsign_, sectorName_;
     std::string sectorPkg_;                                          // OKAC or ORBB, as CheckSectorFile found it; empty: not known
+    std::map<std::string, unsigned long> symbology_;                 // the profile's Datablock colours (SectorColourName); mu_
+    std::string symbologyFile_;                                      // main thread: the Symbology file read, and its time
+    ULONGLONG symbologyTime_ = 0;
     std::string esAccepted_, esUrl_ = ES_SETUP_URL;                 // Core's euroscope.versions and euroscope.setup_url
     bool esConfigured_ = false;                                     // Core's config has arrived at least once
     std::map<std::string, std::string> lastErr_;
