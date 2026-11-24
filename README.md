@@ -205,7 +205,7 @@ The plugin keeps its own log, next to `KWIQPlugin.dll` in the sector file packag
 - `MENU` and `CMD`: squawk menu clicks and `.kwiq` commands.
 - `SRD`, `FPC`, `SECTOR` and `DISCORD`: the SRD window's exit point and searches, FPC results and sector indicators when they change, where each sector colour comes from, and Discord's presence.
 
-The API key, myKWIQ's claim codes, query strings and Core's answers are never written. `.kwiq log verbose` adds a squawk decision line for every aircraft on every pass, until EuroScope restarts.
+The API key, myKWIQ's claim codes, query strings and Core's answers are never written. `.kwiq log verbose`, until EuroScope restarts, adds a squawk decision line on every pass for each aircraft the plugin looks at (those with no code that counts that nobody else tracks), and a line per pass with how many aircraft there are.
 
 ## Tests
 `g++ -std=c++17 -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic && ./test_logic`

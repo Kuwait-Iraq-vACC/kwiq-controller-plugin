@@ -316,7 +316,9 @@ static std::vector<kwiq::SrdRoute> SrdSearchThunk(const std::string& adep, const
 
 class CKWIQPlugin : public CVCHPlugin {
 public:
-    CKWIQPlugin()
+    // A function-try-block: if anything after the log has started throws, the log's thread is stopped here, as the
+    // destructor never runs and joining it while Windows unloads the DLL would hang EuroScope
+    CKWIQPlugin() try
         : CVCHPlugin(KWIQ_PLUGIN_NAME, KWIQ_PLUGIN_VERSION, KWIQ_PLUGIN_AUTHOR, KWIQ_PLUGIN_COPYRIGHT) {
         // Loaded twice (two copies in Other Set > Plug-ins) every message, check and button would appear twice:
         // the second copy stays idle and says so
@@ -366,6 +368,9 @@ public:
         if (!GetModuleHandleA("KWIQPlugin.dll"))
             Msg("This copy of the plugin cannot update itself. Please download it again from myKWIQ (EuroScope Plugin) "
                 "and load KWIQPlugin.dll.", true);
+    } catch (...) {
+        kwiq::log::Global().Stop();
+        throw;                                              // as any constructor's handler does: the loader reports it
     }
     virtual ~CKWIQPlugin() {
         { std::lock_guard<std::mutex> g(sqMu_); sqQuit_ = true; }
@@ -1458,8 +1463,8 @@ private:
         using namespace kwiq::squawk;
         if (!UrlSafeCallsign(a.callsign)) return false;
         if (!sqBusy_.insert(a.callsign).second) {                  // one request at a time
-            kwiq::log::Write("SQUAWK", { { "cs", a.callsign }, { "busy", "1" } });
-            return false;
+            if (manual) kwiq::log::Write("SQUAWK", { { "cs", a.callsign }, { "busy", "1" }, { "manual", "1" } });
+            return false;                                           // automatic: the decision line says skip=busy
         }
         kwiq::log::Write("SQUAWK", { { "cs", a.callsign }, { "request", "PUT" }, { "lookup", lookupFirst ? "1" : "0" },
                                      { "manual", manual ? "1" : "0" }, { "previous", a.squawk } });
@@ -1539,10 +1544,13 @@ private:
             { "cs", a.callsign }, { "decide", ActionName(act) }, { "code", a.squawk }, { "counts", HasCode(codes, a.squawk) ? "1" : "0" },
             { "tracked", a.trackedByMe ? "me" : a.tracked ? "other" : "none" }, { "byhand", s && s->byHand ? "1" : "0" },
             { "planchanged", ForceNeeded(s, a) ? "1" : "0" }, { "delivery", a.deliveryByMe ? "1" : "0" } };
+        // Waiting for Core's answer: the same decision every pass, so only once like a decision that asks nothing
+        bool busy = act != Action::None && sqBusy_.count(a.callsign);
         if (*skip) f.push_back({ "skip", skip });
+        else if (busy) f.push_back({ "skip", "busy" });
         std::string key;
         for (const auto& kv : f) key += kv.first + "=" + kv.second + " ";
-        bool show = act != Action::None || kwiq::log::Verbose() || sqLogChanges_.Changed("SQUAWK " + a.callsign, key);
+        bool show = (act != Action::None && !busy) || kwiq::log::Verbose() || sqLogChanges_.Changed("SQUAWK " + a.callsign, key);
         if (!show) return;
         f.push_back({ "gs", std::to_string(a.groundSpeed) });
         f.push_back({ "alt", std::to_string(a.altitude) });
@@ -1877,6 +1885,7 @@ private:
         std::string dll = sf::DllDir();
         if (!kwiq::log::Global().Start({ dll, kwiq_win::LogsDir() })) return;
         kwiq::log::Write("START", { { "v", KWIQ_PLUGIN_BUILD }, { "es", esVersion_ }, { "mode", reduced_ ? "reduced" : "full" },
+                                    { "pid", std::to_string(GetCurrentProcessId()) },
                                     { "dll", sf::DllPath() } });
         std::string dir = kwiq::log::Global().Dir();
         if (!dll.empty() && dir != dll) Msg("The plugin log is in " + dir + " (the plugin's folder can't be written to).", false);

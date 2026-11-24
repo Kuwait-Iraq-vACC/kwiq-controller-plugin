@@ -39,10 +39,11 @@ inline std::string Escape(const std::string& s) {
     }
     return out;
 }
-// A field's value: quoted when it is empty or holds a space, ", = or |, so fields can't be split or forged
+// A field's value: quoted when it is empty or holds a space, ", =, | or \, so fields can't be split or forged and
+// a parser needs one rule: inside quotes \\ is \, \" is ", \n and \r are newlines
 inline std::string Value(const std::string& v) {
     bool quote = v.empty();
-    for (char c : v) if (c == ' ' || c == '"' || c == '=' || c == '|' || c == '\t') { quote = true; break; }
+    for (char c : v) if (c == ' ' || c == '"' || c == '=' || c == '|' || c == '\t' || c == '\\') { quote = true; break; }
     if (!quote) return Escape(v);
     std::string q;                                    // " and \ escaped first, then \r and \n
     for (char c : v) {
@@ -182,21 +183,28 @@ public:
         std::string name = FileName(utc), line = FormatLine(utc, ms, area, f, text);
         {
             std::lock_guard<std::mutex> g(mu_);
-            if (!thread_.joinable() || quit_) return;
-            if (queue_.size() >= maxQueue_) { dropped_++; pendingDrop_++; return; }
+            if (!running_ || quit_) return;
+            if (queue_.size() >= maxQueue_) {
+                if (!pendingDrop_) { dropTm_ = utc; dropMs_ = ms; }        // said after the lines already queued
+                dropped_++; pendingDrop_++;
+                return;
+            }
             queue_.push_back({ std::move(name), std::move(line), utc, ms });
         }
         cv_.notify_one();
     }
     // What's queued is written, then the thread ends. Safe to call more than once.
     void Stop() {
+        std::thread t;
         {
             std::lock_guard<std::mutex> g(mu_);
             quit_ = true;
             held_ = false;
+            running_ = false;                                        // no more lines; those queued are still written
+            t = std::move(thread_);                                  // one caller joins, whoever else calls Stop
         }
         cv_.notify_all();
-        if (thread_.joinable()) thread_.join();
+        if (t.joinable()) t.join();
     }
     std::string Dir() const { std::lock_guard<std::mutex> g(mu_); return dir_; }
     size_t Dropped() const { std::lock_guard<std::mutex> g(mu_); return dropped_; }
@@ -226,6 +234,7 @@ private:
         quit_ = false;
         Prune(keepDays);
         thread_ = std::thread([this] { Run(); });
+        running_ = true;
         return true;
     }
     struct Item { std::string file, line; std::tm utc; int ms; };
@@ -244,56 +253,66 @@ private:
         namespace fs = std::filesystem;
         for (;;) {
             std::deque<Item> batch;
-            size_t dropped = 0;
+            size_t late = 0, carryIn = 0;
+            std::tm lateTm{};
+            int lateMs = 0;
             {
                 std::unique_lock<std::mutex> l(mu_);
-                // Lines dropped are said with the next line written, so only lines wake the thread
+                // Lines dropped are said with the next lines written, so only lines wake the thread
                 cv_.wait(l, [this] { return quit_ || (!held_ && !queue_.empty()); });
                 if (held_ && !quit_) continue;
                 if (queue_.empty()) { if (quit_) return; continue; }
                 batch.swap(queue_);
-                dropped = pendingDrop_;
-                pendingDrop_ = 0;
+                late = pendingDrop_; lateTm = dropTm_; lateMs = dropMs_; pendingDrop_ = 0;
+                carryIn = carry_; carry_ = 0;
             }
             try {
                 std::string open;
                 std::ofstream f;
+                std::uintmax_t size = 0;                             // the open file's size: looked up once per batch
                 auto to = [&](const std::string& name) -> std::ofstream* {
                     if (name != open) {
                         if (f.is_open()) f.close();
                         f.clear();
+                        std::error_code ec;
+                        auto sz = fs::file_size(fs::path(dir_) / name, ec);
+                        size = ec ? 0 : sz;
                         f.open(fs::path(dir_) / name, std::ios::binary | std::ios::app);
                         open = name;
                     }
                     return f ? &f : nullptr;
                 };
-                size_t lost = 0, carry = 0;                          // couldn't be written (file locked): counted
                 auto put = [&](const std::string& name, const std::string& line, const std::tm& utc, int ms) -> bool {
                     if (capped_ == name) return true;
-                    std::error_code ec;
-                    std::uintmax_t size = 0;
-                    if (open != name || !f.is_open()) { auto s = fs::file_size(fs::path(dir_) / name, ec); size = ec ? 0 : s; }
-                    else { f.flush(); auto s = fs::file_size(fs::path(dir_) / name, ec); size = ec ? 0 : s; }
                     std::ofstream* o = to(name);
                     if (!o) return false;
                     if (size + line.size() + 1 > cap_) {
-                        *o << FormatLine(utc, ms, "LOG", { { "cap", "20MB" } }, "log full for today") << '\n';
+                        std::string full = FormatLine(utc, ms, "LOG", { { "cap", "20MB" } }, "log full for today");
+                        *o << full << '\n';
+                        size += full.size() + 1;
                         capped_ = name;
                         return true;
                     }
                     *o << line << '\n';
-                    return true;
+                    size += line.size() + 1;
+                    return (bool)*o;
                 };
-                if (dropped && !batch.empty() &&
-                    !put(batch.front().file, FormatLine(batch.front().utc, batch.front().ms, "LOG", { { "dropped", std::to_string(dropped) } }, ""),
-                         batch.front().utc, batch.front().ms))
-                    carry = dropped;                                 // said with the next batch that can be written
+                auto dropLine = [](const std::tm& utc, int ms, size_t n) {
+                    return FormatLine(utc, ms, "LOG", { { "dropped", std::to_string(n) } }, "");
+                };
+                size_t lost = 0, carry = 0;                          // couldn't be written (file locked): counted
+                // Lost while the file couldn't be written: before this batch, which came after them
+                if (carryIn && !put(batch.front().file, dropLine(batch.front().utc, batch.front().ms, carryIn),
+                                    batch.front().utc, batch.front().ms))
+                    carry += carryIn;
                 for (const auto& it : batch) if (!put(it.file, it.line, it.utc, it.ms)) lost++;
+                // Dropped because the queue was full: after the lines queued before them, at the first drop's time
+                if (late && !put(FileName(lateTm), dropLine(lateTm, lateMs, late), lateTm, lateMs)) carry += late;
                 if (f.is_open()) f.flush();
                 if (lost || carry) {
                     std::lock_guard<std::mutex> g(mu_);
                     dropped_ += lost;
-                    pendingDrop_ += lost + carry;
+                    carry_ += lost + carry;
                 }
             } catch (...) {}                                         // a log that can't be written never stops the plugin
         }
@@ -306,8 +325,11 @@ private:
     std::thread thread_;
     std::string dir_, capped_;
     std::uintmax_t cap_ = std::uintmax_t(20) << 20;
-    size_t maxQueue_ = 10000, dropped_ = 0, pendingDrop_ = 0;
-    bool quit_ = false, held_ = false;
+    size_t maxQueue_ = 10000, dropped_ = 0;
+    size_t pendingDrop_ = 0, carry_ = 0;                             // dropped (queue full) / lost (not writable), unsaid
+    std::tm dropTm_{};
+    int dropMs_ = 0;
+    bool quit_ = false, held_ = false, running_ = false;
 };
 
 // ---- the plugin's one log ---------------------------------------------------------------------------

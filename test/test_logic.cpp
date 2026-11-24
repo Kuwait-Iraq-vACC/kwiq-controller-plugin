@@ -1072,6 +1072,8 @@ int main() {
         CHECK(FormatLine(t, 123, "MSG", { { "err", "1" } }, "Core said\r\nno") == "20:14:05.123 MSG err=1 | Core said\\r\\nno");
         CHECK(Value("a b") == "\"a b\"" && Value("x=y") == "\"x=y\"" && Value("a|b") == "\"a|b\"" && Value("") == "\"\"");
         CHECK(Value("say \"hi\"") == "\"say \\\"hi\\\"\"" && Value("OK") == "OK" && Value("a\nb") == "a\\nb");
+        // one rule for a parser: a value with a backslash is quoted, and the backslash doubled
+        CHECK(Value("C:\\new\\x") == "\"C:\\\\new\\\\x\"");
         CHECK(FileName(t) == "KWIQPlugin-20261124.log" && IsLogFile("KWIQPlugin-20261124.log"));
         CHECK(!IsLogFile("KWIQPlugin.dll") && !IsLogFile("KWIQPlugin-2026112.log") && !IsLogFile("KWIQPlugin-2026112x.log"));
         CHECK(Expired("KWIQPlugin-20261116.log", t, 7) && !Expired("KWIQPlugin-20261117.log", t, 7));
@@ -1178,6 +1180,7 @@ int main() {
             bool said = false;
             for (auto& x : l) if (x.find("LOG dropped=") != std::string::npos) said = true;
             CHECK(said && l.size() == 3);
+            CHECK(l.back().find("LOG dropped=3") != std::string::npos);   // after the lines queued before the drops
         }
         {   // writer_stop_flushes
             const fs::path d = root / "flush";
@@ -1216,6 +1219,19 @@ int main() {
         CHECK(SafeCommand(".kwiqkey kwiq_abc") == ".kwiqkey ***" && SafeCommand(".kwiq connect kwiq_x") == ".kwiq connect ***");
         CHECK(SafeCommand(".kwiq key abc123") == ".kwiq key ***" && SafeCommand(".kwiq key") == ".kwiq key");
         CHECK(SafeCommand(".kwiq squawk") == ".kwiq squawk" && SafeCommand(".kwiq qnh ORBI") == ".kwiq qnh ORBI");
+        {   // Write racing Stop from another thread (a worker logging a request as the plugin unloads): no race
+            const fs::path d = root / "race";
+            fs::create_directories(d);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            std::atomic<bool> go{ true };
+            std::thread t([&] { while (go) w.Write("CORE", { { "x", "1" } }); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            w.Stop();
+            go = false;
+            t.join();
+            w.Write("CORE", {});                                            // after Stop: nothing, no throw
+        }
         kwiq::log::Write("MSG", {}, "the global log isn't started: nothing");   // never throws
         fs::remove_all(root, ec);
     }
