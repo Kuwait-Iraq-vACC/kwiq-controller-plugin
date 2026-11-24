@@ -8,6 +8,7 @@
 #pragma once
 
 #include "kwiq_logic.hpp"
+#include <cstdio>
 #include <utility>
 
 namespace kwiq::squawk {
@@ -166,6 +167,40 @@ inline Action Decide(const User& u, const Aircraft& a, const Stored* s, const Co
     if (s && s->byHand && !ForceNeeded(s, a)) return Action::None;
     if (AssignmentNeeded(u, a, codes)) return Action::Assign;
     return Action::None;
+}
+
+// Why Decide gives what it gives, in words, for `.kwiq squawk why`. Only the rules here: whether squawks are on,
+// logged on long enough, waiting for Core and so on are for the caller to say first.
+inline std::string Explain(const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
+    char buf[160];
+    if (!u.controller) return "you are not logged on as a controller";
+    if (!Possible(u, a)) {
+        std::snprintf(buf, sizeof buf, "EuroScope has no position for it yet (%.1f nm from departure, altitude %d ft)",
+                      a.fromOrigin, a.altitude);
+        return buf;
+    }
+    if (HasCode(codes, a.squawk)) return "it already has a code (" + a.squawk + ")";
+    if (a.tracked && !a.trackedByMe) return "another controller tracks it: theirs to give a code";
+    switch (Decide(u, a, s, codes)) {
+    case Action::Assumed:  return "it needs a new code: you assumed it with none";
+    case Action::Previous: return "it needs a code: the one Core holds for it is asked for (reconnected with the same plan)";
+    case Action::Assign:   return "it needs a code";
+    case Action::None:     break;
+    }
+    if (AssignmentNeeded(u, a, codes))
+        return "a controller set its code by hand (" + (s ? s->squawk : std::string()) +
+               "): left alone until its departure, destination or flight rules change";
+    std::string why;
+    if (a.groundSpeed > UNTRACKED_MAX_SPEED) {
+        std::snprintf(buf, sizeof buf, "moving at %d kt (over %d)", a.groundSpeed, UNTRACKED_MAX_SPEED);
+        why += buf;
+    }
+    if (a.fromOrigin > UNTRACKED_MAX_FROM_ORIGIN) {
+        std::snprintf(buf, sizeof buf, "%.1f nm from %s (over %.0f)", a.fromOrigin, a.origin.c_str(), UNTRACKED_MAX_FROM_ORIGIN);
+        why += (why.empty() ? "" : ", ") + std::string(buf);
+    }
+    if (!a.deliveryByMe) why += (why.empty() ? "" : ", ") + std::string("you don't provide Delivery at ") + a.origin;
+    return "nobody tracks it, so it gets a code only on the ground where you provide Delivery: " + why;
 }
 
 // ---- what the plugin remembers (UKCP StoredFlightplan) -------------------------------------------
