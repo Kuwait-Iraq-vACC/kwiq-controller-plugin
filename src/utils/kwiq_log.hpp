@@ -244,7 +244,8 @@ private:
         std::error_code ec;
         for (fs::directory_iterator it(fs::path(dir_), ec), end; !ec && it != end; it.increment(ec)) {
             try {                                                    // a name the code page can't show: skipped
-                std::string n = it->path().filename().u8string();
+                auto u8 = it->path().filename().u8string();          // std::string in C++17, std::u8string in C++20
+                std::string n(u8.begin(), u8.end());
                 if (Expired(n, today, keepDays)) { std::error_code rm; fs::remove(it->path(), rm); }
             } catch (...) {}
         }
