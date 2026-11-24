@@ -562,6 +562,14 @@ public:
             const char* tracker = FlightPlan.GetTrackingControllerCallsign();
             if (!tracker || !*tracker) return;
             std::string alias = SectorFor(tracker);
+            {   // the plugin's log: only when it changes for this flight
+                EuroScopePlugIn::CController c = ControllerSelect(tracker);
+                std::string pos = c.IsValid() && c.GetPositionIdentified() && c.GetPositionId() ? c.GetPositionId() : "";
+                std::string cs = FlightPlan.GetCallsign() ? FlightPlan.GetCallsign() : "";
+                if (sectorLog_.Changed("SECTOR " + cs, std::string(tracker) + " " + pos + " " + alias))
+                    kwiq::log::Write("SECTOR", { { "cs", cs }, { "tracker", tracker }, { "position", pos }, { "alias", alias },
+                                                 { "state", kwiq::SectorColourName(FlightPlan.GetState()) } });
+            }
             if (alias.empty()) return;
             strncpy_s(sItemString, 16, alias.c_str(), _TRUNCATE);
         }
@@ -990,6 +998,20 @@ public:
             auto it = ui_->cStates.find(n);
             a[i] = sym != symbology_.end() ? (COLORREF)sym->second : it == ui_->cStates.end() ? ui_->cSector : it->second;
         }
+        {   // the plugin's log: where each state's colour comes from, when that changes
+            std::string list;
+            char hex[16];
+            for (int i = 0; i < 8; i++) {
+                std::string n = kwiq::SectorColourName(i);
+                const char* from = symbology_.count(n) ? "symbology" : ui_->cStates.count(n) ? "core" : "sector";
+                std::snprintf(hex, sizeof hex, "%06lX", (unsigned long)a[i]);
+                list += n + ":" + from + ":" + hex + " ";
+            }
+            if (sectorColoursLogged_ != list) {
+                sectorColoursLogged_ = list;
+                kwiq::log::Write("SECTOR", { { "colours", "1" }, { "symbology", symbologyFile_ } }, list);
+            }
+        }
         return a;
     }
     // main thread, every 30 s: find the profile's Symbology file and read its Datablock colours when it changed
@@ -1020,6 +1042,8 @@ public:
         std::lock_guard<std::mutex> g(mu_);
         auto hits = kwiq::SrdSearch(srd_, adep, ades, kwiq::ParseLevelFt(lvl));
         for (size_t i = 0; i < hits.size() && (int)i < kwiq_ui::SRD_MAX_RESULTS; i++) rows.push_back(srd_.rows[hits[i]]);
+        kwiq::log::Write("SRD", { { "search", "1" }, { "adep", adep }, { "ades", ades }, { "lvl", lvl }, { "hits", std::to_string(hits.size()) } },
+                         rows.empty() ? "" : rows[0].rte);
         return rows;
     }
 
@@ -1176,6 +1200,18 @@ private:
             kwiq::fpc::Result f = kwiq::fpc::Check(fpcRules_, FpcFlight(fp, FpcExitLocked(fp)));
             e.fpcChecked = f.checked; e.fpcVfr = f.vfr; e.fpcWarn = f.WarningOnly();
             e.fpcFails = f.fails;
+            {   // the plugin's log: only when the result for this flight changes
+                std::string res = !f.checked ? "unchecked" : f.vfr ? "VFR" : f.fails.empty() ? "OK" : "";
+                for (size_t i = 0; i < f.fails.size(); i++) res += (i ? "," : "") + std::string(kwiq::fpc::Code(f.fails[i]));
+                std::string evs = e.evExact == kwiq::RouteResult::Ok ? "on" : e.evExact == kwiq::RouteResult::Check ? "off" : "none";
+                std::string exit = FpcExitLocked(fp);
+                if (fpcLog_.Changed("FPC " + cs, res + " " + evs + " " + exit + " " + r)) {
+                    std::string notes;
+                    for (const auto& n : f.notes) notes += (notes.empty() ? "" : "; ") + n;
+                    kwiq::log::Write("FPC", { { "cs", cs }, { "result", res }, { "event", evs }, { "exit", exit }, { "adep", o }, { "ades", a } },
+                                     notes.substr(0, 300));
+                }
+            }
             e.evGen = evGen_; e.srdGen = srdGen_; e.exitGen = exitGen_; e.fpcGen = fpcGen_;
             e.rfl = rfl; e.filedRfl = filedRfl; e.engine = engine; e.capability = capability; e.today = today;
             e.adep = o; e.ades = a; e.rte = r; e.sid = sid; e.planType = planType; e.valid = true;
@@ -1247,7 +1283,10 @@ private:
             ades = kwiq::Upper(fp.GetFlightPlanData().GetDestination());
             {   // leaving the vACC's airspace: search to the FIR exit point (UKCP SrdSearchDialog)
                 std::lock_guard<std::mutex> g(mu_);
-                std::string end = kwiq::SrdEnd(ades, domesticPrefixes_, FirExitLocked(fp, ades));
+                kwiq::AircraftExit exit = FirExitLocked(fp, ades);
+                std::string end = kwiq::SrdEnd(ades, domesticPrefixes_, exit);
+                kwiq::log::Write("SRD", { { "open", "1" }, { "cs", fp.GetCallsign() ? fp.GetCallsign() : "" }, { "adep", adep }, { "ades", ades },
+                                          { "internal", exit.internal }, { "external", exit.external }, { "end", end } });
                 if (!end.empty()) ades = end;
             }
             int rfl = fp.GetFinalAltitude();
@@ -1537,6 +1576,11 @@ private:
         if (!u.controller) return;
         auto codes = SquawkCodes();
         if (!codes) return;
+        if (kwiq::log::Verbose()) {
+            int n = 0;
+            for (auto fp = FlightPlanSelectFirst(); fp.IsValid(); fp = FlightPlanSelectNext(fp)) n++;
+            kwiq::log::Write("SQUAWK", { { "tick", "1" }, { "aircraft", std::to_string(n) }, { "codes", std::to_string(codes->size()) } });
+        }
         for (auto fp = FlightPlanSelectFirst(); fp.IsValid(); fp = FlightPlanSelectNext(fp)) {
             const char* tracker = fp.GetTrackingControllerCallsign();
             if (kwiq::squawk::HasCode(*codes, fp.GetControllerAssignedData().GetSquawk()) ||
@@ -2225,6 +2269,9 @@ private:
     std::unordered_set<std::string> sqBusy_;                        // main thread only: callsigns waiting for Core
     std::unordered_map<std::string, std::time_t> sqRetryAt_;        // main thread only: not before, after Core failed
     kwiq::log::Changes sqLogChanges_;                               // main thread only: squawk decisions already logged
+    kwiq::log::Changes fpcLog_;                                     // under mu_: FPC results already logged
+    kwiq::log::Changes sectorLog_;                                  // main thread only: sector indicators already logged
+    std::string sectorColoursLogged_;                               // under mu_: the sector colours last logged
     std::string sqLogList_;                                         // Core worker only: the code list last logged
     std::time_t sqLastPass_ = 0, sqLoginAt_ = 0;                    // main thread only
     bool sqLoggedIn_ = false;                                       // main thread only: UKCP's idea of logged in

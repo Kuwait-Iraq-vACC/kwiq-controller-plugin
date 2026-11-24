@@ -54,7 +54,7 @@ Functions: **Open event routes window** (left button on Event Route), **Explain 
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
-`.kwiq connect` (get your API key from myKWIQ), `.kwiq key <key>` (enter it by hand; `.kwiq key` says whether one is connected, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq sector` (sector indicators on the radar on or off), `.kwiq autorefresh` (slot auto refresh on or off), `.kwiq squawk` (automatic squawk assignment on or off), `.kwiq update` (says whether a newer version is waiting), `.kwiq alert` (preview the sector file alert), `.kwiq discord` (DiscordEuroScope on or off for yourself), `.kwiq qnh <ICAO>`, `.kwiq notifications`, `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or AIRAC_VERSION.txt>` (tell the plugin where your package is; empty = automatic), `.rdf draw on|off|core` (your own RDF switch; `core` = as Core says), `.rdf refresh` (switch the channels off and sync them again from TrackAudio), `.rdf reload` (reconnect to TrackAudio), plus VCH's own `.vch ...` commands.
+`.kwiq connect` (get your API key from myKWIQ), `.kwiq key <key>` (enter it by hand; `.kwiq key` says whether one is connected, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq log` (open the folder of the plugin's own log; `.kwiq log verbose` adds more detail until EuroScope restarts), `.kwiq sector` (sector indicators on the radar on or off), `.kwiq autorefresh` (slot auto refresh on or off), `.kwiq squawk` (automatic squawk assignment on or off), `.kwiq update` (says whether a newer version is waiting), `.kwiq alert` (preview the sector file alert), `.kwiq discord` (DiscordEuroScope on or off for yourself), `.kwiq qnh <ICAO>`, `.kwiq notifications`, `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or AIRAC_VERSION.txt>` (tell the plugin where your package is; empty = automatic), `.rdf draw on|off|core` (your own RDF switch; `core` = as Core says), `.rdf refresh` (switch the channels off and sync them again from TrackAudio), `.rdf reload` (reconnect to TrackAudio), plus VCH's own `.vch ...` commands.
 
 ## What Core controls
 Besides Core's address, only myKWIQ's Connect EuroScope page and the default EuroScope setup guide and changelog links are compiled in. `/api/plugin/latest` supplies the latest version, the checksums of the plugin and the updater, the kill switch and the changelog link. `/api/plugin/config` supplies: minimum plugin version, message of the day, refresh intervals, tag texts and colours, sector indicator colours/default, and the current sector file AIRAC. Sector aliases, RDF settings, the SRD and events have their own endpoints. All of it is edited in Filament (Plugin settings, Sector aliases, SRD routes, Plugin events).
@@ -193,6 +193,19 @@ When the departure, destination or flight rules change, the next code is a new o
 | `GET /topdown` | one `TOPDOWN\|<airport>\|<position>,<position>,...` line per airport, lowest position first (refreshed with the SRD) |
 
 Errors may carry `ERROR|<message>` in the body, which the plugin shows. A code Core answers with that is on its own non-assignable list is ignored. Config keys: `squawk.enabled` (default 0), `squawk.conspicuity` (default 2000), `squawk.conspicuity_vfr` (default 7000); the old names `squawk.non_discrete` and `squawk.non_discrete_vfr` are still read when the new ones are not set.
+
+## The plugin's log
+
+The plugin keeps its own log, next to `KWIQPlugin.dll` in the sector file package (or `%LOCALAPPDATA%\KWIQ\logs` if that folder can't be written to): `KWIQPlugin-YYYYMMDD.log`, one file per UTC day, at most 20 MB each, kept for 7 days. `.kwiq log` opens the folder. One line per event, `HH:MM:SS.mmm AREA key=value ... | text` in UTC, so a log sent in can be filtered by aircraft (`cs=`) or area:
+
+- `START`: plugin and EuroScope version, the DLL loaded, and the exit.
+- `MSG`: everything the plugin says in the chat, and each error source as it fails and recovers.
+- `CORE`: every request to Core, with method, URL (no query), status and time taken.
+- `SQUAWK`: each decision with the facts behind it (code, whether it counts, who tracks it), each request, Core's answer, codes set elsewhere, and Core's list of codes that don't count, whenever it changes.
+- `MENU` and `CMD`: squawk menu clicks and `.kwiq` commands.
+- `SRD`, `FPC`, `SECTOR` and `DISCORD`: the SRD window's exit point and searches, FPC results and sector indicators when they change, where each sector colour comes from, and Discord's presence.
+
+The API key, myKWIQ's claim codes, query strings and Core's answers are never written. `.kwiq log verbose` adds a squawk decision line for every aircraft on every pass, until EuroScope restarts.
 
 ## Tests
 `g++ -std=c++17 -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic && ./test_logic`
