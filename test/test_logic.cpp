@@ -1,10 +1,13 @@
-// Logic tests: g++ -std=c++17 -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic && ./test_logic
+// Logic tests: g++ -std=c++17 -Wall -Wextra -pthread -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic && ./test_logic
 #include "kwiq_logic.hpp"
 #include "version.h"
 #include "fpc/fpc_logic.hpp"
 #include "squawk/squawk_logic.hpp"
 #include "ownership/ownership_logic.hpp"
 #include "kwiq_log.hpp"
+#include <filesystem>
+#include <fstream>
+#include <atomic>
 using namespace kwiq;
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -1076,6 +1079,113 @@ int main() {
         CHECK(c.Changed("FPC RJA812", "OK") && !c.Changed("FPC RJA812", "OK") && c.Changed("FPC RJA812", "CHK"));
         c.Forget("FPC RJA812");
         CHECK(c.Changed("FPC RJA812", "CHK"));
+    }
+
+    // ---- the log's writer: daily files, the 20 MB cap, a fallback folder, a queue that never blocks ----
+    {
+        using namespace kwiq::log;
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "kwiq_log_test";
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root);
+        auto lines = [](const fs::path& f) {
+            std::vector<std::string> out; std::ifstream in(f); std::string l;
+            while (std::getline(in, l)) out.push_back(l);
+            return out;
+        };
+        auto at = [](int y, int mo, int d, int h, int mi, int sec, int ms) {
+            long days = DaysFromCivil(y, mo, d);
+            return std::chrono::system_clock::time_point(std::chrono::seconds((long long)days * 86400 + h * 3600 + mi * 60 + sec)) +
+                   std::chrono::milliseconds(ms);
+        };
+        auto now = std::make_shared<std::chrono::system_clock::time_point>(at(2026, 11, 24, 20, 14, 5, 7));
+        Writer::Clock clock = [now] { return *now; };
+        const fs::path d1 = root / "dll";
+        fs::create_directories(d1);
+        {   // writer_writes_line
+            Writer w(clock);
+            CHECK(w.Start({ d1.string() }));
+            CHECK(w.Dir() == d1.string());
+            w.Write("START", { { "v", "0.7.6" } });
+            w.Stop();
+            w.Stop();                                                       // twice: fine
+            auto l = lines(d1 / "KWIQPlugin-20261124.log");
+            CHECK(l.size() == 1 && l[0] == "20:14:05.007 START v=0.7.6");
+        }
+        {   // writer_falls_back: a folder under a regular file can't be made; the next one is used
+            std::ofstream(root / "afile") << "x";
+            const fs::path fb = root / "fb";
+            Writer w(clock);
+            CHECK(w.Start({ (root / "afile" / "deep").string(), fb.string() }) && w.Dir() == fb.string());
+            w.Stop();
+            Writer none(clock);
+            CHECK(!none.Start({ (root / "afile" / "deep").string() }) && none.Dir().empty());
+            none.Write("MSG", {}, "nothing");                               // no folder: nothing, no throw
+            none.Stop();
+        }
+        {   // writer_prunes: only log files older than 7 days
+            const fs::path d = root / "prune";
+            fs::create_directories(d);
+            for (const char* n : { "KWIQPlugin-20261101.log", "KWIQPlugin-20261120.log", "other.log" }) std::ofstream(d / n) << "x\n";
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            w.Stop();
+            CHECK(!fs::exists(d / "KWIQPlugin-20261101.log") && fs::exists(d / "KWIQPlugin-20261120.log") && fs::exists(d / "other.log"));
+        }
+        {   // writer_rollover: a new UTC day, a new file
+            const fs::path d = root / "roll";
+            fs::create_directories(d);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            *now = at(2026, 11, 24, 23, 59, 59, 0);
+            w.Write("A", {});
+            *now = at(2026, 11, 25, 0, 0, 1, 0);
+            w.Write("B", {});
+            w.Stop();
+            CHECK(lines(d / "KWIQPlugin-20261124.log") == std::vector<std::string>({ "23:59:59.000 A" }));
+            CHECK(lines(d / "KWIQPlugin-20261125.log") == std::vector<std::string>({ "00:00:01.000 B" }));
+        }
+        {   // writer_cap: full for the day, one line saying so, then the next day writes again
+            const fs::path d = root / "cap";
+            fs::create_directories(d);
+            *now = at(2026, 11, 24, 10, 0, 0, 0);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }, 7, 100));
+            for (int i = 0; i < 5; i++) w.Write("SQUAWK", { { "pad", std::string(17, 'x') } });   // 40 bytes a line
+            *now = at(2026, 11, 25, 10, 0, 0, 0);
+            w.Write("NEXT", {});
+            w.Stop();
+            auto l = lines(d / "KWIQPlugin-20261124.log");
+            CHECK(l.size() == 3 && l[2] == "10:00:00.000 LOG cap=20MB | log full for today");
+            CHECK(lines(d / "KWIQPlugin-20261125.log").size() == 1);
+        }
+        {   // writer_queue_full: lines are dropped and counted, never waited for
+            const fs::path d = root / "queue";
+            fs::create_directories(d);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }, 7, 20u << 20, 2));
+            w.Hold(true);
+            for (int i = 0; i < 5; i++) w.Write("X", { { "i", std::to_string(i) } });
+            CHECK(w.Dropped() >= 3);
+            w.Hold(false);
+            w.Stop();
+            auto l = lines(d / "KWIQPlugin-20261125.log");
+            bool said = false;
+            for (auto& x : l) if (x.find("LOG dropped=") != std::string::npos) said = true;
+            CHECK(said && l.size() == 3);
+        }
+        {   // writer_stop_flushes
+            const fs::path d = root / "flush";
+            fs::create_directories(d);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            for (int i = 0; i < 1000; i++) w.Write("X", { { "i", std::to_string(i) } });
+            w.Stop();
+            CHECK(lines(d / "KWIQPlugin-20261125.log").size() == 1000);
+        }
+        kwiq::log::Write("MSG", {}, "the global log isn't started: nothing");   // never throws
+        fs::remove_all(root, ec);
     }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
