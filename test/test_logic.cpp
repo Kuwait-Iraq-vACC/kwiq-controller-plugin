@@ -570,11 +570,12 @@ int main() {
         Stored same{ "OKBK", "OMDB", "4521", false, 0 }, moved{ "OKBK", "OTHH", "4521", false, 0 };
         CHECK(Decide(twr, gnd, &same, codes) == Action::Previous);         // reconnected: same code back
         CHECK(ForceNeeded(&moved, gnd) && Decide(twr, gnd, &moved, codes) == Action::Assign);
-        Stored byHand{ "OKBK", "OMDB", "2000", true, 0 };           // set to 2000 by hand: left alone
+        Stored byHand{ "OKBK", "OMDB", "2000", true, 0 };           // a code that doesn't count is replaced, even by hand
         a = gnd; a.squawk = "2000";
-        CHECK(Decide(twr, a, &byHand, codes) == Action::None);
-        byHand.destination = "OTHH";                                // until the plan changes
         CHECK(Decide(twr, a, &byHand, codes) == Action::Assign);
+        Stored realByHand{ "OKBK", "OMDB", "4521", true, 0 };       // a real code by hand: kept
+        a = gnd; a.squawk = "4521";
+        CHECK(Decide(twr, a, &realByHand, codes) == Action::None);
 
         Aircraft trk = gnd;                                         // tracked by the user, airborne, far away
         trk.tracked = trk.trackedByMe = true; trk.deliveryByMe = false;
@@ -616,12 +617,14 @@ int main() {
         // a code from the menu is by hand, and so is one typed in EuroScope (or set on another scope)
         CodeSeen(st, "4523", codes, false);                                       // the plugin's own: nothing changes
         CHECK(!st.byHand);
-        CodeSeen(st, "2000", codes, false);
-        CHECK(st.byHand && st.squawk == "2000");
+        CodeSeen(st, "2000", codes, false);                         // a code that doesn't count: never by hand
+        CHECK(!st.byHand && st.squawk == "4523");
         a = v; a.squawk = "2000";
-        CHECK(Decide(twr, a, &st, codes) == Action::None);          // not replaced every 5 seconds
+        CHECK(Decide(twr, a, &st, codes) == Action::Previous);      // replaced: by the code Core holds for this plan
+        CodeSeen(st, "4524", codes, false);                         // a real code typed in EuroScope: by hand
+        CHECK(st.byHand && st.squawk == "4524");
         CodeSeen(st, "", codes, false); CodeSeen(st, "99", codes, false);                       // cleared or invalid: ignored
-        CHECK(st.squawk == "2000" && st.byHand);
+        CHECK(st.squawk == "4524" && st.byHand);
         Stored gone{ "OKBK", "OMDB", "4521", false, 100 };          // disconnected: the code to give back is kept
         CodeSeen(gone, "1234", codes, false);
         CHECK(gone.squawk == "4521" && !gone.byHand);
@@ -631,7 +634,8 @@ int main() {
         CHECK(AnswerWanted(false, twr, gnd, nullptr, codes));
         a = gnd; a.squawk = "4521";                                 // someone set a code meanwhile
         CHECK(!AnswerWanted(false, twr, a, nullptr, codes) && AnswerWanted(true, twr, a, nullptr, codes));
-        CHECK(!AnswerWanted(false, twr, gnd, &st, codes));          // set by hand meanwhile (st.byHand)
+        a = gnd; a.squawk = "2000";                                 // 2000 typed meanwhile: still replaced
+        CHECK(AnswerWanted(false, twr, a, &st, codes));
         CHECK(!AnswerWanted(false, twr, other, nullptr, codes) && !AnswerWanted(true, twr, other, nullptr, codes));
         CHECK(!AnswerWanted(true, obs, gnd, nullptr, codes));
 
@@ -667,15 +671,15 @@ int main() {
         CHECK(!net.byHand && Decide(twr, a, &net, codes) == Action::Assign);
         CodeSeen(net, "1200", codes, false);
         CHECK(!net.byHand);
-        CodeSeen(net, "2000", codes, false);                        // conspicuity typed in EuroScope: still by hand
-        CHECK(net.byHand && net.squawk == "2000");
+        CodeSeen(net, "2000", codes, false);                        // nor is a conspicuity code
+        CHECK(!net.byHand);
         // assumed on a non-assignable code (KAC792 on 2000): always a new code from Core
         Aircraft kac = gnd; kac.callsign = "KAC792"; kac.deliveryByMe = false;
         kac.groundSpeed = 300; kac.fromOrigin = 40; kac.altitude = 15000;
         Stored ks; Remember(ks, kac);                               // untracked: nothing
-        CodeSeen(ks, "2000", codes, false);                         // 2000 set by someone earlier: by hand
+        CodeSeen(ks, "2000", codes, false);                         // 2000 set by someone earlier: not by hand
         kac.squawk = "2000";
-        CHECK(ks.byHand && !ks.assumed && Decide(ctr, kac, &ks, codes) == Action::None);
+        CHECK(!ks.byHand && !ks.assumed && Decide(ctr, kac, &ks, codes) == Action::None);   // untracked and airborne
         kac.tracked = kac.trackedByMe = true;                       // the user assumes it
         Remember(ks, kac);
         CHECK(ks.assumed && Decide(ctr, kac, &ks, codes) == Action::Assumed);   // by hand doesn't stop it
@@ -695,9 +699,9 @@ int main() {
         Aircraft typed = kac; typed.squawk = "";
         Stored ky; Remember(ky, typed);
         CHECK(ky.assumed);
-        CodeSeen(ky, "2000", codes, false);                         // the user typed 2000 after assuming: kept
+        CodeSeen(ky, "2000", codes, false);                         // the user typed 2000 after assuming: replaced
         typed.squawk = "2000";
-        CHECK(!ky.assumed && Decide(ctr, typed, &ky, codes) == Action::None);
+        CHECK(ky.assumed && Decide(ctr, typed, &ky, codes) == Action::Assumed);
         Aircraft gone2 = kac; gone2.tracked = gone2.trackedByMe = false;      // released again: no longer assumed
         Remember(kd, gone2);
         CHECK(!kd.assumed);

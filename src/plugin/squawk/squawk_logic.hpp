@@ -100,7 +100,8 @@ struct Aircraft {
 // What the plugin remembers about a flight plan, so a pilot who reconnects gets the same code back
 struct Stored {
     std::string origin, destination, squawk;
-    bool byHand = false;              // a controller set the code by hand (menu or EuroScope): leave it alone
+    bool byHand = false;              // a controller set a code that counts by hand (menu or EuroScope): given back
+                                      // on a reconnect if Core holds none
     std::time_t expires = 0;          // 0 while connected; disconnected plans are forgotten after STORED_SECONDS
     bool vfr = false;
     bool planChanged = false;         // departure, destination or rules changed since the code was set: a code
@@ -158,13 +159,12 @@ inline bool ChangeAllowed(const User& u, const Aircraft& a) {
 
 enum class Action { None, Previous, Assign, Assumed };
 // UKCP SquawkEventHandler::AttemptAssignment, without the UK's circuit and local codes
-// Assumed with no code (blank, or a code on Core's list such as 2000): always a new code from Core, not one Core
-// holds for the callsign, a reconnect's old code, or a code someone set by hand
+// A code that doesn't count (blank, or on Core's list without "counts as assigned") is always replaced, whoever set
+// it. Assumed with one: always a new code from Core, not one Core holds for the callsign or a reconnect's old code
 inline Action Decide(const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
     if (s && s->assumed && a.trackedByMe && AssignmentNeeded(u, a, codes)) return Action::Assumed;
     if (PreviousNeeded(u, a, s, codes)) return Action::Previous;
-    if (s && s->byHand && !ForceNeeded(s, a)) return Action::None;
-    if (AssignmentNeeded(u, a, codes)) return Action::Assign;
+    if (AssignmentNeeded(u, a, codes)) return Action::Assign;   // a code that doesn't count is always replaced
     return Action::None;
 }
 
@@ -190,29 +190,26 @@ inline void CodeSet(Stored& st, const std::string& code, bool byHand) {
     st.assumed = false;
 }
 // EuroScope reports a code. One the plugin didn't set was set by a controller, here (typed in EuroScope) or on
-// another scope: leave it alone like a code set from the menu. Ignored: a cleared or invalid code, the holding
+// another scope: by hand, like a code set from the menu. Ignored: a cleared or invalid code, the holding
 // code, anything while the pilot is disconnected (so the code to give back survives a reconnect), and a code that
-// is no code unless it is a conspicuity code: pilot-client and network defaults (0000, 1200, 2200 ...) come with
-// the plan, not from a controller. On sweatbox even a conspicuity code is ignored (aircraft spawn with 2000).
+// is no code (on Core's list, not counting as assigned): it is always replaced, whoever set it.
 inline void CodeSeen(Stored& st, const std::string& code, const CodeList& codes, bool sweatbox) {
+    (void)sweatbox;
     if (st.expires || code == st.squawk || !ValidSquawk(code) || code == HOLDING_SQUAWK) return;
-    if (!HasAssignedSquawk(codes, code)) {
-        const NonAssignable* r = FindCode(codes, code);
-        if (sweatbox || !r || r->category != "conspicuity") return;
-    }
+    if (!HasAssignedSquawk(codes, code)) return;
     st.squawk = code;
     st.byHand = true;
     st.planChanged = false;
     st.assumed = false;                                         // chosen after the assume: kept
 }
 // Core's answer arrived: set it only if it is still wanted. One the controller asked for: if they may still change
-// the code. An automatic one: also only if the aircraft still has no code and no controller has set one by hand
-// meanwhile (UKCP sets it regardless and can overwrite a code someone set while the request was out).
+// the code. An automatic one: also only if the aircraft still has no code that counts (UKCP sets it regardless and
+// can overwrite a code someone set while the request was out).
 inline bool AnswerWanted(bool manual, const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
     if (!ChangeAllowed(u, a)) return false;
     if (manual) return true;
-    if (HasCode(codes, a.squawk)) return false;
-    return !(s && s->byHand) || (s->assumed && a.trackedByMe);  // assumed: a code set by hand before doesn't stop it
+    (void)s;
+    return !HasCode(codes, a.squawk);                           // a code that doesn't count, by hand or not, is replaced
 }
 
 // ---- Core ------------------------------------------------------------------------------------------
