@@ -1288,17 +1288,23 @@ private:
         a.fromOrigin = fp.GetDistanceFromOrigin();
         a.deliveryByMe = ownership_.DeliveryControlProvidedByUser(a.origin);   // UKCP SquawkAssignment
         EuroScopePlugIn::CRadarTarget rt = fp.GetCorrelatedRadarTarget();
-        if (!rt.IsValid()) return false;
+        if (!rt.IsValid()) {
+            // Uncorrelated (e.g. squawking 2000 with correlation by squawk): the target with its callsign, if that
+            // target isn't another flight plan's
+            rt = RadarTargetSelect(a.callsign.c_str());
+            if (!rt.IsValid() || rt.GetCorrelatedFlightPlan().IsValid()) return false;
+        }
         EuroScopePlugIn::CRadarTargetPositionData pos = rt.GetPosition();
         a.groundSpeed = pos.GetReportedGS();
         a.altitude = pos.GetFlightLevel();
         return true;
     }
     // Remembered first, so EuroScope's report of the new code is known to be the plugin's own
-    void SetSquawk(EuroScopePlugIn::CFlightPlan& fp, std::string code, bool byHand) {
+    // chosen: from the KWIQ menu (Conspicuity, Manual), kept even on an aircraft the user tracks
+    void SetSquawk(EuroScopePlugIn::CFlightPlan& fp, std::string code, bool byHand, bool chosen = false) {
         kwiq::squawk::Aircraft a;
         SquawkFacts(fp, a);
-        if (kwiq::squawk::Stored* st = SquawkStore(a)) kwiq::squawk::CodeSet(*st, code, byHand);
+        if (kwiq::squawk::Stored* st = SquawkStore(a)) kwiq::squawk::CodeSet(*st, code, byHand, chosen);
         fp.GetControllerAssignedData().SetSquawk(code.c_str());
     }
     void SquawkQueue(SqJob job) {
@@ -1352,7 +1358,7 @@ private:
         job.network = SquawkNetwork();
         job.previous = a.squawk;
         job.manual = true;
-        SetSquawk(fp, code, true);
+        SetSquawk(fp, code, true, true);
         SquawkQueue(std::move(job));
     }
 
@@ -1370,7 +1376,7 @@ private:
             switch (Decide(u, a, s, codes)) {
             case Action::Previous: SquawkRequest(fp, a, true, false, s->byHand ? s->squawk : ""); break;
             case Action::Assign:   SquawkRequest(fp, a, !ForceNeeded(s, a), false); break;
-            case Action::Assumed:  SquawkRequest(fp, a, false, false); break;    // a new code, never one Core holds
+            case Action::Tracked:  SquawkRequest(fp, a, false, false); break;    // a new code, never one Core holds
             case Action::None:     break;
             }
         }
@@ -1378,8 +1384,7 @@ private:
     kwiq::squawk::Stored* SquawkStore(const kwiq::squawk::Aircraft& a) {
         if (a.callsign.empty()) return nullptr;
         kwiq::squawk::Stored& st = sqStored_[a.callsign];
-        auto codes = SquawkCodes();
-        kwiq::squawk::Remember(st, a, codes.get());
+        kwiq::squawk::Remember(st, a);
         return &st;
     }
 
@@ -1408,12 +1413,7 @@ private:
         for (auto fp = FlightPlanSelectFirst(); fp.IsValid(); fp = FlightPlanSelectNext(fp)) {
             const char* tracker = fp.GetTrackingControllerCallsign();
             if (kwiq::squawk::HasCode(*codes, fp.GetControllerAssignedData().GetSquawk()) ||
-                (tracker && *tracker && !fp.GetTrackingControllerIsMe())) {
-                kwiq::squawk::Aircraft a;                           // still note who tracks it, so an assume is seen
-                SquawkFacts(fp, a);
-                SquawkStore(a);
-                continue;
-            }
+                (tracker && *tracker && !fp.GetTrackingControllerIsMe())) continue;
             SquawkAttempt(fp, u, *codes, now);
         }
     }
