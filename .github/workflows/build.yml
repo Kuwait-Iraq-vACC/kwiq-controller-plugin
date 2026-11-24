@@ -70,13 +70,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Logic tests
         run: |
-          g++ -std=c++17 -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic
+          g++ -std=c++17 -Wall -Wextra -pthread -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic
           ./test_logic
       # The same tests with AddressSanitizer and UndefinedBehaviorSanitizer: an out-of-bounds read, an overflow or
       # other undefined behaviour in the pure logic fails the build
       - name: Logic tests (sanitizers)
         run: |
-          g++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer \
+          g++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -pthread \
             -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic_san
           ./test_logic_san
 

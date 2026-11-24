@@ -12,6 +12,7 @@
 // The drawing, the random offsets, the channel matching and the AFV hidden windows are RDF's, unchanged.
 
 #include "rdf.hpp"
+#include <deque>
 #include <atomic>
 #include <cmath>
 #include <map>
@@ -113,6 +114,11 @@ struct KwiqRdf::Impl {
     std::atomic<std::time_t> afvSeenAt{ 0 };
     std::mutex mtxInfo;
     std::vector<std::pair<std::string, bool>> pending;   // messages for the main thread
+    // TrackAudio's messages, parsed on the WebSocket's thread and handled on EuroScope's (Pump): the EuroScope
+    // API isn't thread-safe (#80). At most QUEUE_MAX waiting; the oldest go first.
+    static constexpr size_t QUEUE_MAX = 1000;
+    std::mutex mtxQueue;
+    std::deque<std::pair<std::string, nlohmann::json>> queue;
 
     // main thread only
     bool wasLoggedOn = false, toldMissing = false;
@@ -216,10 +222,10 @@ struct KwiqRdf::Impl {
     }
 
     // ---- TrackAudio messages (RDF's TrackAudio*Handler) ---------------------------------------
-    // These run on the WebSocket's thread and call the EuroScope API (ControllerMyself, RadarTargetSelect, the
-    // voice channels), as upstream RDF does in the same handlers; kept as it is. Locks are always taken in
-    // the order mtxTransmission, mtxTxFrequencies, mtxSettings. CKWIQPlugin stops the socket before it is
-    // destroyed (Stop), so these never run on a plugin that has gone.
+    // These call the EuroScope API (ControllerMyself, RadarTargetSelect, the voice channels), so they run on
+    // EuroScope's thread, from Pump (#80); upstream RDF runs them on the WebSocket's thread. The WebSocket's thread
+    // only parses and queues (MessageHandler). Locks are always taken in the order mtxTransmission,
+    // mtxTxFrequencies, mtxSettings.
     void TransmissionHandler(const nlohmann::json& data, bool rxEnd) {
         std::unique_lock<std::shared_mutex> t(mtxTransmission);
         std::string callsign = data.at("callsign");
@@ -256,11 +262,10 @@ struct KwiqRdf::Impl {
             if (msg->type == ix::WebSocketMessageType::Message) {
                 auto data = nlohmann::json::parse(msg->str);
                 std::string type = data["type"];
-                nlohmann::json value = data["value"];
-                if (type == "kRxBegin") TransmissionHandler(value, false);
-                else if (type == "kRxEnd") TransmissionHandler(value, true);
-                else if (type == "kStationStateUpdate") StationStateUpdateHandler(value);
-                else if (type == "kStationStates") StationStatesHandler(value);
+                if (type != "kRxBegin" && type != "kRxEnd" && type != "kStationStateUpdate" && type != "kStationStates") return;
+                std::lock_guard<std::mutex> g(mtxQueue);
+                if (queue.size() >= QUEUE_MAX) queue.pop_front();
+                queue.emplace_back(std::move(type), std::move(data["value"]));
             } else if (msg->type == ix::WebSocketMessageType::Open) {
                 wsOpen = true;
                 std::string addr;
@@ -271,6 +276,20 @@ struct KwiqRdf::Impl {
                 if (was) Say("RDF: TrackAudio disconnected.", true);
             }
         } catch (...) {}
+    }
+
+    // Main thread: handle what TrackAudio sent since the last time
+    void Pump() {
+        std::deque<std::pair<std::string, nlohmann::json>> todo;
+        { std::lock_guard<std::mutex> g(mtxQueue); todo.swap(queue); }
+        for (const auto& m : todo) {
+            try {
+                if (m.first == "kRxBegin") TransmissionHandler(m.second, false);
+                else if (m.first == "kRxEnd") TransmissionHandler(m.second, true);
+                else if (m.first == "kStationStateUpdate") StationStateUpdateHandler(m.second);
+                else if (m.first == "kStationStates") StationStatesHandler(m.second);
+            } catch (...) {}                            // one bad message never stops the rest
+        }
     }
 
     // ---- EuroScope voice channels (RDF's SelectGroundToAirChannel / UpdateChannel / ToggleChannel) ----
@@ -363,6 +382,7 @@ void KwiqRdf::Stop() {
     if (!d_->started) return;
     d_->started = false;
     d_->socketTrackAudio.stop();                     // returns once the WebSocket's thread has ended
+    { std::lock_guard<std::mutex> g(d_->mtxQueue); d_->queue.clear(); }
     if (d_->hiddenWindowRDF) { DestroyWindow(d_->hiddenWindowRDF); d_->hiddenWindowRDF = nullptr; }
     if (d_->hiddenWindowAFV) { DestroyWindow(d_->hiddenWindowAFV); d_->hiddenWindowAFV = nullptr; }
     HINSTANCE exe = GetModuleHandleA(nullptr);
@@ -418,8 +438,13 @@ void KwiqRdf::SetEndpoint(const std::string& hostPort) {
     d_->endpointChanged = true;                      // reconnected on the main thread (Tick)
 }
 
+void KwiqRdf::Pump() {
+    if (d_->started) d_->Pump();
+}
+
 void KwiqRdf::Tick(std::time_t now, const std::string& callsign, bool loggedOn,
                    const std::function<void(const std::string&, bool)>& msg) {
+    Pump();
     {
         std::unique_lock<std::shared_mutex> g(d_->mtxSettings);
         if (callsign != d_->forCallsign) { d_->forCallsign = callsign; d_->cur = kwiq::RdfFor(d_->rows, callsign); }

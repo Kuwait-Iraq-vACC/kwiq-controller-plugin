@@ -13,6 +13,7 @@
 //   * Nothing is shown or logged when Discord isn't running or installed.
 
 #include "discord.hpp"
+#include "kwiq_log.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <mutex>
@@ -37,6 +38,7 @@ struct KwiqDiscord::Impl {
     unsigned roll = 0;
     std::set<std::string> tracked;                  // aircraft tracked this logon ({total_tracked})
     std::string lastSent;
+    std::string lastLogged;                         // the plugin's log: the presence without its numbers
     std::time_t lastSentAt = 0;
     std::mt19937 rng{ std::random_device{}() };
 
@@ -74,9 +76,15 @@ void KwiqDiscord::Tick(std::time_t now, const std::string& eventName) {
         cfgNow = d.cfg; coreOn = d.coreOn; changed = d.cfgChanged; d.cfgChanged = false;
     }
     const kwiq::DiscordConfig& cfg = *cfgNow;
-    if (!coreOn || !d.localOn || cfg.appId.empty()) { d.Stop(); return; }
+    if (!coreOn || !d.localOn || cfg.appId.empty()) {
+        if (d.initialised)
+            kwiq::log::Write("DISCORD", { { "stop", !coreOn ? "core-off" : !d.localOn ? "local-off" : "no-app" } });
+        d.Stop();
+        return;
+    }
     if (d.initialised && cfg.appId != d.appId) d.Stop();
     if (!d.initialised) {
+        kwiq::log::Write("DISCORD", { { "start", "1" }, { "event", eventName } });
         DiscordEventHandlers handlers = {};
         Discord_Initialize(cfg.appId.c_str(), &handlers, 0, nullptr);
         d.initialised = true;
@@ -167,6 +175,14 @@ void KwiqDiscord::Tick(std::time_t now, const std::string& eventName) {
     // Send only when something changed (or every 15 s), and let discord-rpc do its work every second
     std::string key = details + "\x1f" + stateText + "\x1f" + largeKey + "\x1f" + largeText + "\x1f" + smallKey + "\x1f" +
                       smallText + "\x1f" + labels[0] + urls[0] + labels[1] + urls[1] + "\x1f" + std::to_string(d.startedAt);
+    // In the plugin's log only when it changes other than its counts ({total_inrange} ... change all the time)
+    std::string shape = key;
+    shape.erase(std::remove_if(shape.begin(), shape.end(), [](char c) { return c >= '0' && c <= '9'; }), shape.end());
+    if (shape != d.lastLogged) {
+        d.lastLogged = shape;
+        kwiq::log::Write("DISCORD", { { "presence", "1" }, { "details", details }, { "state", stateText }, { "large", largeText },
+                                      { "small", smallText }, { "event", eventName } });
+    }
     if (key != d.lastSent || now - d.lastSentAt >= 15) {
         DiscordRichPresence p = {};
         p.details = details.c_str();

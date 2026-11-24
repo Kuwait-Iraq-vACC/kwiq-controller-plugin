@@ -1,9 +1,14 @@
-// Logic tests: g++ -std=c++17 -Wall -Wextra -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic && ./test_logic
+// Logic tests: g++ -std=c++17 -Wall -Wextra -pthread -Isrc/utils -Isrc/plugin test/test_logic.cpp -o test_logic && ./test_logic
 #include "kwiq_logic.hpp"
 #include "version.h"
 #include "fpc/fpc_logic.hpp"
 #include "squawk/squawk_logic.hpp"
 #include "ownership/ownership_logic.hpp"
+#include "kwiq_log.hpp"
+#include <filesystem>
+#include <fstream>
+#include <atomic>
+#include <thread>
 using namespace kwiq;
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -111,6 +116,9 @@ int main() {
     CHECK(CheckEventRoute(ev, "OTHH", "OKBK", "DCT", D) == RouteResult::None);
     CHECK(CheckEventRoute(ev, "OTHH", "OKBK", "DCT", D2) == RouteResult::Ok);
     CHECK(RoutesForDate(ev, D).size() == 2 && RoutesForDate(ev, D2).size() == 1);
+    CHECK(EventNameForDate(ev, D) == ev.name && !ev.name.empty() && EventNameForDate(ev, "2099-01-01").empty());
+    CHECK(EventNameForDate(EventData{}, D).empty());
+    CHECK(EventNameForDate(ParseCoreEvent("EVENT|Baghdad Overload|\n"), D) == "Baghdad Overload");   // no routes: still on
     CHECK(EventRouteAirports(RoutesForDate(ev, D)[0]) == RoutesForDate(ev, D)[0].adep + " -> " + RoutesForDate(ev, D)[0].ades);
     {
         EventRoute er;
@@ -193,7 +201,9 @@ int main() {
     CHECK(FindFirExit(two, dup).external == "DUP" && FindFirExit(two, dup).internal.empty());
     CHECK(ExitConeFor(two["BOUND"], 135) == nullptr && ExitConeFor(two["BOUND"], 0) != nullptr && !ExitConeFor(two["BOUND"], 0)->internal);
     CHECK(Domestic("OKBK", "OK,OR") && Domestic("orbi", "OK, OR") && !Domestic("LTBA", "OK,OR"));
-    CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "ROTAP");
+    CHECK(SrdEnd("ORBI", "OK,OR", nx) == "ORBI" && SrdEnd("LTBA", "OK,OR", nx) == "SIDAD");   // the first exit, as the FPC
+    CHECK(SrdEnd("OMDB", "OK,OR", AircraftExit{ "SIDAD", "RABAP" }) == "SIDAD");   // ORBI BGD DCT NOLDO P975 SESRU: not RABAP
+    CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "", "ROTAP" }) == "ROTAP");
     CHECK(SrdEnd("ORSJ", "OK,OR", nx) == "ORSJ");                  // an OR/OK destination is internal: shown as itself
     CHECK(SrdEnd("LTBA", "OK,OR", AircraftExit{ "SIDAD", "" }) == "SIDAD" && SrdEnd("LTBA", "OK,OR", {}) == "");
 
@@ -434,6 +444,20 @@ int main() {
           std::string(SectorColourName(2)) == "information" && std::string(SectorColourName(3)) == "transfer_to_me_initiated" &&
           std::string(SectorColourName(4)) == "assumed" && std::string(SectorColourName(5)) == "assumed" &&
           std::string(SectorColourName(7)) == "redundant" && std::string(SectorColourName(42)) == "non_concerned");
+    // ... read from the profile's Symbology file first
+    {
+        auto sym = ParseSymbologyColours("SYMBOLOGY\r\nSYMBOLSIZE\r\nAirports:symbol:9474192:0.1:0:0:7\r\n"
+                                         "Datablock:non concerned:9474192:3.5:0:0:7\r\nDatablock:assumed:65280:3.5:0:0:7\r\n"
+                                         "Datablock:transfer to me initiated:16777215:3.5:0:0:7\r\nDatablock:notified:x:3.5\r\n"
+                                         "Datablock:redundant:99999999999:3.5\r\nDatablock::5\r\nDatablock:information\r\n");
+        CHECK(sym.size() == 3 && sym["non_concerned"] == 9474192 && sym["assumed"] == 65280 &&
+              sym["transfer_to_me_initiated"] == 16777215 && !sym.count("symbol") && !sym.count("notified"));
+        CHECK(ParseSymbologyColours("").empty());
+        std::string prf = "Settings\tSettingsfileSYMBOLOGY\t\\ORBB\\Settings\\Symbology.txt\r\nSettings\tsector\t\\x.sct\r\n";
+        CHECK(PrfSymbologyPath(prf, "C:\\ES\\ORBB-2610\\ORBB_CTR.prf") == "C:\\ES\\ORBB-2610\\ORBB\\Settings\\Symbology.txt");
+        CHECK(PrfSymbologyPath("Settings\tSettingsfileSYMBOLOGY\tD:\\S\\Sym.txt\n", "C:\\a.prf") == "D:\\S\\Sym.txt");
+        CHECK(PrfSymbologyPath("Settings\tsector\t\\x.sct\n", "C:\\a.prf").empty() && PrfSymbologyPath("", "").empty());
+    }
 
 
     // Core config
@@ -570,16 +594,17 @@ int main() {
         Stored same{ "OKBK", "OMDB", "4521", false, 0 }, moved{ "OKBK", "OTHH", "4521", false, 0 };
         CHECK(Decide(twr, gnd, &same, codes) == Action::Previous);         // reconnected: same code back
         CHECK(ForceNeeded(&moved, gnd) && Decide(twr, gnd, &moved, codes) == Action::Assign);
-        Stored byHand{ "OKBK", "OMDB", "2000", true, 0 };           // set to 2000 by hand: left alone
+        Stored byHand{ "OKBK", "OMDB", "2000", true, 0 };           // a code that doesn't count is replaced, even by hand
         a = gnd; a.squawk = "2000";
-        CHECK(Decide(twr, a, &byHand, codes) == Action::None);
-        byHand.destination = "OTHH";                                // until the plan changes
         CHECK(Decide(twr, a, &byHand, codes) == Action::Assign);
+        Stored realByHand{ "OKBK", "OMDB", "4521", true, 0 };       // a real code by hand: kept
+        a = gnd; a.squawk = "4521";
+        CHECK(Decide(twr, a, &realByHand, codes) == Action::None);
 
         Aircraft trk = gnd;                                         // tracked by the user, airborne, far away
         trk.tracked = trk.trackedByMe = true; trk.deliveryByMe = false;
         trk.groundSpeed = 450; trk.fromOrigin = 120; trk.altitude = 30000;
-        CHECK(Decide(ctr, trk, nullptr, codes) == Action::Assign);
+        CHECK(Decide(ctr, trk, nullptr, codes) == Action::Tracked);
 
         Aircraft other = gnd; other.tracked = true;
         CHECK(ChangeAllowed(twr, gnd) && !ChangeAllowed(twr, other) && !ChangeAllowed(obs, gnd));
@@ -616,12 +641,14 @@ int main() {
         // a code from the menu is by hand, and so is one typed in EuroScope (or set on another scope)
         CodeSeen(st, "4523", codes, false);                                       // the plugin's own: nothing changes
         CHECK(!st.byHand);
-        CodeSeen(st, "2000", codes, false);
-        CHECK(st.byHand && st.squawk == "2000");
+        CodeSeen(st, "2000", codes, false);                         // a code that doesn't count: never by hand
+        CHECK(!st.byHand && st.squawk == "4523");
         a = v; a.squawk = "2000";
-        CHECK(Decide(twr, a, &st, codes) == Action::None);          // not replaced every 5 seconds
+        CHECK(Decide(twr, a, &st, codes) == Action::Previous);      // replaced: by the code Core holds for this plan
+        CodeSeen(st, "4524", codes, false);                         // a real code typed in EuroScope: by hand
+        CHECK(st.byHand && st.squawk == "4524");
         CodeSeen(st, "", codes, false); CodeSeen(st, "99", codes, false);                       // cleared or invalid: ignored
-        CHECK(st.squawk == "2000" && st.byHand);
+        CHECK(st.squawk == "4524" && st.byHand);
         Stored gone{ "OKBK", "OMDB", "4521", false, 100 };          // disconnected: the code to give back is kept
         CodeSeen(gone, "1234", codes, false);
         CHECK(gone.squawk == "4521" && !gone.byHand);
@@ -631,7 +658,8 @@ int main() {
         CHECK(AnswerWanted(false, twr, gnd, nullptr, codes));
         a = gnd; a.squawk = "4521";                                 // someone set a code meanwhile
         CHECK(!AnswerWanted(false, twr, a, nullptr, codes) && AnswerWanted(true, twr, a, nullptr, codes));
-        CHECK(!AnswerWanted(false, twr, gnd, &st, codes));          // set by hand meanwhile (st.byHand)
+        a = gnd; a.squawk = "2000";                                 // 2000 typed meanwhile: still replaced
+        CHECK(AnswerWanted(false, twr, a, &st, codes));
         CHECK(!AnswerWanted(false, twr, other, nullptr, codes) && !AnswerWanted(true, twr, other, nullptr, codes));
         CHECK(!AnswerWanted(true, obs, gnd, nullptr, codes));
 
@@ -659,38 +687,51 @@ int main() {
         CodeSeen(sp, "4521", codes, true);                          // a real code still is
         CHECK(sp.byHand && sp.squawk == "4521");
 
-        // assumed on a non-assignable code (KAC792 on 2000): always a new code from Core
+        // airborne, nobody tracking it (uncorrelated, or in the procedural area): nothing until it is assumed
+        Aircraft entering = gnd; entering.deliveryByMe = false; entering.squawk = "2000";
+        entering.groundSpeed = 420; entering.fromOrigin = 150; entering.altitude = 24000;
+        CHECK(Decide(ctr, entering, nullptr, codes) == Action::None);
+        a = entering; a.tracked = a.trackedByMe = true;             // assumed: a new code, wherever it is
+        CHECK(Decide(ctr, a, nullptr, codes) == Action::Tracked);
+        a = entering; a.tracked = true;                             // someone else's
+        CHECK(Decide(ctr, a, nullptr, codes) == Action::None);
+
+        // live: a pilot-client or network default (1200, 2200, 0 ...) seen on a plan is no controller's choice, so it
+        // never stops automatic assignment, and neither does a conspicuity code (2000)
+        Stored net; Remember(net, gnd);
+        CodeSeen(net, "2200", codes, false);
+        a = gnd; a.squawk = "2200";
+        CHECK(!net.byHand && Decide(twr, a, &net, codes) == Action::Assign);
+        CodeSeen(net, "1200", codes, false);
+        CHECK(!net.byHand);
+        CodeSeen(net, "2000", codes, false);
+        CHECK(!net.byHand);
+        // tracked by the user with no code (KAC792 assumed on 2000): always a new code from Core
         Aircraft kac = gnd; kac.callsign = "KAC792"; kac.deliveryByMe = false;
         kac.groundSpeed = 300; kac.fromOrigin = 40; kac.altitude = 15000;
-        Stored ks; Remember(ks, kac);                               // untracked: nothing
-        CodeSeen(ks, "2000", codes, false);                         // 2000 set by someone earlier: by hand
+        Stored ks; Remember(ks, kac);
+        CodeSeen(ks, "2000", codes, false);                         // 2000 set by someone earlier: not by hand
         kac.squawk = "2000";
-        CHECK(ks.byHand && !ks.assumed && Decide(ctr, kac, &ks, codes) == Action::None);
-        kac.tracked = kac.trackedByMe = true;                       // the user assumes it
-        Remember(ks, kac);
-        CHECK(ks.assumed && Decide(ctr, kac, &ks, codes) == Action::Assumed);   // by hand doesn't stop it
+        CHECK(!ks.byHand && Decide(ctr, kac, &ks, codes) == Action::None);   // untracked and airborne: left alone
+        kac.tracked = kac.trackedByMe = true;                       // the user tracks it
+        CHECK(Decide(ctr, kac, &ks, codes) == Action::Tracked);
         Aircraft held = kac; held.squawk = HOLDING_SQUAWK;          // Core answers: still wanted
         CHECK(AnswerWanted(false, ctr, held, &ks, codes));
-        Remember(ks, held);                                         // later looks while waiting: still assumed
-        CHECK(ks.assumed);
-        CodeSet(ks, "4521", false);
-        CHECK(!ks.assumed);
-        kac.squawk = "";                                            // blank, a reconnect's code stored: still a new one
+        CodeSeen(ks, "1200", codes, false);                         // typed again while tracked: still replaced
+        CHECK(Decide(ctr, kac, &ks, codes) == Action::Tracked);
+        kac.squawk = "";                                            // blank, a reconnect's code stored: a new one
         Stored kr{ "OKBK", "OMDB", "4521", false, 0 }; Remember(kr, kac);
-        CHECK(Decide(ctr, kac, &kr, codes) == Action::Assumed);
-        kac.squawk = "4521"; Stored kd; kd.mine = false; Remember(kd, kac);   // assumed with a real code: kept
-        CHECK(Decide(ctr, kac, &kd, codes) == Action::None);
-        Stored kt; Remember(kt, kac, &codes);                      // assumed with a real code, with Core's list
-        CHECK(!kt.assumed);
-        Aircraft typed = kac; typed.squawk = "";
-        Stored ky; Remember(ky, typed);
-        CHECK(ky.assumed);
-        CodeSeen(ky, "2000", codes, false);                         // the user typed 2000 after assuming: kept
-        typed.squawk = "2000";
-        CHECK(!ky.assumed && Decide(ctr, typed, &ky, codes) == Action::None);
-        Aircraft gone2 = kac; gone2.tracked = gone2.trackedByMe = false;      // released again: no longer assumed
-        Remember(kd, gone2);
-        CHECK(!kd.assumed);
+        CHECK(Decide(ctr, kac, &kr, codes) == Action::Tracked);
+        kac.squawk = "4521";                                        // a real code: kept
+        CHECK(Decide(ctr, kac, &kr, codes) == Action::None);
+        // a code that doesn't count is replaced even when set from the menu (Manual), and even while Core answers
+        Stored km; Remember(km, kac); CodeSet(km, "2000", true);
+        kac.squawk = "2000";
+        CHECK(Decide(ctr, kac, &km, codes) == Action::Tracked);
+        held.squawk = HOLDING_SQUAWK;
+        CHECK(AnswerWanted(false, ctr, held, &km, codes));
+        Aircraft typed = kac; typed.squawk = "4521";                // a real code typed meanwhile: kept
+        CHECK(!AnswerWanted(false, ctr, typed, &km, codes));
         // Core's list without 2000: 2000, 7000 and the holding code still never count, and Core can't give them
         CodeList thin = ParseNonAssignable("NONASSIGNABLE|7700|7700|emergency|1|Mayday\n");
         CHECK(HasCode(thin, "2000") && ParseSquawk("SQUAWK|2000", thin) == "2000");
@@ -1018,6 +1059,181 @@ int main() {
         // version.h's own version is SemVer
         CHECK(ParseVersion(KWIQ_VERSION).valid && ParseVersion(KWIQ_VERSION).numbers == 3);
         CHECK(RunningVersion(KWIQ_VERSION).pre.size() == ParseVersion(KWIQ_VERSION).pre.size());   // not read as a test build
+    }
+
+    // the squawk decision's name in the plugin's log
+    CHECK(std::string(squawk::ActionName(squawk::Action::Tracked)) == "tracked" && std::string(squawk::ActionName(squawk::Action::None)) == "none");
+    CHECK(std::string(squawk::ActionName(squawk::Action::Previous)) == "previous" && std::string(squawk::ActionName(squawk::Action::Assign)) == "assign");
+    // ---- the plugin's own log (kwiq_log.hpp): line format, file names, pruning, safe URLs ----
+    {
+        using namespace kwiq::log;
+        std::tm t{}; t.tm_year = 126; t.tm_mon = 10; t.tm_mday = 24; t.tm_hour = 20; t.tm_min = 14; t.tm_sec = 5;
+        CHECK(FormatLine(t, 7, "SQUAWK", { { "cs", "RJA812" }, { "code", "0725" } }, "") == "20:14:05.007 SQUAWK cs=RJA812 code=0725");
+        CHECK(FormatLine(t, 123, "MSG", { { "err", "1" } }, "Core said\r\nno") == "20:14:05.123 MSG err=1 | Core said\\r\\nno");
+        CHECK(Value("a b") == "\"a b\"" && Value("x=y") == "\"x=y\"" && Value("a|b") == "\"a|b\"" && Value("") == "\"\"");
+        CHECK(Value("say \"hi\"") == "\"say \\\"hi\\\"\"" && Value("OK") == "OK" && Value("a\nb") == "a\\nb");
+        // one rule for a parser: a value with a backslash is quoted, and the backslash doubled
+        CHECK(Value("C:\\new\\x") == "\"C:\\\\new\\\\x\"");
+        CHECK(FileName(t) == "KWIQPlugin-20261124.log" && IsLogFile("KWIQPlugin-20261124.log"));
+        CHECK(!IsLogFile("KWIQPlugin.dll") && !IsLogFile("KWIQPlugin-2026112.log") && !IsLogFile("KWIQPlugin-2026112x.log"));
+        CHECK(Expired("KWIQPlugin-20261116.log", t, 7) && !Expired("KWIQPlugin-20261117.log", t, 7));
+        CHECK(Expired("KWIQPlugin-20251231.log", t, 7) && !Expired("KWIQPlugin.dll", t, 7) && !Expired("KWIQPlugin-20261124.log", t, 7));
+        CHECK(SafeUrl("https://core/api/plugin/squawk/RJA812?network=vatsim") == "https://core/api/plugin/squawk/RJA812");
+        CHECK(SafeUrl("https://core/api/plugin/claim/AB12CD") == "https://core/api/plugin/claim/***");
+        CHECK(SafeUrl("https://core/api/plugin/claim/AB12/x#f") == "https://core/api/plugin/claim/***/x" && SafeUrl("") == "");
+        Changes c;
+        CHECK(c.Changed("FPC RJA812", "OK") && !c.Changed("FPC RJA812", "OK") && c.Changed("FPC RJA812", "CHK"));
+        c.Forget("FPC RJA812");
+        CHECK(c.Changed("FPC RJA812", "CHK"));
+    }
+
+    // ---- the log's writer: daily files, the 20 MB cap, a fallback folder, a queue that never blocks ----
+    {
+        using namespace kwiq::log;
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "kwiq_log_test";
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root);
+        auto lines = [](const fs::path& f) {
+            std::vector<std::string> out; std::ifstream in(f); std::string l;
+            while (std::getline(in, l)) out.push_back(l);
+            return out;
+        };
+        auto at = [](int y, int mo, int d, int h, int mi, int sec, int ms) {
+            long days = DaysFromCivil(y, mo, d);
+            return std::chrono::system_clock::time_point(std::chrono::seconds((long long)days * 86400 + h * 3600 + mi * 60 + sec)) +
+                   std::chrono::milliseconds(ms);
+        };
+        auto now = std::make_shared<std::chrono::system_clock::time_point>(at(2026, 11, 24, 20, 14, 5, 7));
+        Writer::Clock clock = [now] { return *now; };
+        const fs::path d1 = root / "dll";
+        fs::create_directories(d1);
+        {   // writer_writes_line
+            Writer w(clock);
+            CHECK(w.Start({ d1.string() }));
+            CHECK(w.Dir() == d1.string());
+            w.Write("START", { { "v", "0.7.6" } });
+            w.Stop();
+            w.Stop();                                                       // twice: fine
+            auto l = lines(d1 / "KWIQPlugin-20261124.log");
+            CHECK(l.size() == 1 && l[0] == "20:14:05.007 START v=0.7.6");
+        }
+        {   // writer_falls_back: a folder under a regular file can't be made; the next one is used
+            std::ofstream(root / "afile") << "x";
+            const fs::path fb = root / "fb";
+            Writer w(clock);
+            CHECK(w.Start({ (root / "afile" / "deep").string(), fb.string() }) && w.Dir() == fb.string());
+            w.Stop();
+            Writer none(clock);
+            CHECK(!none.Start({ (root / "afile" / "deep").string() }) && none.Dir().empty());
+            none.Write("MSG", {}, "nothing");                               // no folder: nothing, no throw
+            none.Stop();
+        }
+        {   // writer_prunes: only log files older than 7 days
+            const fs::path d = root / "prune";
+            fs::create_directories(d);
+            for (const char* n : { "KWIQPlugin-20261101.log", "KWIQPlugin-20261120.log", "other.log" }) std::ofstream(d / n) << "x\n";
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            w.Stop();
+            CHECK(!fs::exists(d / "KWIQPlugin-20261101.log") && fs::exists(d / "KWIQPlugin-20261120.log") && fs::exists(d / "other.log"));
+        }
+        {   // writer_rollover: a new UTC day, a new file
+            const fs::path d = root / "roll";
+            fs::create_directories(d);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            *now = at(2026, 11, 24, 23, 59, 59, 0);
+            w.Write("A", {});
+            *now = at(2026, 11, 25, 0, 0, 1, 0);
+            w.Write("B", {});
+            w.Stop();
+            CHECK(lines(d / "KWIQPlugin-20261124.log") == std::vector<std::string>({ "23:59:59.000 A" }));
+            CHECK(lines(d / "KWIQPlugin-20261125.log") == std::vector<std::string>({ "00:00:01.000 B" }));
+        }
+        {   // writer_cap: full for the day, one line saying so, then the next day writes again
+            const fs::path d = root / "cap";
+            fs::create_directories(d);
+            *now = at(2026, 11, 24, 10, 0, 0, 0);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }, 7, 100));
+            for (int i = 0; i < 5; i++) w.Write("SQUAWK", { { "pad", std::string(17, 'x') } });   // 40 bytes a line
+            *now = at(2026, 11, 25, 10, 0, 0, 0);
+            w.Write("NEXT", {});
+            w.Stop();
+            auto l = lines(d / "KWIQPlugin-20261124.log");
+            CHECK(l.size() == 3 && l[2] == "10:00:00.000 LOG cap=20MB | log full for today");
+            CHECK(lines(d / "KWIQPlugin-20261125.log").size() == 1);
+        }
+        {   // writer_queue_full: lines are dropped and counted, never waited for
+            const fs::path d = root / "queue";
+            fs::create_directories(d);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }, 7, 20u << 20, 2));
+            w.Hold(true);
+            for (int i = 0; i < 5; i++) w.Write("X", { { "i", std::to_string(i) } });
+            CHECK(w.Dropped() >= 3);
+            w.Hold(false);
+            w.Stop();
+            auto l = lines(d / "KWIQPlugin-20261125.log");
+            bool said = false;
+            for (auto& x : l) if (x.find("LOG dropped=") != std::string::npos) said = true;
+            CHECK(said && l.size() == 3);
+            CHECK(l.back().find("LOG dropped=3") != std::string::npos);   // after the lines queued before the drops
+        }
+        {   // writer_stop_flushes
+            const fs::path d = root / "flush";
+            fs::create_directories(d);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            for (int i = 0; i < 1000; i++) w.Write("X", { { "i", std::to_string(i) } });
+            w.Stop();
+            CHECK(lines(d / "KWIQPlugin-20261125.log").size() == 1000);
+        }
+        {   // final review 1: starting the log can never throw out into the plugin's constructor
+            Writer w(clock);
+            static_assert(noexcept(w.Start({})), "Writer::Start must not throw");
+        }
+        {   // final review 2: a day's file that can't be opened (locked) loses lines, counted and said once it can
+            const fs::path d = root / "locked";
+            fs::create_directories(d);
+            *now = at(2026, 11, 26, 9, 0, 0, 0);
+            fs::create_directories(d / "KWIQPlugin-20261126.log");   // a folder in its place: can't be opened
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            w.Write("A", {});
+            w.Write("B", {});
+            for (int i = 0; i < 200 && w.Dropped() < 2; i++) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            CHECK(w.Dropped() == 2);
+            fs::remove_all(d / "KWIQPlugin-20261126.log");
+            w.Write("C", {});
+            w.Stop();
+            auto l = lines(d / "KWIQPlugin-20261126.log");
+            CHECK(l.size() == 2 && l[0] == "09:00:00.000 LOG dropped=2" && l[1] == "09:00:00.000 C");
+        }
+        // final review 3: never the API key in a command line, however it is typed
+        CHECK(SafeCommand(".kwiq key kwiq_abc123") == ".kwiq key ***");
+        CHECK(SafeCommand(".kwiq  key\tkwiq_abc123") == ".kwiq key ***");
+        CHECK(SafeCommand(".kwiq keys KWIQ_abc123") == ".kwiq keys ***");
+        CHECK(SafeCommand(".kwiqkey kwiq_abc") == ".kwiqkey ***" && SafeCommand(".kwiq connect kwiq_x") == ".kwiq connect ***");
+        CHECK(SafeCommand(".kwiq key abc123") == ".kwiq key ***" && SafeCommand(".kwiq key") == ".kwiq key");
+        CHECK(SafeCommand(".kwiq squawk") == ".kwiq squawk" && SafeCommand(".kwiq qnh ORBI") == ".kwiq qnh ORBI");
+        {   // Write racing Stop from another thread (a worker logging a request as the plugin unloads): no race
+            const fs::path d = root / "race";
+            fs::create_directories(d);
+            Writer w(clock);
+            CHECK(w.Start({ d.string() }));
+            std::atomic<bool> go{ true };
+            std::thread t([&] { while (go) w.Write("CORE", { { "x", "1" } }); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            w.Stop();
+            go = false;
+            t.join();
+            w.Write("CORE", {});                                            // after Stop: nothing, no throw
+        }
+        kwiq::log::Write("MSG", {}, "the global log isn't started: nothing");   // never throws
+        fs::remove_all(root, ec);
     }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);

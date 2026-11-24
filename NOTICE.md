@@ -33,13 +33,14 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - Codes come from Core (`/api/plugin/squawk-assignment/<callsign>`) instead of the UKCP API. Requests are form fields and answers are plain text (`SQUAWK|<code>`), like the rest of Core's plugin API.
 - UKCP's general and local code types are one request: Core picks the range from the requesting controller's FIR, the departure, the destination and the flight rules. The UK's circuit code and local codes are gone.
 - No code is built in: the codes never assigned, and which of them count as a code the aircraft has (UKCP's `HasAssignedSquawk`), come from Core's `/squawk/non-assignable`.
-- UKCP's conspicuity option is Conspicuity, with the codes (2000, 7000 for VFR) set in Core, and its general recycle is Assign. The holding code 7000 is shown while Core is asked, as in UKCP, but is never taken as a code; a failed Assign goes back to the old code. An aircraft Core could not give a code is not asked for again for a minute.
+- UKCP's general recycle is Assign. There is no conspicuity option: a code that doesn't count is replaced anyway; the conspicuity codes (2000, 7000 for VFR) are set in Core. The holding code 7000 is shown while Core is asked, as in UKCP, but is never taken as a code; a failed Assign goes back to the old code. An aircraft Core could not give a code is not asked for again for a minute.
 - A reconnecting aircraft's old code is not set back straight away: Core is asked first, and only a code set by hand (which Core never held) comes back without it.
 - On sweatbox, any aircraft nobody tracks gets a code, as aircraft spawn anywhere with 2000.
-- An aircraft the user assumes with no code (blank or non-assignable) always gets a new code from Core, even over a code set by hand; UKCP looks up a code its API already holds. The conspicuity codes and the holding code never count as a code, even if Core's list leaves them out.
+- An aircraft the user tracks with no code (blank or non-assignable) always gets a new code from Core, whoever set the code that doesn't count (the menu, EuroScope or another scope). UKCP looks up a code its API already holds.
+- An uncorrelated flight plan takes its speed and level from the radar target with its callsign (UKCP selects the radar target by callsign throughout). The conspicuity codes and the holding code never count as a code, even if Core's list leaves them out.
 - Who gives departures their squawk comes from Core's top-down order (`/api/plugin/topdown`) instead of UKCP's airfield ownership.
-- A reconnecting aircraft only gets its old code back if its departure, destination and flight rules are unchanged; a code set by hand is left alone until they change. A change of plan is remembered until a code is set (UKCP compares with the stored plan only at that moment), and the flight rules count as the plan, as Core picks the range from them.
-- A code typed in EuroScope, or set on another scope, counts as set by hand, like one from the menu (UKCP replaces a typed 2000 or 7000 on its next pass).
+- A reconnecting aircraft only gets its old code back if its departure, destination and flight rules are unchanged; a code that counts, set by hand, comes back if Core holds none. A change of plan is remembered until a code is set (UKCP compares with the stored plan only at that moment), and the flight rules count as the plan, as Core picks the range from them.
+- A code that counts, typed in EuroScope or set on another scope, counts as set by hand, like one from the menu. A code that doesn't count (2000, 7000 ...) is replaced whoever set it, as UKCP does on its next pass.
 - Core's answer is only set if it is still wanted: not if another controller has started tracking the aircraft, or a code was set, while the request was out (UKCP sets it regardless). A by-hand change while a request is out is refused with a message instead of being ignored.
 - Requests say whether they are from the live network or sweatbox.
 
@@ -53,6 +54,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - plog, MFC and cpp-httplib are removed (TrackAudio's version is no longer read or checked), and messages go through the plugin's chat output on the main thread.
 - The "RDF state" tag item uses ID 1006, clear of the KWIQ and VCH IDs.
 - It does not start if another RDF or afv-euroscope-bridge is loaded in the same EuroScope.
+- TrackAudio's messages are only parsed on the WebSocket's thread; the handlers, which call the EuroScope API, run on EuroScope's own thread (RDF runs them on the WebSocket's thread).
 
 ## Changes made to DiscordEuroScope
 - It is driven by `CKWIQPlugin`'s timer, instead of being a plugin of its own.

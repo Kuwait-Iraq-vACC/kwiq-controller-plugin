@@ -33,6 +33,8 @@ inline std::string KwiqDir() {
 }
 inline std::string BinDir() { std::string d = KwiqDir(); return d.empty() ? d : d + "\\bin"; }
 inline std::string SettingsDir() { std::string d = KwiqDir(); return d.empty() ? d : d + "\\settings"; }
+// The plugin log's second choice, when the folder of KWIQPlugin.dll can't be written to (kwiq_log.hpp)
+inline std::string LogsDir() { std::string d = KwiqDir(); return d.empty() ? d : d + "\\logs"; }
 inline std::string UpdaterPath() { std::string d = BinDir(); return d.empty() ? d : d + "\\KWIQPluginUpdater.dll"; }
 inline std::string CorePath() { std::string d = BinDir(); return d.empty() ? d : d + "\\KWIQPluginCore.dll"; }
 inline bool MakeDirs() {
