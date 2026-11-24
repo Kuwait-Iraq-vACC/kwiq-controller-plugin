@@ -408,7 +408,8 @@ inline bool Domestic(const std::string& airport, const std::string& prefixes) {
 // What SRD destination to use for a flight: its destination when it stays in the vACC's airspace, else the
 // first FIR exit point on its route, internal (OKAC/ORBB) or external, as the FPC checks up to (UKCP
 // SrdSearchDialog::PrepopulateSearch); empty when that is not known. An internal exit is only ever found
-// before the external one, so it is the first when there is one.
+// before the external one, so it is the first when there is one: an OKKK departure to Europe leaves OKAC at TASMI
+// (internal) before it leaves ORBB at KABAN, and OKKK's routes end at TASMI.
 inline std::string SrdEnd(const std::string& ades, const std::string& prefixes, const AircraftExit& exit) {
     if (Domestic(ades, prefixes)) return ades;
     return !exit.internal.empty() ? exit.internal : exit.external;
