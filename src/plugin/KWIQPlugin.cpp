@@ -566,10 +566,6 @@ public:
             ShowButton(!buttonShown_);
             return true;
         }
-        if (c == ".KWIQ SQUAWK WHY") {
-            SquawkExplain();
-            return true;
-        }
         if (c == ".KWIQ SQUAWK") {
             sqAuto_ = !sqAuto_;
             SaveDataToSettings("kwiq_squawk_auto", "KWIQ automatic squawk assignment", sqAuto_ ? "1" : "0");
@@ -1560,47 +1556,6 @@ private:
         if (!kwiq::squawk::ValidSquawk(code)) { Msg("\"" + code + "\" is not a squawk: four digits, 0 to 7.", true); return; }
         SquawkReplace(fp, code);
     }
-    // .kwiq squawk why: for the selected aircraft, what automatic assignment would do and the rule that decides
-    void SquawkExplain() {
-        using namespace kwiq::squawk;
-        EuroScopePlugIn::CFlightPlan fp = FlightPlanSelectASEL();
-        if (!fp.IsValid()) { Msg("Squawk why: select an aircraft first.", false); return; }
-        Aircraft a;
-        bool facts = SquawkFacts(fp, a);
-        std::string head = "Squawk " + a.callsign + " (" + (a.squawk.empty() ? std::string("no code") : a.squawk) + "): ";
-        std::time_t now = std::time(nullptr);
-        auto codes = SquawkCodes();
-        User u = SquawkUser();
-        std::string why;
-        auto retry = sqRetryAt_.find(a.callsign);
-        if (!SquawkOn()) why = "squawk assignment is " + SquawkOffWhy();
-        else if (!sqAuto_) why = "automatic assignment is off (.kwiq squawk)";
-        else if (!u.controller) why = "you are not logged on as a controller";
-        else if (!sqLoggedIn_) why = "nothing automatic through a proxy";
-        else if (now - sqLoginAt_ < LOGIN_DELAY_SECONDS) why = "nothing automatic in the first 15 seconds after logging on";
-        else if (!facts) why = "EuroScope has no radar target for it";
-        else if (!codes) why = "Core has not sent its list of codes never to assign";
-        else if (sqBusy_.count(a.callsign)) why = "waiting for Core's answer";
-        else if (retry != sqRetryAt_.end() && now < retry->second)
-            why = "Core could not give it a code; asked again in " + std::to_string(retry->second - now) + " s";
-        else {
-            auto st = sqStored_.find(a.callsign);
-            why = kwiq::squawk::Explain(u, a, st == sqStored_.end() ? nullptr : &st->second, *codes);
-        }
-        // Who provides Delivery at the departure airport, and the order it comes from
-        std::string order;
-        for (const auto& p : kwiq::ownership::TopDownOrder(ownership_.TopDown(), a.origin)) order += (order.empty() ? "" : ",") + p;
-        bool fromCore = ownership_.TopDown().count(a.origin) > 0;
-        std::string del = ownership_.Providers().DeliveryProviderForAirfield(a.origin);
-        const kwiq::ownership::ActiveCallsign* me = ownership_.Active().User();
-        std::string own = " | Delivery at " + a.origin + ": " + (del.empty() ? std::string("nobody") : del) +
-            " | top-down " + (fromCore ? "from Core: " : "(none from Core, own positions): ") + order +
-            " | you: " + (me ? me->callsign : std::string("not active (no primary frequency?)"));
-        char pos[96];
-        std::snprintf(pos, sizeof pos, " | %d kt, %.1f nm from departure, %d ft", a.groundSpeed, a.fromOrigin, a.altitude);
-        Msg(head + why + pos + own, false);
-    }
-
     // A new code from Core whether or not the aircraft has one
     void SquawkForce() {
         EuroScopePlugIn::CFlightPlan fp;

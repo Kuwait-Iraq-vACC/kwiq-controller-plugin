@@ -691,24 +691,6 @@ int main() {
         Aircraft gone2 = kac; gone2.tracked = gone2.trackedByMe = false;      // released again: no longer assumed
         Remember(kd, gone2);
         CHECK(!kd.assumed);
-        // `.kwiq squawk why`: the rule that decided, in words
-        auto has = [](const std::string& s, const char* part) { return s.find(part) != std::string::npos; };
-        CHECK(Explain(twr, gnd, nullptr, codes) == "it needs a code");
-        CHECK(has(Explain(obs, gnd, nullptr, codes), "not logged on as a controller"));
-        a = gnd; a.altitude = 0;
-        CHECK(has(Explain(twr, a, nullptr, codes), "no position"));
-        a = gnd; a.squawk = "4521";
-        CHECK(has(Explain(twr, a, nullptr, codes), "already has a code (4521)"));
-        a = gnd; a.squawk = "2000";
-        CHECK(has(Explain(twr, a, &byHand, codes), "by hand") == false);       // byHand's plan changed above: Assign
-        Stored hand{ "OKBK", "OMDB", "2000", true, 0 };
-        CHECK(has(Explain(twr, a, &hand, codes), "by hand (2000)"));
-        CHECK(has(Explain(twr, other, nullptr, codes), "another controller"));
-        a = gnd; a.deliveryByMe = false;
-        CHECK(has(Explain(twr, a, nullptr, codes), "you don't provide Delivery at OKBK") && !has(Explain(twr, a, nullptr, codes), "kt"));
-        a = gnd; a.groundSpeed = 140; a.fromOrigin = 12;
-        CHECK(has(Explain(twr, a, nullptr, codes), "140 kt") && has(Explain(twr, a, nullptr, codes), "12.0 nm from OKBK") &&
-              !has(Explain(twr, a, nullptr, codes), "Delivery at"));
         // Core's list without 2000: 2000, 7000 and the holding code still never count, and Core can't give them
         CodeList thin = ParseNonAssignable("NONASSIGNABLE|7700|7700|emergency|1|Mayday\n");
         CHECK(HasCode(thin, "2000") && ParseSquawk("SQUAWK|2000", thin) == "2000");
