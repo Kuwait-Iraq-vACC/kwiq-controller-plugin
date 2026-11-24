@@ -100,13 +100,12 @@ struct Aircraft {
 // What the plugin remembers about a flight plan, so a pilot who reconnects gets the same code back
 struct Stored {
     std::string origin, destination, squawk;
-    bool byHand = false;              // a controller set the code by hand (menu or EuroScope): leave it alone
+    bool byHand = false;              // a controller set a code that counts by hand (menu or EuroScope): given back
+                                      // on a reconnect if Core holds none
     std::time_t expires = 0;          // 0 while connected; disconnected plans are forgotten after STORED_SECONDS
     bool vfr = false;
     bool planChanged = false;         // departure, destination or rules changed since the code was set: a code
                                       // Core holds for the callsign may be for the old plan, so ask for a new one
-    bool chosen = false;              // the code was chosen in the KWIQ menu (Conspicuity, Manual): kept even when the
-                                      // user tracks the aircraft
 };
 
 constexpr int UNTRACKED_MAX_SPEED = 30;               // kt: untracked aircraft only get a code on the ground
@@ -164,55 +163,52 @@ inline bool ChangeAllowed(const User& u, const Aircraft& a) {
 
 enum class Action { None, Previous, Assign, Tracked };
 // UKCP SquawkEventHandler::AttemptAssignment, without the UK's circuit and local codes.
-// Tracked by the user with no code (blank, or a code on Core's list such as 2000): always a new code from Core, not
-// one Core holds for the callsign, a reconnect's old code, or a code typed in EuroScope or set on another scope.
-// Only a code the user chose in the KWIQ menu is kept.
+// A code that doesn't count (blank, or on Core's list without "counts as assigned") is always replaced, whoever set
+// it. Tracked by the user with one: always a new code from Core, not one Core holds for the callsign or a
+// reconnect's old code.
 inline Action Decide(const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
-    if (a.trackedByMe && AssignmentNeeded(u, a, codes)) return s && s->chosen ? Action::None : Action::Tracked;
+    if (a.trackedByMe && AssignmentNeeded(u, a, codes)) return Action::Tracked;
     if (PreviousNeeded(u, a, s, codes)) return Action::Previous;
-    if (s && s->byHand && !ForceNeeded(s, a)) return Action::None;
-    if (AssignmentNeeded(u, a, codes)) return Action::Assign;
+    if (AssignmentNeeded(u, a, codes)) return Action::Assign;   // a code that doesn't count is always replaced
     return Action::None;
 }
 
 // ---- what the plugin remembers (UKCP StoredFlightplan) -------------------------------------------
 // Every look at a flight plan. A new plan makes the plugin automatic again for it (UKCP: until the plan changes).
 inline void Remember(Stored& st, const Aircraft& a) {
-    if (PlanDiffers(st, a)) { st.byHand = false; st.chosen = false; st.planChanged = true; }
+    if (PlanDiffers(st, a)) { st.byHand = false; st.planChanged = true; }
     st.origin = a.origin;
     st.destination = a.destination;
     st.vfr = a.vfr;
     st.expires = 0;
     if (st.squawk.empty() && ValidSquawk(a.squawk)) st.squawk = a.squawk;   // a code it had before the plugin saw it
 }
-// The plugin sets a code (Core's, a previous one, or one the controller chose in the menu: chosen)
-inline void CodeSet(Stored& st, const std::string& code, bool byHand, bool chosen = false) {
+// The plugin sets a code (Core's, a previous one, or one the controller chose in the menu)
+inline void CodeSet(Stored& st, const std::string& code, bool byHand) {
     st.squawk = code;
     st.byHand = byHand;
-    st.chosen = chosen;
     st.planChanged = false;
 }
 // EuroScope reports a code. One the plugin didn't set was set by a controller, here (typed in EuroScope) or on
-// another scope: leave it alone like a code set from the menu. Ignored: a cleared or invalid code, the holding
-// code, anything while the pilot is disconnected (so the code to give back survives a reconnect), and on sweatbox
-// a code that is no code (aircraft spawn with 2000).
+// another scope: by hand, like a code set from the menu. Ignored: a cleared or invalid code, the holding
+// code, anything while the pilot is disconnected (so the code to give back survives a reconnect), and a code that
+// is no code (on Core's list, not counting as assigned): it is always replaced, whoever set it.
 inline void CodeSeen(Stored& st, const std::string& code, const CodeList& codes, bool sweatbox) {
+    (void)sweatbox;
     if (st.expires || code == st.squawk || !ValidSquawk(code) || code == HOLDING_SQUAWK) return;
-    if (sweatbox && !HasAssignedSquawk(codes, code)) return;
+    if (!HasAssignedSquawk(codes, code)) return;
     st.squawk = code;
     st.byHand = true;
-    st.chosen = false;                                          // not from the menu: replaced if the user tracks it
     st.planChanged = false;
 }
 // Core's answer arrived: set it only if it is still wanted. One the controller asked for: if they may still change
-// the code. An automatic one: also only if the aircraft still has no code and no controller has set one by hand
-// meanwhile (UKCP sets it regardless and can overwrite a code someone set while the request was out).
+// the code. An automatic one: also only if the aircraft still has no code that counts (UKCP sets it regardless and
+// can overwrite a code someone set while the request was out).
 inline bool AnswerWanted(bool manual, const User& u, const Aircraft& a, const Stored* s, const CodeList& codes) {
     if (!ChangeAllowed(u, a)) return false;
     if (manual) return true;
-    if (HasCode(codes, a.squawk)) return false;
-    if (a.trackedByMe) return !(s && s->chosen);                // tracked: only a menu choice meanwhile stops it
-    return !(s && s->byHand);
+    (void)s;
+    return !HasCode(codes, a.squawk);                           // a code that doesn't count, by hand or not, is replaced
 }
 
 // ---- Core ------------------------------------------------------------------------------------------
