@@ -54,6 +54,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 - plog, MFC and cpp-httplib are removed (TrackAudio's version is no longer read or checked), and messages go through the plugin's chat output on the main thread.
 - The "RDF state" tag item uses ID 1006, clear of the KWIQ and VCH IDs.
 - It does not start if another RDF or afv-euroscope-bridge is loaded in the same EuroScope.
+- TrackAudio's messages are only parsed on the WebSocket's thread; the handlers, which call the EuroScope API, run on EuroScope's own thread (RDF runs them on the WebSocket's thread).
 
 ## Changes made to DiscordEuroScope
 - It is driven by `CKWIQPlugin`'s timer, instead of being a plugin of its own.

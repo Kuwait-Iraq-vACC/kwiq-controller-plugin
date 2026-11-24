@@ -727,7 +727,11 @@ public:
     bool SectorDrawEnabled() const { return sectorDraw_ && enabled_ && !duplicate_ && !reduced_; }
     bool Duplicate() const { return duplicate_; }
     // RDF on the radar screen (REFRESH_PHASE_AFTER_TAGS)
-    void DrawRdf(EuroScopePlugIn::CRadarScreen* screen, HDC hDC) { if (!duplicate_ && !reduced_) rdf_.Draw(screen, hDC); }
+    void DrawRdf(EuroScopePlugIn::CRadarScreen* screen, HDC hDC) {
+        if (duplicate_ || reduced_) return;
+        rdf_.Pump();                                         // TrackAudio's latest, so drawing is never a second late
+        rdf_.Draw(screen, hDC);
+    }
     // ---- QNH monitor and procedure notifications (#4) -------------------------------------------------
     // The logged-on controller's callsign
     bool Myself(std::string& me) {

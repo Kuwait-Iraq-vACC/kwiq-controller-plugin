@@ -28,6 +28,9 @@ public:
     // Main thread, each second: picks the settings for the logon callsign and passes on messages to show
     void Tick(std::time_t now, const std::string& callsign, bool loggedOn,
               const std::function<void(const std::string&, bool)>& msg);
+    // Main thread: handle what TrackAudio sent (transmissions, station states). TrackAudio's WebSocket thread only
+    // queues them, as the EuroScope API isn't thread-safe (#80). Called by Tick and before each RDF draw.
+    void Pump();
     // The controller's own choice for drawing: -1 = as Core says, 0 = off, 1 = on
     void SetLocalDraw(int v);
     int LocalDraw() const;
