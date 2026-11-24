@@ -659,6 +659,16 @@ int main() {
         CodeSeen(sp, "4521", codes, true);                          // a real code still is
         CHECK(sp.byHand && sp.squawk == "4521");
 
+        // live: a pilot-client or network default (1200, 2200, 0 ...) seen on a plan is no controller's choice, so it
+        // never stops automatic assignment; only a conspicuity code (2000) counts as typed by hand (UKCP has no by hand)
+        Stored net; Remember(net, gnd);
+        CodeSeen(net, "2200", codes, false);
+        a = gnd; a.squawk = "2200";
+        CHECK(!net.byHand && Decide(twr, a, &net, codes) == Action::Assign);
+        CodeSeen(net, "1200", codes, false);
+        CHECK(!net.byHand);
+        CodeSeen(net, "2000", codes, false);                        // conspicuity typed in EuroScope: still by hand
+        CHECK(net.byHand && net.squawk == "2000");
         // assumed on a non-assignable code (KAC792 on 2000): always a new code from Core
         Aircraft kac = gnd; kac.callsign = "KAC792"; kac.deliveryByMe = false;
         kac.groundSpeed = 300; kac.fromOrigin = 40; kac.altitude = 15000;

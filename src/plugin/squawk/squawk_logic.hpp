@@ -191,11 +191,15 @@ inline void CodeSet(Stored& st, const std::string& code, bool byHand) {
 }
 // EuroScope reports a code. One the plugin didn't set was set by a controller, here (typed in EuroScope) or on
 // another scope: leave it alone like a code set from the menu. Ignored: a cleared or invalid code, the holding
-// code, anything while the pilot is disconnected (so the code to give back survives a reconnect), and on sweatbox
-// a code that is no code (aircraft spawn with 2000).
+// code, anything while the pilot is disconnected (so the code to give back survives a reconnect), and a code that
+// is no code unless it is a conspicuity code: pilot-client and network defaults (0000, 1200, 2200 ...) come with
+// the plan, not from a controller. On sweatbox even a conspicuity code is ignored (aircraft spawn with 2000).
 inline void CodeSeen(Stored& st, const std::string& code, const CodeList& codes, bool sweatbox) {
     if (st.expires || code == st.squawk || !ValidSquawk(code) || code == HOLDING_SQUAWK) return;
-    if (sweatbox && !HasAssignedSquawk(codes, code)) return;
+    if (!HasAssignedSquawk(codes, code)) {
+        const NonAssignable* r = FindCode(codes, code);
+        if (sweatbox || !r || r->category != "conspicuity") return;
+    }
     st.squawk = code;
     st.byHand = true;
     st.planChanged = false;
