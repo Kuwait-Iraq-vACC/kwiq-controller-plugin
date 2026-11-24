@@ -30,6 +30,7 @@
 #include <winver.h>         // GetFileVersionInfo (link version)
 #include "vch/requestMenu.hpp"   // CVCHPlugin (VCH)
 #include "kwiq_logic.hpp"
+#include "kwiq_log.hpp"          // the plugin's own log, next to KWIQPlugin.dll
 #include "fpc/fpc_logic.hpp"
 #include "squawk/squawk_logic.hpp"
 #include "ownership/ownership_logic.hpp"   // who provides which service at each airfield (UKCP's top-down)
@@ -349,6 +350,7 @@ public:
         };
         startedAt_ = std::time(nullptr);
         esVersion_ = EuroScopeVersion();
+        StartLog();
         if (duplicate_) {
             Msg("The KWIQ plugin is loaded twice, so this copy (" + sf::DllPath() + ") will do nothing. "
                 "Remove one of them in Other Set > Plug-ins.", true);
@@ -382,6 +384,10 @@ public:
         CDataHandler::Shutdown();
         kwiq_net::GlobalCleanup();
         if (instanceLock_) CloseHandle(instanceLock_);
+        if (!duplicate_) {
+            kwiq::log::Write("START", { { "event", "exit" } });
+            kwiq::log::Global().Stop();
+        }
     }
 
     // Every EuroScope callback is a function-try-block: an exception must never reach EuroScope (#45)
@@ -565,6 +571,20 @@ public:
         // Arguments come from the trimmed line, so a leading space doesn't shift them (#46)
         const std::string line = kwiq::Trim(sCommandLine);
         std::string c = kwiq::Upper(line);
+        if (c.compare(0, 5, ".KWIQ") == 0)                  // never the key itself
+            kwiq::log::Write("CMD", {}, c == ".KWIQ KEY" || c.compare(0, 10, ".KWIQ KEY ") != 0 ? line : ".kwiq key ***");
+        if (c == ".KWIQ LOG") {
+            std::string dir = kwiq::log::Global().Dir();
+            if (dir.empty()) { Msg("The plugin log could not be started.", true); return true; }
+            ShellExecuteA(nullptr, "open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            Msg("Plugin log: " + dir, false);
+            return true;
+        }
+        if (c == ".KWIQ LOG VERBOSE") {
+            kwiq::log::SetVerbose(!kwiq::log::Verbose());
+            Msg(std::string("Verbose plugin log ") + (kwiq::log::Verbose() ? "on" : "off") + " until EuroScope restarts.", false);
+            return true;
+        }
         if (c == ".KWIQ REFRESH") {
             lastCore_ = lastSrd_ = lastSlotFetch_ = 0;
             { std::lock_guard<std::mutex> g(mu_); srd_.version.clear(); }   // force SRD re-download
@@ -1754,7 +1774,19 @@ private:
     static inline std::vector<EuroScopePlugIn::CRadarScreen*> radars_;
     void RefreshRadars() { for (auto* r : radars_) r->RequestRefresh(); }
 
+    // The plugin's own log (kwiq_log.hpp): next to KWIQPlugin.dll, else %LOCALAPPDATA%\KWIQ\logs. The second copy
+    // of a plugin loaded twice keeps none, so the two never write the same file.
+    void StartLog() {
+        if (duplicate_) return;
+        std::string dll = sf::DllDir();
+        if (!kwiq::log::Global().Start({ dll, kwiq_win::LogsDir() })) return;
+        kwiq::log::Write("START", { { "v", KWIQ_PLUGIN_BUILD }, { "es", esVersion_ }, { "mode", reduced_ ? "reduced" : "full" },
+                                    { "dll", sf::DllPath() } });
+        std::string dir = kwiq::log::Global().Dir();
+        if (!dll.empty() && dir != dll) Msg("The plugin log is in " + dir + " (the plugin's folder can't be written to).", false);
+    }
     void Msg(const std::string& m, bool err) {
+        kwiq::log::Write("MSG", { { "err", err ? "1" : "0" } }, m);
         DisplayUserMessage("KWIQ Controller Plugin", err ? "Error" : "Info", m.c_str(), true, err, false, false, false);
     }
     void FlushMessages() {
@@ -1771,11 +1803,12 @@ private:
         std::lock_guard<std::mutex> g(mu_);
         if (lastErr_[src] == msg) return;
         lastErr_[src] = msg;
+        kwiq::log::Write("MSG", { { "src", src }, { "err", "1" } }, msg);
         pending_.emplace_back(src + ": " + msg, true);
     }
     void ClearError(const std::string& src) {
         std::lock_guard<std::mutex> g(mu_);
-        lastErr_.erase(src);
+        if (lastErr_.erase(src)) kwiq::log::Write("MSG", { { "src", src }, { "cleared", "1" } });
     }
 
     // worker thread: apply what Core says (colours, texts, intervals, kill switch, notices, sector file)

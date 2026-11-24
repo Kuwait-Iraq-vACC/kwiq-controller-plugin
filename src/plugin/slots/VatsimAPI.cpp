@@ -1,6 +1,8 @@
 // VatsimAPI.cpp - see VatsimAPI.h and NOTICE.md for provenance.
 #include "VatsimAPI.h"
 #include "version.h"
+#include "kwiq_log.hpp"
+#include <chrono>
 
 #include <ctime>
 #include <exception>
@@ -95,18 +97,31 @@ void SetCoreAuth(const string& urlPrefix, const string& key, const string& versi
     authPrefix = urlPrefix; authKey = key; authVersion = version;
 }
 
+// Every request in the plugin's log: method, URL without query, status and time taken (never a body or a key)
+static void LogRequest(const string& method, const string& url, long code, const string& err,
+                       std::chrono::steady_clock::time_point from) {
+    long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - from).count();
+    kwiq::log::Fields f = { { "method", method }, { "url", kwiq::log::SafeUrl(url) }, { "status", std::to_string(code) },
+                            { "ms", std::to_string(ms) } };
+    if (!err.empty()) f.push_back({ "err", err });
+    kwiq::log::Write("CORE", f);
+}
+
 bool HttpGet(const string& url, string& body, string& err) {
     body.clear();
     long code = 0;
+    auto from = std::chrono::steady_clock::now();
     CURLcode res = fetch_url(url.c_str(), body, &code);
-    if (res != CURLE_OK) { err = curl_easy_strerror(res); return false; }
-    if (code != 200) { err = "HTTP " + std::to_string(code); return false; }
+    if (res != CURLE_OK) { err = curl_easy_strerror(res); LogRequest("GET", url, code, err, from); return false; }
+    if (code != 200) { err = "HTTP " + std::to_string(code); LogRequest("GET", url, code, err, from); return false; }
+    LogRequest("GET", url, code, "", from);
     return true;
 }
 
 long HttpSend(const string& method, const string& url, const string& form, string& body, string& err) {
     body.clear();
     err.clear();
+    auto from = std::chrono::steady_clock::now();
     CURL* curl = curl_easy_init();
     if (!curl) { err = curl_easy_strerror(CURLE_FAILED_INIT); return 0; }
     setup_curl_modern(curl, url.c_str(), &body);
@@ -123,6 +138,7 @@ long HttpSend(const string& method, const string& url, const string& form, strin
     curl_easy_cleanup(curl);
     curl_slist_free_all(headers);
     if (code && (code < 200 || code > 299)) err = "HTTP " + std::to_string(code);
+    LogRequest(method, url, code, err, from);
     return code;
 }
 
