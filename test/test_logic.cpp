@@ -4,6 +4,7 @@
 #include "fpc/fpc_logic.hpp"
 #include "squawk/squawk_logic.hpp"
 #include "ownership/ownership_logic.hpp"
+#include "kwiq_log.hpp"
 using namespace kwiq;
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -1054,6 +1055,27 @@ int main() {
         // version.h's own version is SemVer
         CHECK(ParseVersion(KWIQ_VERSION).valid && ParseVersion(KWIQ_VERSION).numbers == 3);
         CHECK(RunningVersion(KWIQ_VERSION).pre.size() == ParseVersion(KWIQ_VERSION).pre.size());   // not read as a test build
+    }
+
+    // ---- the plugin's own log (kwiq_log.hpp): line format, file names, pruning, safe URLs ----
+    {
+        using namespace kwiq::log;
+        std::tm t{}; t.tm_year = 126; t.tm_mon = 10; t.tm_mday = 24; t.tm_hour = 20; t.tm_min = 14; t.tm_sec = 5;
+        CHECK(FormatLine(t, 7, "SQUAWK", { { "cs", "RJA812" }, { "code", "0725" } }, "") == "20:14:05.007 SQUAWK cs=RJA812 code=0725");
+        CHECK(FormatLine(t, 123, "MSG", { { "err", "1" } }, "Core said\r\nno") == "20:14:05.123 MSG err=1 | Core said\\r\\nno");
+        CHECK(Value("a b") == "\"a b\"" && Value("x=y") == "\"x=y\"" && Value("a|b") == "\"a|b\"" && Value("") == "\"\"");
+        CHECK(Value("say \"hi\"") == "\"say \\\"hi\\\"\"" && Value("OK") == "OK" && Value("a\nb") == "a\\nb");
+        CHECK(FileName(t) == "KWIQPlugin-20261124.log" && IsLogFile("KWIQPlugin-20261124.log"));
+        CHECK(!IsLogFile("KWIQPlugin.dll") && !IsLogFile("KWIQPlugin-2026112.log") && !IsLogFile("KWIQPlugin-2026112x.log"));
+        CHECK(Expired("KWIQPlugin-20261116.log", t, 7) && !Expired("KWIQPlugin-20261117.log", t, 7));
+        CHECK(Expired("KWIQPlugin-20251231.log", t, 7) && !Expired("KWIQPlugin.dll", t, 7) && !Expired("KWIQPlugin-20261124.log", t, 7));
+        CHECK(SafeUrl("https://core/api/plugin/squawk/RJA812?network=vatsim") == "https://core/api/plugin/squawk/RJA812");
+        CHECK(SafeUrl("https://core/api/plugin/claim/AB12CD") == "https://core/api/plugin/claim/***");
+        CHECK(SafeUrl("https://core/api/plugin/claim/AB12/x#f") == "https://core/api/plugin/claim/***/x" && SafeUrl("") == "");
+        Changes c;
+        CHECK(c.Changed("FPC RJA812", "OK") && !c.Changed("FPC RJA812", "OK") && c.Changed("FPC RJA812", "CHK"));
+        c.Forget("FPC RJA812");
+        CHECK(c.Changed("FPC RJA812", "CHK"));
     }
 
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
