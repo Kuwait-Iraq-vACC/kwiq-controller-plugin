@@ -111,6 +111,9 @@ int main() {
     CHECK(CheckEventRoute(ev, "OTHH", "OKBK", "DCT", D) == RouteResult::None);
     CHECK(CheckEventRoute(ev, "OTHH", "OKBK", "DCT", D2) == RouteResult::Ok);
     CHECK(RoutesForDate(ev, D).size() == 2 && RoutesForDate(ev, D2).size() == 1);
+    CHECK(EventNameForDate(ev, D) == ev.name && !ev.name.empty() && EventNameForDate(ev, "2099-01-01").empty());
+    CHECK(EventNameForDate(EventData{}, D).empty());
+    CHECK(EventNameForDate(ParseCoreEvent("EVENT|Baghdad Overload|\n"), D) == "Baghdad Overload");   // no routes: still on
     CHECK(EventRouteAirports(RoutesForDate(ev, D)[0]) == RoutesForDate(ev, D)[0].adep + " -> " + RoutesForDate(ev, D)[0].ades);
     {
         EventRoute er;
