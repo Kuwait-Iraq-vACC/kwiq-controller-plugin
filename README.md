@@ -48,10 +48,12 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | ... / Sector Indicator | the alias of the position tracking the aircraft (also drawn above it) |
 | ... / RDF state | `!` while the aircraft transmits |
 | ... / Vertical Speed Indicator | `+` climbing, `-` descending or level |
-| ... / Vertical Speed | the vertical speed in hundreds of feet per minute, rounded to the nearest 100: `+01` is 100 ft/min, `+10` is 1000, `-15` is 1500 down (at most 99); level flight (under 50 ft/min) is `-00`, never `+00`. Both vertical speed items always show something, even in reduced mode: `-00` and `-` when there is no radar target |
+| ... / Vertical Speed | the vertical speed in hundreds of feet per minute, rounded to the nearest 100: `+01` is 100 ft/min, `+10` is 1000, `-15` is 1500 down (at most 99); level flight (under 50 ft/min) is `-00`, never `+00`. Both vertical speed items always show something, even in reduced mode: `-00` and `-` when there is no radar target. They are drawn in TopSky's colour for the aircraft's state (see below) |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
 
 Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** or **Open FPC menu** (left button on FPC), **Explain SRD result** (left button on SRD; the same as Explain FPC result), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
+The vertical speed items use TopSky's tag colours from `TopSkySettings.txt` (with `TopSkySettingsLocal.txt` over it), found near the sector file or KWIQPlugin.dll (up four folders, and their subfolders two deep, e.g. `Plugins\TopSky`) and read again every 30 seconds when it changes: assumed and transfer from me initiated in `Color_Assumed`; notified, coordinated and transfer to me initiated in `Color_Concerned`; redundant in `Color_Redundant`; non concerned in `Color_Unconcerned`. Without the file, or a colour it doesn't set, they use the tag's own colour. The `TOPSKY` log line says which file was read.
+
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
 
 ## Commands
@@ -202,7 +204,7 @@ The plugin keeps its own log, next to `KWIQPlugin.dll` in the sector file packag
 - `START`: plugin and EuroScope version, the DLL loaded, and the exit.
 - `MSG`: everything the plugin says in the chat, and each error source as it fails and recovers.
 - `CORE`: every request to Core, with method, URL (no query), status and time taken.
-- `SQUAWK`: each decision with the facts behind it (code, whether it counts, who tracks it), each request, Core's answer, codes set elsewhere, and Core's list of codes that don't count, whenever it changes.
+- `SQUAWK`: each decision with the facts behind it (code, whether it counts, who tracks it), each request, Core's answer, codes set elsewhere on aircraft you track or the plugin asked a code for, and Core's list of codes that don't count, whenever it changes. Aircraft the plugin can't look at (no radar target) and codes set on other aircraft are only written with `.kwiq log verbose`.
 - `MENU` and `CMD`: squawk menu clicks and `.kwiq` commands.
 - `SRD`, `FPC`, `SECTOR` and `DISCORD`: the SRD window's exit point and searches, FPC results and sector indicators when they change, where each sector colour comes from, and Discord's presence.
 

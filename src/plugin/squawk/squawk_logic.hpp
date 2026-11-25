@@ -162,6 +162,11 @@ inline bool ChangeAllowed(const User& u, const Aircraft& a) {
 }
 
 enum class Action { None, Previous, Assign, Tracked };
+// The plugin's log. A decision on an aircraft the plugin can't look at (no radar target: far away, or not
+// connected) is only written with .kwiq log verbose. A code set somewhere else only for an aircraft the user tracks
+// or the plugin asked Core a code for, so codes set all over the network don't bury the ones that matter here.
+inline bool LogDecision(bool facts, bool verbose) { return facts || verbose; }
+inline bool LogSeen(bool trackedByMe, bool asked, bool verbose) { return trackedByMe || asked || verbose; }
 // As written in the plugin's log
 inline const char* ActionName(Action a) {
     switch (a) {

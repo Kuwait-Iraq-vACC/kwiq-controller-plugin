@@ -617,6 +617,48 @@ inline std::string PrfSymbologyPath(const std::string& prfText, const std::strin
     return "";
 }
 
+// TopSky's colours, from TopSkySettings.txt (and TopSkySettingsLocal.txt over it), one per line as
+//   Color_Assumed=220,220,220
+// (R,G,B, each 0-255). A key given twice takes its last value, as TopSky reads the file top to bottom.
+// Returns the colours as COLORREF (0x00BBGGRR) keyed by the name after "Color_", lower case ("assumed");
+// other settings, comments and malformed or out of range values are skipped.
+inline std::map<std::string, unsigned long> ParseTopSkyColours(const std::string& text) {
+    auto lower = [](std::string v) {
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+        return v;
+    };
+    std::map<std::string, unsigned long> out;
+    for (const auto& raw : SplitChar(text, '\n')) {
+        std::string line = Trim(raw);
+        size_t eq = line.find('=');
+        if (eq == std::string::npos || line.size() < 6 || lower(line.substr(0, 6)) != "color_") continue;
+        std::string key = lower(Trim(line.substr(6, eq - 6)));
+        std::vector<std::string> f = SplitChar(Trim(line.substr(eq + 1)), ',');
+        if (key.empty() || f.size() != 3) continue;
+        int rgb[3];
+        bool ok = true;
+        for (int i = 0; i < 3 && ok; i++) {
+            std::string n = Trim(f[i]);
+            ok = !n.empty() && n.size() <= 3 && AllDigits(n, 0, n.size());
+            rgb[i] = ok ? ToInt(n) : 0;
+            ok = ok && rgb[i] <= 255;
+        }
+        if (ok) out[key] = (unsigned long)rgb[0] | ((unsigned long)rgb[1] << 8) | ((unsigned long)rgb[2] << 16);
+    }
+    return out;
+}
+// The TopSky colour a tag is drawn in for the aircraft's EuroScope flight plan state (FLIGHT_PLAN_STATE_*):
+// assumed, and transfer from me initiated, in Color_Assumed; notified, coordinated and transfer to me
+// initiated in Color_Concerned; redundant in Color_Redundant; non concerned in Color_Unconcerned.
+inline const char* TopSkyStateColourKey(int state) {
+    switch (state) {
+    case 1: case 2: case 3: return "concerned";
+    case 4: case 5:         return "assumed";
+    case 7:                 return "redundant";
+    default:                return "unconcerned";
+    }
+}
+
 // ---- Core-managed configuration ---------------------------------------------
 // Core /api/plugin/config (plain text):  KEY|value   one per line.
 // Anything missing falls back to the built-in default, so the plugin still works if Core is down.

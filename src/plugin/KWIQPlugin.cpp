@@ -258,6 +258,31 @@ static std::string FindSymbology(const std::vector<std::string>& starts) {
     return best;
 }
 
+// ---- TopSky's settings (the vertical speed items' colours) ------------------------------------
+// TopSkySettings.txt sits next to TopSky.dll, usually in the package's Plugins\TopSky folder: looked for in
+// each folder from the sector file's and KWIQPlugin.dll's up four levels, and in its subfolders two deep.
+// Empty when none is found.
+static std::string FindTopSkySettings(const std::vector<std::string>& starts) {
+    static const char* kName = "\\TopSkySettings.txt";
+    for (const auto& s : starts) {
+        std::string d = s;
+        for (int up = 0; up < 4 && !d.empty(); up++, d = ParentOf(d)) {
+            if (FileExists(d + kName)) return d + kName;
+            for (const auto& sub : SubDirs(d)) {
+                if (FileExists(sub + kName)) return sub + kName;
+                for (const auto& sub2 : SubDirs(sub))
+                    if (FileExists(sub2 + kName)) return sub2 + kName;
+            }
+        }
+    }
+    return "";
+}
+static ULONGLONG WriteTime(const std::string& file) {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (file.empty() || !GetFileAttributesExA(file.c_str(), GetFileExInfoStandard, &fa)) return 0;
+    return ((ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+}
+
 static kwiq::Airac Local(const std::string& userPath, std::string& src) {
     if (!userPath.empty()) {
         // A folder, AIRAC_VERSION.txt itself, or any file in the package's folder (the .ese, say)
@@ -429,7 +454,7 @@ public:
             if (sq && *sq == '0') sqAuto_ = false;
         }
         if (now - lastNameRead_ >= 10) { lastNameRead_ = now; ReadSectorName(); }
-        if (now - lastSymbologyRead_ >= 30) { lastSymbologyRead_ = now; ReadSymbology(); }
+        if (now - lastSymbologyRead_ >= 30) { lastSymbologyRead_ = now; ReadSymbology(); ReadTopSky(); }
         TickConnection(now);
         SquawkTick(now);
         TickKeySetup(now);
@@ -521,6 +546,15 @@ public:
             int fpm = rt.IsValid() ? rt.GetVerticalSpeed() : 0;
             std::string txt = ItemCode == KWIQ_ITEM_VS_IND ? kwiq::VsIndicator(fpm) : kwiq::VsRate(fpm);
             strncpy_s(sItemString, 16, txt.c_str(), _TRUNCATE);
+            // TopSky's colour for the aircraft's state; without TopSky's settings, the tag's own colour
+            if (FlightPlan.IsValid()) {
+                std::lock_guard<std::mutex> g(mu_);
+                auto it = topSky_.find(kwiq::TopSkyStateColourKey(FlightPlan.GetState()));
+                if (it != topSky_.end()) {
+                    *pColorCode = EuroScopePlugIn::TAG_COLOR_RGB_DEFINED;
+                    *pRGB = (COLORREF)it->second;
+                }
+            }
             return;
         }
         if (reduced_) return;                                // no tag items at all, VCH's included
@@ -1053,6 +1087,28 @@ public:
         std::lock_guard<std::mutex> g(mu_);
         symbology_ = colours;
     }
+    // main thread, every 30 s: TopSky's colours, from TopSkySettings.txt with TopSkySettingsLocal.txt over it
+    void ReadTopSky() {
+        std::string path;
+        { std::lock_guard<std::mutex> g(mu_); path = sectorPath_; }
+        std::vector<std::string> starts;
+        if (!path.empty()) starts.push_back(sf::IsDir(path) ? path : sf::ParentOf(path));
+        starts.push_back(sf::DllDir());
+        std::string file = sf::FindTopSkySettings(starts);
+        std::string local = file.empty() ? "" : sf::ParentOf(file) + "\\TopSkySettingsLocal.txt";
+        ULONGLONG t = sf::WriteTime(file) ^ (sf::WriteTime(local) * 31);
+        if (file == topSkyFile_ && t == topSkyTime_) return;
+        topSkyFile_ = file; topSkyTime_ = t;
+        std::map<std::string, unsigned long> colours;
+        if (!file.empty()) {
+            colours = kwiq::ParseTopSkyColours(sf::ReadHead(file, 262144));
+            if (sf::FileExists(local))
+                for (const auto& kv : kwiq::ParseTopSkyColours(sf::ReadHead(local, 262144))) colours[kv.first] = kv.second;
+        }
+        kwiq::log::Write("TOPSKY", { { "file", file }, { "colours", std::to_string(colours.size()) } });
+        std::lock_guard<std::mutex> g(mu_);
+        topSky_ = colours;
+    }
 
     virtual EuroScopePlugIn::CRadarScreen* OnRadarScreenCreated(const char* sDisplayName, bool NeedRadarContent,
                                                                 bool GeoReferenced, bool CanBeSaved, bool CanBeCreated) override;
@@ -1479,6 +1535,7 @@ private:
             if (manual) kwiq::log::Write("SQUAWK", { { "cs", a.callsign }, { "busy", "1" }, { "manual", "1" } });
             return false;                                           // automatic: the decision line says skip=busy
         }
+        sqAsked_.insert(a.callsign);
         kwiq::log::Write("SQUAWK", { { "cs", a.callsign }, { "request", "PUT" }, { "lookup", lookupFirst ? "1" : "0" },
                                      { "manual", manual ? "1" : "0" }, { "previous", a.squawk } });
         SqJob job;
@@ -1552,7 +1609,7 @@ private:
     void SquawkLogDecision(const kwiq::squawk::Aircraft& a, const kwiq::squawk::Stored* s, const kwiq::squawk::CodeList& codes,
                            kwiq::squawk::Action act, const char* skip) {
         using namespace kwiq::squawk;
-        if (a.callsign.empty()) return;
+        if (a.callsign.empty() || !LogDecision(std::strcmp(skip, "nofacts") != 0, kwiq::log::Verbose())) return;
         kwiq::log::Fields f = {
             { "cs", a.callsign }, { "decide", ActionName(act) }, { "code", a.squawk }, { "counts", HasCode(codes, a.squawk) ? "1" : "0" },
             { "tracked", a.trackedByMe ? "me" : a.tracked ? "other" : "none" }, { "byhand", s && s->byHand ? "1" : "0" },
@@ -1810,7 +1867,8 @@ public:
         std::string before = it->second.squawk, seen = fp.GetControllerAssignedData().GetSquawk();
         kwiq::squawk::CodeSeen(it->second, seen, codes ? *codes : none,
                                GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX);
-        if (seen != before)
+        if (seen != before && kwiq::squawk::LogSeen(fp.GetTrackingControllerIsMe(), sqAsked_.count(fp.GetCallsign()) > 0,
+                                                     kwiq::log::Verbose()))
             kwiq::log::Write("SQUAWK", { { "cs", fp.GetCallsign() }, { "seen", seen }, { "byhand", it->second.squawk == seen && it->second.byHand ? "1" : "0" },
                                          { "counts", codes && kwiq::squawk::HasCode(*codes, seen) ? "1" : "0" } });
     } catch (...) {}
@@ -2280,6 +2338,9 @@ private:
     std::map<std::string, unsigned long> symbology_;                 // the profile's Datablock colours (SectorColourName); mu_
     std::string symbologyFile_;                                      // main thread: the Symbology file read, and its time
     ULONGLONG symbologyTime_ = 0;
+    std::map<std::string, unsigned long> topSky_;                    // TopSky's colours (ParseTopSkyColours); mu_
+    std::string topSkyFile_;                                         // main thread: the TopSkySettings.txt read, and its time
+    ULONGLONG topSkyTime_ = 0;
     std::string esAccepted_, esUrl_ = ES_SETUP_URL;                 // Core's euroscope.versions and euroscope.setup_url
     bool esConfigured_ = false;                                     // Core's config has arrived at least once
     std::map<std::string, std::string> lastErr_;
@@ -2294,6 +2355,7 @@ private:
     std::unordered_set<std::string> sqBusy_;                        // main thread only: callsigns waiting for Core
     std::unordered_map<std::string, std::time_t> sqRetryAt_;        // main thread only: not before, after Core failed
     kwiq::log::Changes sqLogChanges_;                               // main thread only: squawk decisions already logged
+    std::unordered_set<std::string> sqAsked_;                       // main thread only: callsigns the plugin asked Core for
     kwiq::log::Changes fpcLog_;                                     // under mu_: FPC results already logged
     kwiq::log::Changes sectorLog_;                                  // main thread only: sector indicators already logged
     std::string sectorColoursLogged_;                               // under mu_: the sector colours last logged

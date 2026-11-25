@@ -13,7 +13,7 @@
 // versions are compared. The DLLs have no Windows file version resource, so nothing else carries a version.
 #pragma once
 
-#define KWIQ_VERSION "0.8.1"
+#define KWIQ_VERSION "0.8.2"
 
 #if defined(__has_include)
 #if __has_include("kwiq_build.h")
