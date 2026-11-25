@@ -1236,6 +1236,12 @@ int main() {
         fs::remove_all(root, ec);
     }
 
+    // ---- vertical speed tag items ----
+    CHECK(VsRate(100) == "+01" && VsRate(1000) == "+10" && VsRate(-1500) == "-15" && VsRate(2450) == "+25");
+    CHECK(VsRate(0) == "-00" && VsRate(49) == "-00" && VsRate(-49) == "-00" && VsRate(50) == "+01" && VsRate(-50) == "-01");
+    CHECK(VsRate(12000) == "+99" && VsRate(-12000) == "-99" && VsRate(INT_MIN) == "-99" && VsRate(INT_MAX) == "+99");
+    CHECK(VsIndicator(800) == "+" && VsIndicator(-800) == "-" && VsIndicator(0) == "-" && VsIndicator(30) == "-");
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }

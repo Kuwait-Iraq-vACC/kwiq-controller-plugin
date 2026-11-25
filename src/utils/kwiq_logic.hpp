@@ -1368,4 +1368,24 @@ private:
     std::uint32_t lastAt_ = 0;
 };
 
+// Vertical speed tag items, from EuroScope's vertical speed in feet per minute. The rate is rounded to the
+// nearest 100 ft/min and shown as two digits of hundreds: +01 is 100 ft/min up, +10 is 1000, -15 is 1500 down,
+// at most 99. Level flight (under 50 ft/min either way, which rounds to 00) is -00, never +00.
+inline int VsHundreds(int fpm) {
+    long long a = fpm < 0 ? -(long long)fpm : (long long)fpm;
+    long long h = (a + 50) / 100;
+    return h > 99 ? 99 : (int)h;
+}
+inline bool VsClimbing(int fpm) { return fpm > 0 && VsHundreds(fpm) > 0; }
+// The indicator item: "+" climbing, "-" descending or level (as the -00 of the rate item)
+inline std::string VsIndicator(int fpm) { return VsClimbing(fpm) ? "+" : "-"; }
+// The rate item: the sign and two digits, e.g. "+01", "+10", "-00"
+inline std::string VsRate(int fpm) {
+    int h = VsHundreds(fpm);
+    std::string s = VsIndicator(fpm);
+    s += char('0' + h / 10);
+    s += char('0' + h % 10);
+    return s;
+}
+
 } // namespace kwiq
