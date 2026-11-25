@@ -11,7 +11,7 @@ find_package(nlohmann_json CONFIG REQUIRED)      # from vcpkg
 find_package(ixwebsocket CONFIG REQUIRED)        # from vcpkg, with mbedtls: RDF (TrackAudio, ws://) and Core push events (wss://)
 find_package(RapidJSON CONFIG REQUIRED)          # from vcpkg, header only: discord-rpc's JSON
 
-# Layout (after the UK Controller Plugin's):
+# Layout:
 #   src/plugin   KWIQPluginCore.dll, one folder per feature; vendored VCH (vch/) and Slots-Plugin (slots/) code
 #   src/loader   KWIQPlugin.dll, the loader
 #   src/updater  KWIQPluginUpdater.dll
@@ -103,7 +103,7 @@ target_link_libraries(KWIQPluginCore PRIVATE
 )
 set_target_properties(KWIQPluginCore PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPluginCore")
 
-# The UK Controller Plugin's layout: the packages carry only KWIQPlugin.dll (the loader), which runs
+# The packages carry only KWIQPlugin.dll (the loader), which runs
 # KWIQPluginUpdater.dll and then loads KWIQPluginCore.dll, both kept in %LOCALAPPDATA%\KWIQ\bin (src/loader/loader.cpp)
 
 # KWIQPluginUpdater.dll: keeps the plugin and itself up to date
