@@ -12,7 +12,7 @@ Kuwait & Iraq vACC EuroScope plugin: VCH, event routes and slots, flight plan ch
 
 | Folder | What's in it |
 | --- | --- |
-| `src/plugin/` | `KWIQPluginCore.dll`: `KWIQPlugin.cpp`, plus one folder per feature (`ui/`, `fpc/`, `squawk/`, `rdf/`, `discord/`, `push/`, `keylink/`) and the vendored code (`vch/` for VCH, `slots/` for the Slots-Plugin) |
+| `src/plugin/` | `KWIQPluginCore.dll`: `KWIQPlugin.cpp`, plus one folder per feature (`ui/`, `fpc/`, `squawk/`, `rdf/`, `discord/`, `push/`, `keylink/`, `pegasus/`) and the vendored code (`vch/` for VCH, `slots/` for the Slots-Plugin) |
 | `src/loader/` | `KWIQPlugin.dll`, the loader EuroScope loads |
 | `src/updater/` | `KWIQPluginUpdater.dll` |
 | `src/utils/` | Headers shared by all three DLLs and the tests: `kwiq_logic.hpp`, `kwiq_win.hpp`, `version.h` |
@@ -50,11 +50,33 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | ... / Vertical Speed Indicator | `+` climbing, `-` descending or level |
 | ... / Vertical Speed | the vertical speed in hundreds of feet per minute, rounded to the nearest 100: `+01` is 100 ft/min, `+10` is 1000, `-15` is 1500 down (at most 99); level flight (under 50 ft/min) is `-00`, never `+00`. Both vertical speed items always show something, even in reduced mode: `-00` and `-` when there is no radar target. They are drawn in TopSky's colour for the aircraft's state (see below) |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
+| ... / HSR (Heading / Speed / Rate) | heading, speed and rate in TopSky's formats, e.g. `220° N180 R20`; see HSR and the P21 items |
+| ... / P21 items | the CPegasusES (P21) items, e.g. Heading in h, Custom AFL, Custom XFL, FQ Warning; see HSR and the P21 items |
 
 Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** or **Open FPC menu** (left button on FPC), **Explain SRD result** (left button on SRD; the same as Explain FPC result), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).
 The vertical speed items use TopSky's tag colours from `TopSkySettings.txt` (with `TopSkySettingsLocal.txt` over it), found near the sector file or KWIQPlugin.dll (up four folders, and their subfolders two deep, e.g. `Plugins\TopSky`) and read again every 30 seconds when it changes: assumed and transfer from me initiated in `Color_Assumed`; notified, coordinated and transfer to me initiated in `Color_Concerned`; redundant in `Color_Redundant`; non concerned in `Color_Unconcerned`. Without the file, or a colour it doesn't set, they use the tag's own colour. The `TOPSKY` log line says which file was read.
 
 VCH items and functions keep their original names; see https://github.com/DrFreas/VCH for how to set them up.
+
+## HSR and the P21 items
+CPegasusES 1.2 (`P21Euroscope.dll`, Hubert SO & Matt Z), which the OKAC package loads separately, is built in (`src/plugin/pegasus/`). No source was published, so it was rebuilt from the DLL; read `NOTICE.md`. Every item keeps its name and shows what the original showed, quirks included (5 kt ground speed is `05`, the G/S / ROC cycle's rate is ft/min ÷ 200, Custom Comm Type is always `#`, Dest / FIR COPX always shows an `EP**` destination). Only the IDs change: tag items are 1100 + the original (Heading in h 1101 ... Custom G/S 1125) and the two cycle functions 2210 and 2211, so a tag moves over by changing the plugin name and adding 1100. The TEST item (26) is left out. Once a tag uses these, stop loading `P21Euroscope.dll`.
+
+**HSR (Heading / Speed / Rate)** (1127) is KWIQ's own: one item, `220° N180 R20`, with `h    s    r` when nothing is assigned.
+- Heading: 3 digits + `°`, else the direct-to point, else `h`. A COPN/COPX coordination in progress shows its point instead, orange when another controller asked, cyan when you did.
+- Speed, as TopSky's ASP: `N` + 3 digits in knots (`N180`), `M` + 3 digits in 1/100 Mach (`M079`), else `s`.
+- Rate, as TopSky's ARC: `R` + 2 digits in hundreds of ft/min (`R20`), else `r`.
+- Blue while the aircraft squawks IDENT, as the other P21 items.
+
+Set its left button to **HSR - Open TopSky menu** (2212) and its right button to **HSR - TopSky ack / clear value** (2213): `TAGITEM:1127::0:1:2212:2213:KWIQ Controller Plugin:0:1:KWIQ Controller Plugin:KWIQ Controller Plugin:1`. The field under the mouse decides what runs, through EuroScope's `StartTagFunction` on the plugin's radar screen:
+
+| Field | Left button | Right button |
+|---|---|---|
+| Heading | TopSky's Open AHDG menu | Ack RJC or FAIL AHDG coord / Clear value / Assign present heading |
+| Speed | Open ASP menu | Ack RJC or FAIL ASP coord / Clear value |
+| Rate | Open ARC menu | Ack RJC or FAIL ARC coord / Clear value |
+| A COPN/COPX point in progress | Open Waypoint menu (accept, refuse or change) | - |
+
+They are TopSky's own menus, so HOP, RTI/TIP and the coordination answers work from HSR as from TopSky's AHDG/ASP/ARC items. TopSky keeps its tactical coordination state (proposals, accepted but not set, rejected) and CPDLC brackets to itself, so HSR shows the values once they are set but not TopSky's colours for them; keep TopSky's items in the tag where those colours are needed. The TopSky IDs are from 2.6b6 (`pegasus.cpp`); check them when TopSky changes. HSR clicks are written to the plugin's log (`HSR`).
 
 ## Commands
 `.kwiq connect` (get your API key from myKWIQ), `.kwiq key <key>` (enter it by hand; `.kwiq key` says whether one is connected, `.kwiq key clear` removes it), `.kwiq button` (hide or show the KWIQ button), `.kwiq status`, `.kwiq refresh`, `.kwiq log` (open the folder of the plugin's own log; `.kwiq log verbose` adds more detail until EuroScope restarts), `.kwiq sector` (sector indicators on the radar on or off), `.kwiq autorefresh` (slot auto refresh on or off), `.kwiq squawk` (automatic squawk assignment on or off), `.kwiq update` (says whether a newer version is waiting), `.kwiq alert` (preview the sector file alert), `.kwiq discord` (DiscordEuroScope on or off for yourself), `.kwiq qnh <ICAO>`, `.kwiq notifications`, `.kwiq version` (re-check the sector file), `.kwiq sectorfile <folder or AIRAC_VERSION.txt>` (tell the plugin where your package is; empty = automatic), `.rdf draw on|off|core` (your own RDF switch; `core` = as Core says), `.rdf refresh` (switch the channels off and sync them again from TrackAudio), `.rdf reload` (reconnect to TrackAudio), plus VCH's own `.vch ...` commands.
