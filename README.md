@@ -204,7 +204,7 @@ The plugin keeps its own log, next to `KWIQPlugin.dll` in the sector file packag
 - `START`: plugin and EuroScope version, the DLL loaded, and the exit.
 - `MSG`: everything the plugin says in the chat, and each error source as it fails and recovers.
 - `CORE`: every request to Core, with method, URL (no query), status and time taken.
-- `SQUAWK`: each decision with the facts behind it (code, whether it counts, who tracks it), each request, Core's answer, codes set elsewhere, and Core's list of codes that don't count, whenever it changes.
+- `SQUAWK`: each decision with the facts behind it (code, whether it counts, who tracks it), each request, Core's answer, codes set elsewhere on aircraft you track or the plugin asked a code for, and Core's list of codes that don't count, whenever it changes. Aircraft the plugin can't look at (no radar target) and codes set on other aircraft are only written with `.kwiq log verbose`.
 - `MENU` and `CMD`: squawk menu clicks and `.kwiq` commands.
 - `SRD`, `FPC`, `SECTOR` and `DISCORD`: the SRD window's exit point and searches, FPC results and sector indicators when they change, where each sector colour comes from, and Discord's presence.
 
