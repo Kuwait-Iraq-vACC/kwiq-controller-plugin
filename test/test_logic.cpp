@@ -1242,6 +1242,18 @@ int main() {
     CHECK(VsRate(12000) == "+99" && VsRate(-12000) == "-99" && VsRate(INT_MIN) == "-99" && VsRate(INT_MAX) == "+99");
     CHECK(VsIndicator(800) == "+" && VsIndicator(-800) == "-" && VsIndicator(0) == "-" && VsIndicator(30) == "-");
 
+    {   // TopSky's colours (the vertical speed items)
+        auto c = ParseTopSkyColours("Setup_COOPANS=1\r\nColor_Assumed=225,225,179\r\nColor_Concerned=110,153,110\n"
+                                    "color_REDUNDANT = 185, 140, 89\nColor_Informed=275,125,175\nColor_Bad=1,2\n"
+                                    "Color_X=a,1,2\nColor_Assumed=220,220,220\n//Color_Unconcerned=1,1,1 x\n");
+        CHECK(c.size() == 3 && c["assumed"] == 0xDCDCDCul && c["concerned"] == (110ul | 153ul << 8 | 110ul << 16));
+        CHECK(c["redundant"] == (185ul | 140ul << 8 | 89ul << 16) && !c.count("informed") && !c.count("unconcerned"));
+        CHECK(ParseTopSkyColours("").empty());
+        CHECK(std::string(TopSkyStateColourKey(5)) == "assumed" && std::string(TopSkyStateColourKey(4)) == "assumed");
+        CHECK(std::string(TopSkyStateColourKey(1)) == "concerned" && std::string(TopSkyStateColourKey(3)) == "concerned");
+        CHECK(std::string(TopSkyStateColourKey(7)) == "redundant" && std::string(TopSkyStateColourKey(0)) == "unconcerned");
+    }
+
     std::printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;
 }
