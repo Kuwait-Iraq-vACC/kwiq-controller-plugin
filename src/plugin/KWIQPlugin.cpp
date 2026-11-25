@@ -514,6 +514,15 @@ public:
                               int ItemCode, int TagData, char sItemString[16],
                               int* pColorCode, COLORREF* pRGB, double* pFontSize) override try {
         using namespace kwiq;
+        // The vertical speed items always show something, even reduced or too old: -00 / - with no radar target
+        if (ItemCode == KWIQ_ITEM_VS_IND || ItemCode == KWIQ_ITEM_VS_RATE) {
+            EuroScopePlugIn::CRadarTarget rt = RadarTarget;
+            if (!rt.IsValid() && FlightPlan.IsValid()) rt = FlightPlan.GetCorrelatedRadarTarget();
+            int fpm = rt.IsValid() ? rt.GetVerticalSpeed() : 0;
+            std::string txt = ItemCode == KWIQ_ITEM_VS_IND ? kwiq::VsIndicator(fpm) : kwiq::VsRate(fpm);
+            strncpy_s(sItemString, 16, txt.c_str(), _TRUNCATE);
+            return;
+        }
         if (reduced_) return;                                // no tag items at all, VCH's included
         bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_LAST;
         if (ours && !enabled_) return;                       // plugin too old
@@ -562,12 +571,6 @@ public:
             } else {
                 strncpy_s(sItemString, 16, ac->slotTime.c_str(), _TRUNCATE);
             }
-        }
-        else if (ItemCode == KWIQ_ITEM_VS_IND || ItemCode == KWIQ_ITEM_VS_RATE) {
-            if (!RadarTarget.IsValid()) return;
-            int fpm = RadarTarget.GetVerticalSpeed();
-            std::string txt = ItemCode == KWIQ_ITEM_VS_IND ? kwiq::VsIndicator(fpm) : kwiq::VsRate(fpm);
-            strncpy_s(sItemString, 16, txt.c_str(), _TRUNCATE);
         }
         else if (ItemCode == KWIQ_ITEM_RDF) {
             if (FlightPlan.IsValid() && rdf_.Transmitting(FlightPlan.GetCallsign())) strcpy_s(sItemString, 16, "!");
