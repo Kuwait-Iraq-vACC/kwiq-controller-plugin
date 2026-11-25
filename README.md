@@ -48,6 +48,8 @@ Plugins > Load > pick `KWIQPlugin.dll` (in the OKAC and ORBB packages, or from m
 | ... / SRD | the same as FPC: the SRD and the flight plan check are one route check now (kept so existing tag layouts still work) |
 | ... / Sector Indicator | the alias of the position tracking the aircraft (also drawn above it) |
 | ... / RDF state | `!` while the aircraft transmits |
+| ... / Vertical Speed Indicator | `+` climbing, `-` descending or level |
+| ... / Vertical Speed | the vertical speed in hundreds of feet per minute, rounded to the nearest 100: `+01` is 100 ft/min, `+10` is 1000, `-15` is 1500 down (at most 99); level flight (under 50 ft/min) is `-00`, never `+00`. Both vertical speed items always show something, even in reduced mode: `-00` and `-` when there is no radar target |
 | ... / VCH items | Pending request, Hold Short, CTL, Reminder, and so on |
 
 Functions: **Open event routes window** (left button on Event Route), **Explain FPC result** or **Open FPC menu** (left button on FPC), **Explain SRD result** (left button on SRD; the same as Explain FPC result), **Open SRD search window** (any item), **Open squawk assignment menu** and **Force squawk recycle** (on the Assigned Squawk item, see Squawk assignment).

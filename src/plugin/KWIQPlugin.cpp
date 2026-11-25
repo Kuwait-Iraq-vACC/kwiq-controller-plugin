@@ -83,8 +83,10 @@ enum {
     KWIQ_ITEM_SECTOR      = 1005,   // sector indicator of the position that tracks the aircraft
     KWIQ_ITEM_RDF         = 1006,   // RDF state: "!" while the aircraft transmits
     KWIQ_ITEM_SRD         = 1007,   // route and level against the SRD (1006 is RDF state)
-    // 1008 was "FPC (if failed)", removed in 0.7.2
-    KWIQ_ITEM_LAST        = KWIQ_ITEM_SRD,
+    // 1008 was "FPC (if failed)", removed in 0.7.2: not reused, so an old tag layout doesn't show something else
+    KWIQ_ITEM_VS_IND      = 1009,   // vertical speed indicator: "+" climbing, "-" descending or level
+    KWIQ_ITEM_VS_RATE     = 1010,   // vertical speed in hundreds of ft/min: "+01", "+10", "-00" when level
+    KWIQ_ITEM_LAST        = KWIQ_ITEM_VS_RATE,
     KWIQ_FUNC_EVENT_ROUTES = 2001,   // "Open event routes window"
     KWIQ_FUNC_FPC_EXPLAIN  = 2002,   // "Explain FPC result"
     KWIQ_FUNC_SRD_SEARCH   = 2003,   // "Open SRD search window"
@@ -333,6 +335,8 @@ public:
         RegisterTagItemType("SRD",         KWIQ_ITEM_SRD);
         RegisterTagItemType("Sector Indicator", KWIQ_ITEM_SECTOR);
         RegisterTagItemType("RDF state",   KWIQ_ITEM_RDF);
+        RegisterTagItemType("Vertical Speed Indicator", KWIQ_ITEM_VS_IND);
+        RegisterTagItemType("Vertical Speed",           KWIQ_ITEM_VS_RATE);
         RegisterTagItemFunction("Open event routes window", KWIQ_FUNC_EVENT_ROUTES);
         RegisterTagItemFunction("Explain FPC result",       KWIQ_FUNC_FPC_EXPLAIN);
         RegisterTagItemFunction("Open FPC menu",            KWIQ_FUNC_FPC_MENU);
@@ -510,6 +514,15 @@ public:
                               int ItemCode, int TagData, char sItemString[16],
                               int* pColorCode, COLORREF* pRGB, double* pFontSize) override try {
         using namespace kwiq;
+        // The vertical speed items always show something, even reduced or too old: -00 / - with no radar target
+        if (ItemCode == KWIQ_ITEM_VS_IND || ItemCode == KWIQ_ITEM_VS_RATE) {
+            EuroScopePlugIn::CRadarTarget rt = RadarTarget;
+            if (!rt.IsValid() && FlightPlan.IsValid()) rt = FlightPlan.GetCorrelatedRadarTarget();
+            int fpm = rt.IsValid() ? rt.GetVerticalSpeed() : 0;
+            std::string txt = ItemCode == KWIQ_ITEM_VS_IND ? kwiq::VsIndicator(fpm) : kwiq::VsRate(fpm);
+            strncpy_s(sItemString, 16, txt.c_str(), _TRUNCATE);
+            return;
+        }
         if (reduced_) return;                                // no tag items at all, VCH's included
         bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_LAST;
         if (ours && !enabled_) return;                       // plugin too old
