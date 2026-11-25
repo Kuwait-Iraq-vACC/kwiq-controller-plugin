@@ -1466,6 +1466,7 @@ private:
             if (manual) kwiq::log::Write("SQUAWK", { { "cs", a.callsign }, { "busy", "1" }, { "manual", "1" } });
             return false;                                           // automatic: the decision line says skip=busy
         }
+        sqAsked_.insert(a.callsign);
         kwiq::log::Write("SQUAWK", { { "cs", a.callsign }, { "request", "PUT" }, { "lookup", lookupFirst ? "1" : "0" },
                                      { "manual", manual ? "1" : "0" }, { "previous", a.squawk } });
         SqJob job;
@@ -1539,7 +1540,7 @@ private:
     void SquawkLogDecision(const kwiq::squawk::Aircraft& a, const kwiq::squawk::Stored* s, const kwiq::squawk::CodeList& codes,
                            kwiq::squawk::Action act, const char* skip) {
         using namespace kwiq::squawk;
-        if (a.callsign.empty()) return;
+        if (a.callsign.empty() || !LogDecision(std::strcmp(skip, "nofacts") != 0, kwiq::log::Verbose())) return;
         kwiq::log::Fields f = {
             { "cs", a.callsign }, { "decide", ActionName(act) }, { "code", a.squawk }, { "counts", HasCode(codes, a.squawk) ? "1" : "0" },
             { "tracked", a.trackedByMe ? "me" : a.tracked ? "other" : "none" }, { "byhand", s && s->byHand ? "1" : "0" },
@@ -1797,7 +1798,8 @@ public:
         std::string before = it->second.squawk, seen = fp.GetControllerAssignedData().GetSquawk();
         kwiq::squawk::CodeSeen(it->second, seen, codes ? *codes : none,
                                GetConnectionType() == EuroScopePlugIn::CONNECTION_TYPE_SWEATBOX);
-        if (seen != before)
+        if (seen != before && kwiq::squawk::LogSeen(fp.GetTrackingControllerIsMe(), sqAsked_.count(fp.GetCallsign()) > 0,
+                                                     kwiq::log::Verbose()))
             kwiq::log::Write("SQUAWK", { { "cs", fp.GetCallsign() }, { "seen", seen }, { "byhand", it->second.squawk == seen && it->second.byHand ? "1" : "0" },
                                          { "counts", codes && kwiq::squawk::HasCode(*codes, seen) ? "1" : "0" } });
     } catch (...) {}
@@ -2281,6 +2283,7 @@ private:
     std::unordered_set<std::string> sqBusy_;                        // main thread only: callsigns waiting for Core
     std::unordered_map<std::string, std::time_t> sqRetryAt_;        // main thread only: not before, after Core failed
     kwiq::log::Changes sqLogChanges_;                               // main thread only: squawk decisions already logged
+    std::unordered_set<std::string> sqAsked_;                       // main thread only: callsigns the plugin asked Core for
     kwiq::log::Changes fpcLog_;                                     // under mu_: FPC results already logged
     kwiq::log::Changes sectorLog_;                                  // main thread only: sector indicators already logged
     std::string sectorColoursLogged_;                               // under mu_: the sector colours last logged

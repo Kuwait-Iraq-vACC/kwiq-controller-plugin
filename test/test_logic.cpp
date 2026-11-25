@@ -1064,6 +1064,10 @@ int main() {
     // the squawk decision's name in the plugin's log
     CHECK(std::string(squawk::ActionName(squawk::Action::Tracked)) == "tracked" && std::string(squawk::ActionName(squawk::Action::None)) == "none");
     CHECK(std::string(squawk::ActionName(squawk::Action::Previous)) == "previous" && std::string(squawk::ActionName(squawk::Action::Assign)) == "assign");
+    // the plugin's log: no lines for aircraft the plugin can't look at, and codes seen only on aircraft that matter here
+    CHECK(squawk::LogDecision(true, false) && !squawk::LogDecision(false, false) && squawk::LogDecision(false, true));
+    CHECK(squawk::LogSeen(true, false, false) && squawk::LogSeen(false, true, false) && squawk::LogSeen(false, false, true));
+    CHECK(!squawk::LogSeen(false, false, false));                   // someone else's aircraft, elsewhere
     // ---- the plugin's own log (kwiq_log.hpp): line format, file names, pruning, safe URLs ----
     {
         using namespace kwiq::log;
