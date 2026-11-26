@@ -82,7 +82,7 @@ add_library(KWIQPluginCore SHARED
     src/plugin/rdf/rdf.cpp             # RDF and the TrackAudio bridge (KingfuChan/RDF)
     src/plugin/discord/discord.cpp     # DiscordEuroScope (Kirollos/DiscordEuroScope)
     src/plugin/push/push.cpp           # Core's push events (Laravel Reverb)
-    src/plugin/pegasus/pegasus.cpp     # the CPegasusES (P21) tag items and HSR
+    src/plugin/pegasus/pegasus.cpp     # the CPegasusES (P21) tag items
     src/plugin/vch/requestMenu.cpp     # VCH
     src/plugin/vch/usefulStuff.cpp     # VCH
 )

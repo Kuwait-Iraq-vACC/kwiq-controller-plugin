@@ -1,15 +1,16 @@
-// pegasus.cpp - the CPegasusES (P21) tag items, built into the KWIQ plugin, and the HSR item.
+// pegasus.cpp - the CPegasusES (P21) tag items, built into the KWIQ plugin.
 //
 // Rebuilt from CPegasusES 1.2 Public (P21Euroscope.dll, Hubert SO & Matt Z), the plugin written for Poland's
 // Pegasus_21 display that shipped in the OKAC package. No source was published, so this was reconstructed from
-// the DLL; see NOTICE.md. The items show what the original showed, including its quirks (pegasus_logic.hpp).
-// Changes: the IDs (pegasus.hpp), a flight plan track without a radar target is supported, the 16-character item
-// is never overrun, and the TEST item is left out. HSR is KWIQ's own.
+// the DLL; see NOTICE.md. The items show what the original showed, including its quirks (pegasus_logic.hpp),
+// except Heading in h, Speed in s and Rate in r, which show TopSky's formats (220°, N180 / M079, R20); their
+// left and right buttons are set to TopSky's functions in the tags (Open AHDG/ASP/ARC menu, ...).
+// Other changes: the IDs (pegasus.hpp), a flight plan track without a radar target is supported, the
+// 16-character item is never overrun, and the TEST item is left out.
 #include "pegasus/pegasus.hpp"
 #include <cstring>
 #include <string>
 #include "pegasus/pegasus_logic.hpp"
-#include "kwiq_log.hpp"
 
 using namespace EuroScopePlugIn;
 namespace peg = kwiq::pegasus;
@@ -20,12 +21,6 @@ const COLORREF kIdent      = RGB(0x00, 0x73, 0xE6);   // blue: squawking IDENT
 const COLORREF kCoordOther = RGB(0xE3, 0x6A, 0x29);   // orange: a coordination requested by another controller
 const COLORREF kCoordMe    = RGB(0x29, 0xCD, 0xE3);   // cyan: a coordination requested by you
 const COLORREF kWarning    = RGB(0xED, 0xD0, 0x00);   // yellow: SQ, FQ, RO, AW
-
-// TopSky 2.6 tag item and function IDs, from TopSky.dll's registrations (2.6b6), for StartTagFunction
-const char* const kTopSky = "TopSky plugin";
-const int kTsItemCopnCopx = 44, kTsItemAsp = 47, kTsItemAhdg = 54, kTsItemArc = 56;
-const int kTsOpenAhdg = 14, kTsOpenAsp = 15, kTsOpenArc = 16, kTsOpenWaypoint = 45;
-const int kTsAckAsp = 71, kTsAckAhdg = 133, kTsAckArc = 134;   // Ack RJC or FAIL ... coord / Clear value
 
 void Set(char sItemString[16], const std::string& s) {
     strncpy_s(sItemString, 16, s.c_str(), _TRUNCATE);
@@ -85,11 +80,8 @@ void KwiqPegasus::Register() {
     es_->RegisterTagItemType("Custom Comm Type (Not working)", PEG_ITEM_COMM_TYPE);
     es_->RegisterTagItemType("Custom G/S", PEG_ITEM_GS);
     es_->RegisterTagItemType("Custom A/C Type", PEG_ITEM_ACTYPE);
-    es_->RegisterTagItemType("HSR (Heading / Speed / Rate)", PEG_ITEM_HSR);
     es_->RegisterTagItemFunction("ACTYPE/ASSR Cycle", PEG_FUNC_TYPE_CYCLE);
     es_->RegisterTagItemFunction("GS/ROC Cycle", PEG_FUNC_GS_CYCLE);
-    es_->RegisterTagItemFunction("HSR - Open TopSky menu", PEG_FUNC_HSR_LEFT);
-    es_->RegisterTagItemFunction("HSR - TopSky ack / clear value", PEG_FUNC_HSR_RIGHT);
 }
 
 void KwiqPegasus::GetTagItem(CFlightPlan FlightPlan, CRadarTarget RadarTarget, int ItemCode, char sItemString[16],
@@ -107,18 +99,16 @@ void KwiqPegasus::GetTagItem(CFlightPlan FlightPlan, CRadarTarget RadarTarget, i
         std::string point;
         COLORREF colour = 0;
         if (PendingPoint(fp, point, colour)) { Set(sItemString, point); Colour(pColorCode, pRGB, colour); }
-        else if (cad.GetAssignedHeading() != 0) Set(sItemString, peg::Heading(cad.GetAssignedHeading()));
-        else if (!Str(cad.GetDirectToPointName()).empty()) Set(sItemString, Str(cad.GetDirectToPointName()));
-        else Set(sItemString, "h  ");
+        else Set(sItemString, peg::Heading(cad.GetAssignedHeading(), Str(cad.GetDirectToPointName())));
         Ident(fp, pColorCode, pRGB);
         return;
     }
     case PEG_ITEM_SPEED:
-        Set(sItemString, peg::SpeedItem(cad.GetAssignedSpeed(), cad.GetAssignedMach()));
+        Set(sItemString, peg::Speed(cad.GetAssignedSpeed(), cad.GetAssignedMach()));
         Ident(fp, pColorCode, pRGB);
         return;
     case PEG_ITEM_ROC:
-        Set(sItemString, peg::RateItem(cad.GetAssignedRate()));
+        Set(sItemString, peg::Rate(cad.GetAssignedRate()));
         Ident(fp, pColorCode, pRGB);
         return;
     case PEG_ITEM_RFL:
@@ -204,50 +194,12 @@ void KwiqPegasus::GetTagItem(CFlightPlan FlightPlan, CRadarTarget RadarTarget, i
         Set(sItemString, peg::GroundSpeed(RadarTarget.GetPosition().GetReportedGS()));
         Ident(fp, pColorCode, pRGB);
         return;
-    case PEG_ITEM_HSR: {
-        std::string hdg;
-        COLORREF colour = 0;
-        if (PendingPoint(fp, hdg, colour)) Colour(pColorCode, pRGB, colour);
-        else hdg = peg::HsrHeading(cad.GetAssignedHeading(), Str(cad.GetDirectToPointName()));
-        Set(sItemString, peg::HsrText(hdg, peg::HsrSpeed(cad.GetAssignedSpeed(), cad.GetAssignedMach()),
-                                      peg::HsrRate(cad.GetAssignedRate())));
-        Ident(fp, pColorCode, pRGB);
-        return;
-    }
     default:
         return;
     }
 }
 
-void KwiqPegasus::FunctionCall(int FunctionId, const char* sItemString, POINT Pt, RECT Area, CRadarScreen* radar) {
-    if (FunctionId == PEG_FUNC_TYPE_CYCLE) { showType_ = !showType_; return; }
-    if (FunctionId == PEG_FUNC_GS_CYCLE) { showGs_ = !showGs_; return; }
-    if (FunctionId != PEG_FUNC_HSR_LEFT && FunctionId != PEG_FUNC_HSR_RIGHT) return;
-    CFlightPlan fp = es_->FlightPlanSelectASEL();   // EuroScope selects the clicked aircraft first
-    if (!fp.IsValid()) return;
-    Hsr(fp, FunctionId == PEG_FUNC_HSR_LEFT, sItemString, Pt, Area, radar);
-}
-
-// HSR click: the field under the mouse decides which of TopSky's functions runs. TopSky's own menus, so its
-// tactical coordination (HOP, RTI/TIP, accept/refuse) works from them as from its AHDG/ASP/ARC items.
-void KwiqPegasus::Hsr(CFlightPlan& fp, bool left, const char* sItemString, POINT Pt, RECT Area, CRadarScreen* radar) {
-    std::string text = Str(sItemString), cs = Str(fp.GetCallsign());
-    size_t start = 0, len = 0;
-    int field = peg::HsrField(text, Pt.x - Area.left, Area.right - Area.left, &start, &len);
-    if (field < 0) return;
-    std::string point;
-    COLORREF colour = 0;
-    int item = 0, function = 0;
-    if (field == 0 && PendingPoint(fp, point, colour)) {
-        if (!left) return;
-        item = kTsItemCopnCopx; function = kTsOpenWaypoint;   // answers the COPN/COPX coordination
-    }
-    else if (field == 0) { item = kTsItemAhdg; function = left ? kTsOpenAhdg : kTsAckAhdg; }
-    else if (field == 1) { item = kTsItemAsp; function = left ? kTsOpenAsp : kTsAckAsp; }
-    else { item = kTsItemArc; function = left ? kTsOpenArc : kTsAckArc; }
-    kwiq::log::Write("HSR", { { "cs", cs }, { "field", std::to_string(field) }, { "button", left ? "left" : "right" },
-                              { "topsky", std::to_string(function) }, { "radar", radar ? "1" : "0" } });
-    if (!radar) return;   // StartTagFunction is a radar screen's: none open yet
-    std::string value = text.substr(start, len);
-    radar->StartTagFunction(cs.c_str(), kTopSky, item, value.c_str(), kTopSky, function, Pt, Area);
+void KwiqPegasus::FunctionCall(int FunctionId) {
+    if (FunctionId == PEG_FUNC_TYPE_CYCLE) showType_ = !showType_;
+    else if (FunctionId == PEG_FUNC_GS_CYCLE) showGs_ = !showGs_;
 }

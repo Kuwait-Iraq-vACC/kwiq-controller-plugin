@@ -22,7 +22,7 @@ This plugin is licensed **GPL-3.0-or-later** (see `LICENSE`). It combines these 
 | Mbed TLS (linked, from vcpkg, for IXWebSocket) | - | https://github.com/Mbed-TLS/mbedtls | Apache-2.0 |
 | IXWebSocket (linked, from vcpkg) | - | https://github.com/machinezone/IXWebSocket | BSD-3-Clause |
 | zlib (linked, from vcpkg, for IXWebSocket) | - | https://zlib.net (Jean-loup Gailly and Mark Adler) | zlib |
-| CPegasusES (P21) tag items | `src/plugin/pegasus/pegasus.cpp`, `src/plugin/pegasus/pegasus.hpp`, `src/plugin/pegasus/pegasus_logic.hpp` (except HSR) | Rebuilt from CPegasusES 1.2 Public, `P21Euroscope.dll` (Hubert SO & Matt Z). The DLL calls itself "Open Source" but no source or licence was published; see below | See below |
+| CPegasusES (P21) tag items | `src/plugin/pegasus/pegasus.cpp`, `src/plugin/pegasus/pegasus.hpp`, `src/plugin/pegasus/pegasus_logic.hpp` | Rebuilt from CPegasusES 1.2 Public, `P21Euroscope.dll` (Hubert SO & Matt Z). The DLL calls itself "Open Source" but no source or licence was published; see below | See below |
 | EuroScope SDK | `third_party/euroscope/` | EuroScope plugin SDK (copy shipped in the VCH repo) | EuroScope SDK terms |
 
 ## Changes made to VCH
@@ -75,7 +75,7 @@ Attribution kept in every case: VATCAN Slots-Plugin (https://github.com/VATSIMCa
 - Rebuilt from the compiled DLL, as no source was published. The items show what the original showed, quirks included (`pegasus_logic.hpp` marks them).
 - Not a plugin of its own: `CKWIQPlugin` registers its items and passes their calls on. Tag item IDs are 1100 + the original, function IDs 2200 + the original; the TEST item is left out.
 - A flight plan track without a radar target is supported (the original looked the flight plan up from the radar target only), and the 16-character item is never overrun (the original used `strcpy`). MFC is not used.
-- HSR (item 1127, functions 2212 and 2213) is KWIQ's own, not from CPegasusES.
+- Heading in h, Speed in s and Rate in r show TopSky's AHDG, ASP and ARC formats (`220°`, `N180` / `M079`, `R20`) instead of the original's (`090°`, `K18` / `M78`, `R20`).
 
 ## CPegasusES: permission
 The DLL names its authors (Hubert SO & Matt Z) and calls itself "Open Source", but gives no licence. As with the Slots-Plugin, get the authors' permission to include this rebuild in a GPL-3.0-or-later plugin, keep it in the vACC's records and add a copy under `docs/permissions/`, before a release with it is distributed.

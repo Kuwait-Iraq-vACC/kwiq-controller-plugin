@@ -39,7 +39,7 @@
 #include "rdf/rdf.hpp"           // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
 #include "discord/discord.hpp"   // DiscordEuroScope (Kirollos/DiscordEuroScope), built in
 #include "push/push.hpp"         // Core's push events (Laravel Reverb), as UKCP gets its own
-#include "pegasus/pegasus.hpp"   // the CPegasusES (P21) tag items and HSR, built in
+#include "pegasus/pegasus.hpp"   // the CPegasusES (P21) tag items, built in
 #include "ui/kwiq_ui.hpp"        // the windows: SRD Search, Event Routes, the API key setup box, Notifications
 #define KWIQ_NO_WINHTTP          // the plugin talks to Core with libcurl
 #include "kwiq_win.hpp"          // api-settings.json and the folders the loader uses
@@ -535,7 +535,7 @@ public:
         case KWIQ_FUNC_SQUAWK_MANUAL:  SquawkManual(sItemString ? kwiq::Trim(sItemString) : ""); return;
         }
         if (KwiqPegasus::IsFunction(FunctionId)) {
-            if (enabled_) pegasus_.FunctionCall(FunctionId, sItemString, Pt, Area, radars_.empty() ? nullptr : radars_.back());
+            if (enabled_) pegasus_.FunctionCall(FunctionId);
             return;
         }
         CVCHPlugin::OnFunctionCall(FunctionId, sItemString, Pt, Area);
@@ -2289,7 +2289,7 @@ private:
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     KwiqRdf rdf_{ this };                                           // RDF and the TrackAudio bridge
-    KwiqPegasus pegasus_{ this };                                   // the CPegasusES (P21) tag items and HSR
+    KwiqPegasus pegasus_{ this };                                   // the CPegasusES (P21) tag items
     KwiqDiscord discord_{ this };                                   // DiscordEuroScope
     std::atomic<bool> discordCoreOn_{ true };                       // discord.enabled in Core's config
     // QNH monitor and procedure notifications (#4)

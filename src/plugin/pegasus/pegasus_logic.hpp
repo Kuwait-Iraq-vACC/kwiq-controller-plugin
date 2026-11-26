@@ -1,8 +1,9 @@
-// pegasus_logic.hpp - the text of the Pegasus tag items, and the HSR item's click fields.
+// pegasus_logic.hpp - the text of the Pegasus tag items.
 //
 // Rebuilt from CPegasusES 1.2 Public (P21Euroscope.dll, Hubert SO & Matt Z), which shipped in the OKAC package;
 // see pegasus.cpp and NOTICE.md. Pure functions, no EuroScope or Windows, so the logic tests cover them.
-// The original's behaviour is kept, including its quirks (marked QUIRK), so the items look exactly as before.
+// The original's behaviour is kept, including its quirks (marked QUIRK), except Heading in h, Speed in s and
+// Rate in r, which show TopSky's formats (220°, N180 / M079, R20).
 #pragma once
 #include <cmath>
 #include <cstring>
@@ -41,23 +42,24 @@ inline std::string ClimbRate(int vs) {
     return std::string(roc > -10 ? "-0" : "") + std::to_string(-roc);
 }
 
-// Assigned heading (item 1): "090°"
-inline std::string Heading(int hdg) {
-    return std::string(hdg / 100 == 0 ? "0" : "") + std::to_string(hdg) + kGlyphDegree;
+// Heading in h (item 1): "220°", else the direct-to point, else "h  " (the original's placeholder).
+// A COPN/COPX coordination in progress is shown instead by pegasus.cpp.
+inline std::string Heading(int hdg, const std::string& directTo) {
+    if (hdg != 0) return Zero(hdg, 3) + kGlyphDegree;
+    if (!directTo.empty()) return directTo;
+    return "h  ";
 }
 
-// Assigned speed (item 2): "K25" (IAS / 10), "M78", or "s " with neither
-inline std::string SpeedItem(int ias, int mach) {
-    if (ias == 0 && mach == 0) return "s ";
-    if (ias > 0) return "K" + std::to_string(ias >= 10 ? ias / 10 : ias);
-    if (mach > 0) return "M" + std::to_string(mach);
-    return "";
+// Speed in s (item 2), as TopSky's ASP: "N180" (knots), "M079" (1/100 Mach), else "s " (the original's placeholder)
+inline std::string Speed(int ias, int mach) {
+    if (ias > 0) return "N" + Zero(ias, 3);
+    if (mach > 0) return "M" + Zero(mach, 3);
+    return "s ";
 }
 
-// Assigned rate (item 3): "R05", "R25", or "r"
-inline std::string RateItem(int rate) {
-    if (rate == 0) return "r";
-    return "R" + std::string(rate < 1000 ? "0" : "") + std::to_string(rate / 100);
+// Rate in r (item 3), as TopSky's ARC: "R20" (hundreds of ft/min), else "r"
+inline std::string Rate(int rate) {
+    return rate > 0 ? "R" + Zero(rate / 100, 2) : "r";
 }
 
 // RFL (item 4): thousands at 10000 ft and above (FL350 is "35"), hundreds below, "##" with none
@@ -123,58 +125,6 @@ inline std::string Xfl(int xfl, int cfl, int transAlt) {
     int h = xfl / 100;
     if (xfl > transAlt) return std::string(h < 100 ? "0" : "") + std::to_string(h);
     return "A" + std::to_string(h);
-}
-
-// ---- HSR (Heading / Speed / Rate), KWIQ's own item, in TopSky's field formats -------------------------------
-
-// Heading field: "220°", the direct-to point, or "h"
-inline std::string HsrHeading(int hdg, const std::string& directTo) {
-    if (hdg != 0) return Zero(hdg, 3) + kGlyphDegree;
-    if (!directTo.empty()) return directTo;
-    return "h";
-}
-
-// Speed field, as TopSky's ASP: "N180" (knots), "M079" (1/100 Mach), or "s"
-inline std::string HsrSpeed(int ias, int mach) {
-    if (ias > 0) return "N" + Zero(ias, 3);
-    if (mach > 0) return "M" + Zero(mach, 3);
-    return "s";
-}
-
-// Rate field, as TopSky's ARC: "R20" (hundreds of ft/min), or "r"
-inline std::string HsrRate(int rate) {
-    return rate > 0 ? "R" + Zero(rate / 100, 2) : "r";
-}
-
-// The three fields, padded so each stays in its column: "220° N180 R20", "h    M079 r"
-inline std::string HsrText(std::string hdg, std::string spd, const std::string& rate) {
-    if (hdg.size() < 4) hdg.append(4 - hdg.size(), ' ');
-    if (spd.size() < 4) spd.append(4 - spd.size(), ' ');
-    return hdg + " " + spd + " " + rate;
-}
-
-// Which field a click on the item hit: 0 heading, 1 speed, 2 rate, -1 if it can't be told.
-// x is the click from the item's left edge, width the item's width; tag fonts are monospaced, so the
-// position maps straight to a character. A click between two fields goes to the nearer one.
-// field/start/len (optional) get the field's text position.
-inline int HsrField(const std::string& text, int x, int width, size_t* start = nullptr, size_t* len = nullptr) {
-    size_t s[3] = {}, e[3] = {};
-    int n = 0;
-    for (size_t i = 0; i < text.size() && n < 3;) {
-        while (i < text.size() && text[i] == ' ') i++;
-        if (i >= text.size()) break;
-        s[n] = i;
-        while (i < text.size() && text[i] != ' ') i++;
-        e[n++] = i;
-    }
-    if (n < 3 || width <= 0) return -1;
-    double col = (double)x * (double)text.size() / (double)width;
-    int f = 2;
-    if (col < (double)(e[0] + s[1]) / 2.0) f = 0;
-    else if (col < (double)(e[1] + s[2]) / 2.0) f = 1;
-    if (start) *start = s[f];
-    if (len) *len = e[f] - s[f];
-    return f;
 }
 
 }  // namespace kwiq::pegasus
