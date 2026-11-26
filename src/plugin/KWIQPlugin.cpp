@@ -39,6 +39,7 @@
 #include "rdf/rdf.hpp"           // RDF and the TrackAudio bridge (KingfuChan/RDF), built in
 #include "discord/discord.hpp"   // DiscordEuroScope (Kirollos/DiscordEuroScope), built in
 #include "push/push.hpp"         // Core's push events (Laravel Reverb), as UKCP gets its own
+#include "pegasus/pegasus.hpp"   // the CPegasusES (P21) tag items, built in
 #include "ui/kwiq_ui.hpp"        // the windows: SRD Search, Event Routes, the API key setup box, Notifications
 #define KWIQ_NO_WINHTTP          // the plugin talks to Core with libcurl
 #include "kwiq_win.hpp"          // api-settings.json and the folders the loader uses
@@ -369,6 +370,7 @@ public:
         RegisterTagItemFunction("Open SRD search window",   KWIQ_FUNC_SRD_SEARCH);
         RegisterTagItemFunction("Open squawk assignment menu", KWIQ_FUNC_SQUAWK_MENU);
         RegisterTagItemFunction("Force squawk recycle",        KWIQ_FUNC_SQUAWK_ASSIGN);
+        pegasus_.Register();
         kwiq_ui::gOnSearch = &SrdSearchThunk;
         apiKey_ = apikey::Load();
         kwiq_net::SetCoreAuth(CORE_BASE "/", apiKey_, KWIQ_PLUGIN_VERSION);
@@ -532,6 +534,10 @@ public:
         case KWIQ_FUNC_SQUAWK_PICK:    SquawkPick(sItemString ? sItemString : "", Area); return;
         case KWIQ_FUNC_SQUAWK_MANUAL:  SquawkManual(sItemString ? kwiq::Trim(sItemString) : ""); return;
         }
+        if (KwiqPegasus::IsFunction(FunctionId)) {
+            if (enabled_) pegasus_.FunctionCall(FunctionId);
+            return;
+        }
         CVCHPlugin::OnFunctionCall(FunctionId, sItemString, Pt, Area);
     } catch (...) {}
 
@@ -558,7 +564,7 @@ public:
             return;
         }
         if (reduced_) return;                                // no tag items at all, VCH's included
-        bool ours = ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_LAST;
+        bool ours = (ItemCode >= KWIQ_ITEM_EVENT_ROUTE && ItemCode <= KWIQ_ITEM_LAST) || KwiqPegasus::IsItem(ItemCode);
         if (ours && !enabled_) return;                       // plugin too old
         // Core's texts and colours: a shared copy, not a fresh one for every tag item (ApplyConfig swaps it)
         std::shared_ptr<const UiCfg> uiNow;
@@ -605,6 +611,9 @@ public:
             } else {
                 strncpy_s(sItemString, 16, ac->slotTime.c_str(), _TRUNCATE);
             }
+        }
+        else if (KwiqPegasus::IsItem(ItemCode)) {
+            pegasus_.GetTagItem(FlightPlan, RadarTarget, ItemCode, sItemString, pColorCode, pRGB);
         }
         else if (ItemCode == KWIQ_ITEM_RDF) {
             if (FlightPlan.IsValid() && rdf_.Transmitting(FlightPlan.GetCallsign())) strcpy_s(sItemString, 16, "!");
@@ -2280,6 +2289,7 @@ private:
     std::string apiKey_;                                            // main thread only (the worker uses kwiq_net's copy)
     KeyLink keyLink_;
     KwiqRdf rdf_{ this };                                           // RDF and the TrackAudio bridge
+    KwiqPegasus pegasus_{ this };                                   // the CPegasusES (P21) tag items
     KwiqDiscord discord_{ this };                                   // DiscordEuroScope
     std::atomic<bool> discordCoreOn_{ true };                       // discord.enabled in Core's config
     // QNH monitor and procedure notifications (#4)

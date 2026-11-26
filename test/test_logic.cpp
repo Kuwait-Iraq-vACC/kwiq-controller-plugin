@@ -4,6 +4,7 @@
 #include "fpc/fpc_logic.hpp"
 #include "squawk/squawk_logic.hpp"
 #include "ownership/ownership_logic.hpp"
+#include "pegasus/pegasus_logic.hpp"
 #include "kwiq_log.hpp"
 #include <filesystem>
 #include <fstream>
@@ -1245,6 +1246,31 @@ int main() {
     CHECK(VsRate(0) == "-00" && VsRate(49) == "-00" && VsRate(-49) == "-00" && VsRate(50) == "+01" && VsRate(-50) == "-01");
     CHECK(VsRate(12000) == "+99" && VsRate(-12000) == "-99" && VsRate(INT_MIN) == "-99" && VsRate(INT_MAX) == "+99");
     CHECK(VsIndicator(800) == "+" && VsIndicator(-800) == "-" && VsIndicator(0) == "-" && VsIndicator(30) == "-");
+    // ---- the CPegasusES (P21) items (pegasus_logic.hpp): as the original DLL shows them; H/S/R in TopSky's formats ----
+    {
+        namespace pg = kwiq::pegasus;
+        CHECK(pg::Zero(5, 3) == "005" && pg::Zero(1234, 3) == "1234" && pg::Zero(-5, 3) == "-5");
+        CHECK(pg::GroundSpeed(250) == "250" && pg::GroundSpeed(95) == "095" && pg::GroundSpeed(5) == "05" && pg::GroundSpeed(0) == "00");
+        CHECK(pg::ClimbRate(0) == "-00" && pg::ClimbRate(499) == "-00" && pg::ClimbRate(-499) == "-00");
+        CHECK(pg::ClimbRate(1000) == "+05" && pg::ClimbRate(2400) == "+12" && pg::ClimbRate(-1000) == "-05" && pg::ClimbRate(-3000) == "15");
+        // Heading in h, Speed in s, Rate in r: TopSky's AHDG/ASP/ARC formats, the original's placeholders
+        CHECK(pg::Heading(220, "") == "220\xB0" && pg::Heading(90, "") == "090\xB0" && pg::Heading(5, "") == "005\xB0");
+        CHECK(pg::Heading(0, "LONOS") == "LONOS" && pg::Heading(0, "") == "h  " && pg::Heading(360, "LONOS") == "360\xB0");
+        CHECK(pg::Speed(180, 0) == "N180" && pg::Speed(80, 0) == "N080" && pg::Speed(250, 78) == "N250");
+        CHECK(pg::Speed(0, 79) == "M079" && pg::Speed(0, 82) == "M082" && pg::Speed(0, 0) == "s ");
+        CHECK(pg::Rate(2000) == "R20" && pg::Rate(500) == "R05" && pg::Rate(2500) == "R25" && pg::Rate(0) == "r");
+        CHECK(pg::Rfl2(0) == "##" && pg::Rfl2(35000) == "35" && pg::Rfl2(9000) == "90");
+        CHECK(pg::DestCopx("EPWA", "LONOS") == "EPWA" && pg::DestCopx("OKKK", "LONOS") == "LONOS" && pg::DestCopx("OKKK", "") == "OKKK");
+        CHECK(pg::FqWarning(2, true) == 1 && pg::FqWarning(1, true) == 2 && pg::FqWarning(0, true) == 2 && pg::FqWarning(3, true) == 0);
+        CHECK(pg::FqWarning(-1, true) == 0 && pg::FqWarning(1, false) == 0);
+        CHECK(pg::Afl(4500, 4600, 4000) == " 046" && pg::Afl(3000, 3100, 4000) == "A030" && pg::Afl(500, 500, 4000) == "A005");
+        CHECK(pg::Afl(12000, 11800, 13000) == "A120" && pg::Afl(35020, 34980, 4000) == " 350");
+        CHECK(pg::Cfl(2, 0, 0, 0, 0) == "\xA9" && pg::Cfl(1, 0, 0, 0, 0) == "\xAE");
+        CHECK(pg::Cfl(0, 8000, 4000, 0, 3000) == "080" && pg::Cfl(0, 35000, 4000, 0, 34900).empty() && pg::Cfl(0, 3000, 4000, 2900, 0).empty());
+        CHECK(pg::CflStatic(0, 35000) == "350" && pg::CflStatic(5, 8000) == "080" && pg::CflStatic(-1, 8000).empty());
+        CHECK(pg::Xfl(0, 0, 4000).empty() && pg::Xfl(24000, 24000, 4000).empty() && pg::Xfl(24000, 30000, 4000) == "240");
+        CHECK(pg::Xfl(8000, 30000, 4000) == "080" && pg::Xfl(3000, 30000, 4000) == "A30");
+    }
 
     {   // TopSky's colours (the vertical speed items)
         auto c = ParseTopSkyColours("Setup_COOPANS=1\r\nColor_Assumed=225,225,179\r\nColor_Concerned=110,153,110\n"

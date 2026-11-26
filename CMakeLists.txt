@@ -47,6 +47,7 @@ set(KWIQ_OWN_SOURCES
     src/plugin/rdf/rdf.cpp
     src/plugin/discord/discord.cpp
     src/plugin/push/push.cpp
+    src/plugin/pegasus/pegasus.cpp
     src/loader/loader.cpp
     src/updater/updater.cpp
 )
@@ -81,6 +82,7 @@ add_library(KWIQPluginCore SHARED
     src/plugin/rdf/rdf.cpp             # RDF and the TrackAudio bridge (KingfuChan/RDF)
     src/plugin/discord/discord.cpp     # DiscordEuroScope (Kirollos/DiscordEuroScope)
     src/plugin/push/push.cpp           # Core's push events (Laravel Reverb)
+    src/plugin/pegasus/pegasus.cpp     # the CPegasusES (P21) tag items
     src/plugin/vch/requestMenu.cpp     # VCH
     src/plugin/vch/usefulStuff.cpp     # VCH
 )
@@ -133,7 +135,7 @@ set_target_properties(KWIQPlugin PROPERTIES PREFIX "" OUTPUT_NAME "KWIQPlugin")
 # Each KWIQ header must compile on its own (#41), e.g. windows.h before EuroScopePlugIn.h: one generated .cpp
 # per header, built at /W4 with the plugin's definitions. Nothing is linked from it.
 # Paths as they are included: src/utils's headers by name, src/plugin's from src/plugin
-set(KWIQ_HEADERS kwiq_logic.hpp kwiq_log.hpp kwiq_win.hpp version.h ownership/ownership_logic.hpp ui/kwiq_ui.hpp keylink/keylink.hpp slots/VatsimAPI.h rdf/rdf.hpp discord/discord.hpp push/push.hpp)
+set(KWIQ_HEADERS kwiq_logic.hpp kwiq_log.hpp kwiq_win.hpp version.h ownership/ownership_logic.hpp ui/kwiq_ui.hpp keylink/keylink.hpp slots/VatsimAPI.h rdf/rdf.hpp discord/discord.hpp push/push.hpp pegasus/pegasus.hpp pegasus/pegasus_logic.hpp)
 set(KWIQ_HEADER_CHECKS "")
 foreach(h IN LISTS KWIQ_HEADERS)
     string(MAKE_C_IDENTIFIER "${h}" n)
